@@ -71,18 +71,10 @@ type UserInfo struct {
 }
 
 func (s *Service) Register(req RegisterReq) (int64, error) {
-	_, err := s.repo.FindByPhone(req.Phone)
-	if err == nil {
-		return 0, ErrUserExists
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
-	}
-	hash, err := HashPassword(req.Password)
-	if err != nil {
-		return 0, fmt.Errorf("hash password: %w", err)
-	}
-	return s.repo.CreateUser(req.Phone, "", hash)
+	// TODO: 接入短信验证码服务商后替换此校验
+	// 所需信息: 阿里云短信/腾讯云短信的 AccessKey + 签名+模板ID
+	// 当前所有短信验证码均拒绝，防止跳过验证直接注册
+	return 0, fmt.Errorf("短信验证码服务未接入: 请配置短信服务商(AccessKey+签名+模板ID)")
 }
 
 func (s *Service) Login(req LoginReq) (*TokenPair, *UserInfo, error) {

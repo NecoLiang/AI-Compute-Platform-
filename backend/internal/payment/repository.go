@@ -132,26 +132,36 @@ func EnsureYeepayOnboardTable(db *sqlx.DB) {
 	)`)
 }
 
-// Mock Yeepay API (replace with real YeePay SDK in production)
-type YeepayClient struct{}
+// ===== 易宝支付客户端 =====
+// TODO: 接入真实易宝 SDK 后替换本实现
+// 所需信息:
+//   1. 易宝商户号 (merchant_no)
+//   2. RSA2048 私钥 (用于签名，必须存储在 KMS/密钥管理服务中，不入库不入前端)
+//   3. 易宝开放平台 API 地址 (沙箱: https://open.yeepay.com/sandbox, 生产: https://open.yeepay.com)
+//   4. 分账规则编号 (需易宝商务开通合单支付+分账产品后在商户后台配置)
+// 接入文档: https://open.yeepay.com/docs/apis/ptssfk/
+
+type YeepayClient struct {
+	// merchantNo string    // TODO: 从配置加载
+	// privateKey *rsa.PrivateKey // TODO: 从 KMS 加载
+}
 
 func NewYeepayClient() *YeepayClient { return &YeepayClient{} }
 
 func (y *YeepayClient) CreatePayment(orderNo string, amount int64, channel string) (payURL string, txID string, err error) {
-	txID = fmt.Sprintf("YP%s%d", orderNo, time.Now().UnixNano())
-	payURL = fmt.Sprintf("https://yeepay-sandbox/pay?tx=%s&amount=%d", txID, amount)
-	return payURL, txID, nil
+	return "", "", ErrYeepayNotConfigured
 }
 
 func (y *YeepayClient) VerifyCallback(data map[string]string) bool {
-	// Verify RSA signature in production
-	return true
+	// TODO: 接入后验证易宝回调 RSA 签名
+	return false
 }
 
 func (y *YeepayClient) CreateSplit(orderNo string, settlements []SplitItem) error {
-	// Call Yeepay split API in production
-	return nil
+	return ErrYeepayNotConfigured
 }
+
+var ErrYeepayNotConfigured = fmt.Errorf("易宝支付未接入: 需配置 merchant_no + RSA私钥 + API地址")
 
 type SplitItem struct {
 	PayeeType string

@@ -84,9 +84,10 @@ func (s *Service) Refund(orderNo string) error {
 
 // T-032: Daily reconciliation
 func (s *Service) Reconcile(date string) (*ReconcileResult, error) {
-	platformTotal, _ := s.repo.GetDailyTotal(date)
-	// In production, fetch yeepay daily total via API
-	return &ReconcileResult{PlatformTotal: platformTotal, YeepayTotal: platformTotal, Diff: 0}, nil
+	platformTotal, err := s.repo.GetDailyTotal(date)
+	if err != nil { return nil, err }
+	// TODO: 接入易宝后，通过易宝 API 拉取当日流水进行比对
+	return &ReconcileResult{PlatformTotal: platformTotal, YeepayTotal: 0, Diff: platformTotal}, fmt.Errorf("对账未完成: 需接入易宝 API 拉取流水")
 }
 
 // T-026: Supplier Yeepay onboard

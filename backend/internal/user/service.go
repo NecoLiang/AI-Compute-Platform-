@@ -45,6 +45,9 @@ func (s *Service) SubmitPersonalKYC(userID int64, req PersonalKYCReq) error {
 	if existing != nil && existing.Status == "pending" {
 		return ErrAlreadySubmitted
 	}
+	// TODO: 接入实名核验服务商后，在此处调用三要素/人脸核验接口
+	// 所需信息: 阿里云实人认证 AccessKey / 腾讯云慧眼 License
+	// 核验通过 → status='verified', 不通过 → status='rejected' + rejected_reason
 	return s.repo.CreatePersonalKYC(userID, req.RealName, req.IDCard)
 }
 

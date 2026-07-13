@@ -173,7 +173,10 @@ func (h *Handler) Deliver(c *gin.Context) {
 		CredentialNote  string `json:"credential_note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
-	_ = req // In production, encrypt the full credential JSON
+	// TODO: 接入 AES-256 加密后存储交付凭证
+	// 所需信息: 加密密钥（32字节，存储在 KMS 中，不入库不硬编码）
+	// credentialJSON := json.Marshal(req)
+	// encrypted := aes256.Encrypt(credentialJSON, key)
 	if err := h.svc.Deliver(idOrNo, req.IpAddress); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
 	response.Success(c, nil)
 }
