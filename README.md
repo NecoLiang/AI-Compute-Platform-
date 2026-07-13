@@ -51,6 +51,18 @@
 | [16-架构设计](docs/16-架构设计.md) | Go单体/模块边界/分层/DB ER/Redis/时序/部署 | 开发 |
 | [17-API接口设计](docs/17-API接口设计.md) | 全部接口契约(请求/响应/鉴权/错误码)，分10模块 | 前端+后端 |
 
+## 前端联调文档
+
+| 模块 | 文档 | API 数 |
+|------|------|:--:|
+| 认证 | [docs/api/auth-api.md](docs/api/auth-api.md) | 5 |
+| 算力撮合 | [docs/api/compute-api.md](docs/api/compute-api.md) | 15 |
+| 支付分账 | [docs/api/payment-api.md](docs/api/payment-api.md) | 6 |
+| 居间金融 | [docs/api/intermediary-api.md](docs/api/intermediary-api.md) | 6 |
+| 运营后台 | [docs/api/admin-api.md](docs/api/admin-api.md) | 14 |
+| 区块链 | [docs/api/blockchain-api.md](docs/api/blockchain-api.md) | 2 |
+| **导入工具** | [OpenAPI Spec](backend/api/swagger.yaml) · [Postman Collection](backend/api/postman_collection.json) | — |
+
 ---
 
 ## 研发文档
