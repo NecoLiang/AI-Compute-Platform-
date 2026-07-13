@@ -1,0 +1,341 @@
+{
+  "info": {
+    "name": "算力撮合交易平台 API v1",
+    "description": "完整 API 集合。Base URL: http://localhost:8080/api/v1\n鉴权：登录后设置 collection 变量 {{token}}\n金额单位：分(fen)，如 3500 = ¥35.00",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080/api/v1" },
+    { "key": "token", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "认证 Auth",
+      "item": [
+        {
+          "name": "注册",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800138000\",\n  \"sms_code\": \"123456\",\n  \"password\": \"Abc12345!\",\n  \"agree_tos\": true\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] }
+          }
+        },
+        {
+          "name": "登录",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"account\": \"13800138000\",\n  \"password\": \"Abc12345!\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var data = JSON.parse(responseBody);",
+                  "if (data.code === 0) {",
+                  "  pm.collectionVariables.set('token', data.data.access_token);",
+                  "  console.log('Token saved: ' + data.data.access_token.substring(0, 20) + '...');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "刷新 Token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] }
+          }
+        },
+        {
+          "name": "登出",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/auth/logout", "host": ["{{baseUrl}}"], "path": ["auth", "logout"] }
+          }
+        },
+        {
+          "name": "当前用户信息",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/auth/me", "host": ["{{baseUrl}}"], "path": ["auth", "me"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "用户 User",
+      "item": [
+        {
+          "name": "个人实名认证",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"real_name\": \"张三\",\n  \"id_card\": \"110101199001011234\"\n}" },
+            "url": { "raw": "{{baseUrl}}/user/kyc/personal", "host": ["{{baseUrl}}"], "path": ["user", "kyc", "personal"] }
+          }
+        },
+        {
+          "name": "企业认证",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"enterprise_name\": \"某科技有限公司\",\n  \"uscc\": \"91110108MA00000000\",\n  \"license_url\": \"/uploads/license.jpg\",\n  \"legal_person\": \"张三\"\n}" },
+            "url": { "raw": "{{baseUrl}}/user/kyc/enterprise", "host": ["{{baseUrl}}"], "path": ["user", "kyc", "enterprise"] }
+          }
+        },
+        {
+          "name": "KYC 状态",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/user/kyc/status", "host": ["{{baseUrl}}"], "path": ["user", "kyc", "status"] }
+          }
+        },
+        {
+          "name": "申请角色",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"role\": \"supplier\"\n}" },
+            "url": { "raw": "{{baseUrl}}/user/roles", "host": ["{{baseUrl}}"], "path": ["user", "roles"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "算力撮合 Compute",
+      "item": [
+        {
+          "name": "商品列表（公开）",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/products?gpu_model=H100&region=北京&pricing_mode=hourly&sort=price_asc&page=1&page_size=20",
+              "host": ["{{baseUrl}}"], "path": ["products"],
+              "query": [
+                { "key": "gpu_model", "value": "H100" },
+                { "key": "region", "value": "北京" },
+                { "key": "pricing_mode", "value": "hourly" },
+                { "key": "sort", "value": "price_asc" },
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "商品详情",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/products/1", "host": ["{{baseUrl}}"], "path": ["products", "1"] }
+          }
+        },
+        {
+          "name": "上架商品（供给方）",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"gpu_model\": \"NVIDIA H100 SXM 80GB\",\n  \"card_count\": 64,\n  \"cpu_spec\": \"2× Intel Xeon 8480+\",\n  \"memory_spec\": \"2TB DDR5\",\n  \"storage_spec\": \"30TB NVMe\",\n  \"bandwidth_spec\": \"10Gbps\",\n  \"delivery_mode\": \"bare_metal\",\n  \"pricing_mode\": \"hourly\",\n  \"unit_price\": 3500,\n  \"available_hours\": \"全天 24h\",\n  \"stock\": 64,\n  \"min_order\": 1,\n  \"min_duration\": 1,\n  \"region\": \"北京\",\n  \"compliance_agreed\": true\n}" },
+            "url": { "raw": "{{baseUrl}}/products", "host": ["{{baseUrl}}"], "path": ["products"] }
+          }
+        },
+        {
+          "name": "下单",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"product_id\": 1,\n  \"quantity\": 8,\n  \"duration\": 720,\n  \"compliance_agreed\": true\n}" },
+            "url": { "raw": "{{baseUrl}}/orders", "host": ["{{baseUrl}}"], "path": ["orders"] }
+          }
+        },
+        {
+          "name": "我的订单",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders?status=active&page=1&page_size=20", "host": ["{{baseUrl}}"], "path": ["orders"], "query": [{ "key": "status", "value": "active" }] }
+          }
+        },
+        {
+          "name": "订单详情",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/orders/ORD20260713001", "host": ["{{baseUrl}}"], "path": ["orders", "ORD20260713001"] }
+          }
+        },
+        {
+          "name": "回填交付凭证（供给方）",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"ip_address\": \"10.0.1.128\",\n  \"ssh_port\": 22,\n  \"username\": \"root\",\n  \"credential_note\": \"密码已通过站内信发送\"\n}" },
+            "url": { "raw": "{{baseUrl}}/orders/ORD20260713001/deliver", "host": ["{{baseUrl}}"], "path": ["orders", "ORD20260713001", "deliver"] }
+          }
+        },
+        {
+          "name": "确认签收（买家）",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/orders/ORD20260713001/confirm", "host": ["{{baseUrl}}"], "path": ["orders", "ORD20260713001", "confirm"] }
+          }
+        },
+        {
+          "name": "续费",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"duration\": 720\n}" },
+            "url": { "raw": "{{baseUrl}}/orders/ORD20260713001/renew", "host": ["{{baseUrl}}"], "path": ["orders", "ORD20260713001", "renew"] }
+          }
+        },
+        {
+          "name": "申请退款",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/orders/ORD20260713001/refund", "host": ["{{baseUrl}}"], "path": ["orders", "ORD20260713001", "refund"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "支付分账 Payment",
+      "item": [
+        {
+          "name": "发起支付",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"order_no\": \"ORD20260713001\",\n  \"channel\": \"wechat\"\n}" },
+            "url": { "raw": "{{baseUrl}}/payment/pay", "host": ["{{baseUrl}}"], "path": ["payment", "pay"] }
+          }
+        },
+        {
+          "name": "支付状态",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/payment/status/ORD20260713001", "host": ["{{baseUrl}}"], "path": ["payment", "status", "ORD20260713001"] }
+          }
+        },
+        {
+          "name": "供给方进件",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/payment/supplier/onboard", "host": ["{{baseUrl}}"], "path": ["payment", "supplier", "onboard"] }
+          }
+        },
+        {
+          "name": "分账记录",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/payment/settlements?order_no=ORD20260713001", "host": ["{{baseUrl}}"], "path": ["payment", "settlements"], "query": [{ "key": "order_no", "value": "ORD20260713001" }] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "居间金融 Intermediary",
+      "item": [
+        {
+          "name": "创建设备居间线索",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"type\": \"equipment\",\n  \"contact_name\": \"李四\",\n  \"contact_phone\": \"13900001111\",\n  \"description\": \"需要 20台 H100 服务器\",\n  \"amount_range\": \"5000000\",\n  \"term\": \"12个月\"\n}" },
+            "url": { "raw": "{{baseUrl}}/leads", "host": ["{{baseUrl}}"], "path": ["leads"] }
+          }
+        },
+        {
+          "name": "融资租赁留资",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"type\": \"finance_lease\",\n  \"contact_name\": \"王五\",\n  \"contact_phone\": \"13800002222\",\n  \"description\": \"GPU服务器融资租赁\",\n  \"amount_range\": \"10000000\",\n  \"term\": \"3年\"\n}" },
+            "url": { "raw": "{{baseUrl}}/finance/lease/contact", "host": ["{{baseUrl}}"], "path": ["finance", "lease", "contact"] }
+          }
+        },
+        {
+          "name": "成交登记",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"deal_amount\": 480000000,\n  \"commission_rate\": 3.0\n}" },
+            "url": { "raw": "{{baseUrl}}/leads/1/close", "host": ["{{baseUrl}}"], "path": ["leads", "1", "close"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "运营管理 Admin",
+      "item": [
+        {
+          "name": "资质审核列表",
+          "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/admin/audits/qualifications", "host": ["{{baseUrl}}"], "path": ["admin", "audits", "qualifications"] } }
+        },
+        {
+          "name": "通过资质审核",
+          "request": { "method": "POST", "url": { "raw": "{{baseUrl}}/admin/audits/qualifications/1/approve", "host": ["{{baseUrl}}"], "path": ["admin", "audits", "qualifications", "1", "approve"] } }
+        },
+        {
+          "name": "驳回资质审核",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"证照已过期\"\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/audits/qualifications/1/reject", "host": ["{{baseUrl}}"], "path": ["admin", "audits", "qualifications", "1", "reject"] }
+          }
+        },
+        {
+          "name": "全平台订单",
+          "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/admin/orders", "host": ["{{baseUrl}}"], "path": ["admin", "orders"] } }
+        },
+        {
+          "name": "风控告警列表",
+          "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/admin/risk/alerts", "host": ["{{baseUrl}}"], "path": ["admin", "risk", "alerts"] } }
+        },
+        {
+          "name": "冻结处置",
+          "request": { "method": "POST", "url": { "raw": "{{baseUrl}}/admin/risk/alerts/1/freeze", "host": ["{{baseUrl}}"], "path": ["admin", "risk", "alerts", "1", "freeze"] } }
+        },
+        {
+          "name": "审计日志",
+          "request": { "method": "GET", "url": { "raw": "{{baseUrl}}/admin/audit-logs", "host": ["{{baseUrl}}"], "path": ["admin", "audit-logs"] } }
+        },
+        {
+          "name": "系统配置（合规开关）",
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"key\": \"trading_enabled\",\n  \"value\": \"true\"\n}" },
+            "url": { "raw": "{{baseUrl}}/admin/config", "host": ["{{baseUrl}}"], "path": ["admin", "config"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "区块链存证 Blockchain",
+      "item": [
+        {
+          "name": "链上存证验证",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/blockchain/verify?type=order&id=1", "host": ["{{baseUrl}}"], "path": ["blockchain", "verify"], "query": [{ "key": "type", "value": "order" }, { "key": "id", "value": "1" }] }
+          }
+        },
+        {
+          "name": "健康检查",
+          "request": { "method": "GET", "url": { "raw": "http://localhost:8080/health", "host": ["http://localhost:8080"], "path": ["health"] } }
+        }
+      ]
+    }
+  ]
+}

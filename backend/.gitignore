@@ -1,0 +1,4 @@
+# AI Compute Platform
+.claude/
+*.DS_Store
+backend/tmp/

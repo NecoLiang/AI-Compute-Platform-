@@ -1,0 +1,81 @@
+package payment
+
+import (
+	"tokenfactory/pkg/errcode"
+	"tokenfactory/pkg/response"
+	"github.com/gin-gonic/gin"
+)
+
+type Handler struct {
+	svc *Service
+}
+
+func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+
+func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
+	r.POST("/payment/pay", h.Pay)
+	r.GET("/payment/status/:order_no", h.PaymentStatus)
+}
+
+func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
+	r.POST("/payment/supplier/onboard", h.StartOnboard)
+	r.GET("/payment/supplier/onboard/status", h.OnboardStatus)
+	r.GET("/payment/settlements", h.Settlements)
+}
+
+func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
+	r.GET("/admin/payment/reconcile", h.Reconcile)
+	r.GET("/admin/payment/list", h.ListPayments)
+}
+
+func (h *Handler) RegisterCallbackRoutes(r *gin.RouterGroup) {
+	r.POST("/payment/callback", h.Callback)
+}
+
+func (h *Handler) Pay(c *gin.Context) {
+	var req PayReq
+	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	resp, err := h.svc.Pay(req, 0) // total amount fetched from order in full implementation
+	if err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	response.Success(c, resp)
+}
+
+func (h *Handler) PaymentStatus(c *gin.Context) {
+	payments, _ := h.svc.GetOrderPayments(c.Param("order_no"))
+	response.Success(c, payments)
+}
+
+func (h *Handler) Callback(c *gin.Context) {
+	var req CallbackReq
+	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := h.svc.HandleCallback(req); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	response.Success(c, nil)
+}
+
+func (h *Handler) StartOnboard(c *gin.Context) {
+	if err := h.svc.StartOnboard(c.GetInt64("user_id")); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	response.Success(c, nil)
+}
+
+func (h *Handler) OnboardStatus(c *gin.Context) {
+	status, _ := h.svc.GetOnboardStatus(c.GetInt64("user_id"))
+	response.Success(c, gin.H{"status": status})
+}
+
+func (h *Handler) Settlements(c *gin.Context) {
+	orderNo := c.Query("order_no")
+	settlements, _ := h.svc.GetOrderSettlements(orderNo)
+	response.Success(c, settlements)
+}
+
+func (h *Handler) Reconcile(c *gin.Context) {
+	date := c.DefaultQuery("date", "")
+	result, _ := h.svc.Reconcile(date)
+	response.Success(c, result)
+}
+
+func (h *Handler) ListPayments(c *gin.Context) {
+	date := c.DefaultQuery("date", "")
+	list, _ := h.svc.ListPaymentsByDate(date)
+	response.Success(c, list)
+}

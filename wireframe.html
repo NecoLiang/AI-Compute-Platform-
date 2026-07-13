@@ -1,0 +1,1294 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>算力撮合交易平台 - 交互线框稿 v1.0</title>
+<style>
+/* ===== Reset & Base ===== */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#1a1a2e;background:#f0f2f5;line-height:1.6}
+a{color:#2563eb;text-decoration:none}
+ul{list-style:none}
+table{border-collapse:collapse;width:100%}
+input,select,textarea,button{font-family:inherit;font-size:inherit}
+
+/* ===== Top Demo Bar ===== */
+.demo-bar{background:#1a1a2e;color:#fff;padding:8px 24px;display:flex;align-items:center;justify-content:space-between;font-size:13px;position:sticky;top:0;z-index:1000}
+.demo-bar .demo-label{font-weight:700;color:#fbbf24;margin-right:16px}
+.demo-bar select{padding:4px 8px;border-radius:4px;border:1px solid #555;background:#2d2d44;color:#fff;cursor:pointer}
+.demo-bar .role-tag{background:#2563eb;padding:2px 10px;border-radius:10px;font-size:12px;margin-left:8px}
+
+/* ===== Top Nav ===== */
+.top-nav{background:#fff;border-bottom:1px solid #e5e7eb;padding:0 24px;display:flex;align-items:center;height:56px;gap:32px}
+.top-nav .logo{font-size:18px;font-weight:700;color:#1a1a2e;white-space:nowrap}
+.top-nav .logo span{color:#94a3b8;font-weight:400;font-size:12px;margin-left:4px}
+.top-nav .nav-links{display:flex;gap:24px;flex:1}
+.top-nav .nav-links a{color:#64748b;font-size:14px;padding:4px 0;border-bottom:2px solid transparent;transition:all .2s}
+.top-nav .nav-links a:hover,.top-nav .nav-links a.active{color:#1a1a2e;border-bottom-color:#2563eb}
+.top-nav .nav-actions{display:flex;gap:12px;align-items:center;white-space:nowrap}
+.top-nav .nav-actions .btn{font-size:13px}
+
+/* ===== Buttons ===== */
+.btn{padding:8px 20px;border-radius:6px;border:none;cursor:pointer;font-weight:500;display:inline-flex;align-items:center;gap:6px;transition:all .2s;white-space:nowrap}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-primary:hover{background:#1d4ed8}
+.btn-secondary{background:#fff;color:#1a1a2e;border:1px solid #d1d5db}
+.btn-secondary:hover{background:#f9fafb}
+.btn-outline{background:transparent;color:#2563eb;border:1px solid #2563eb}
+.btn-outline:hover{background:#eff6ff}
+.btn-danger{background:#ef4444;color:#fff}
+.btn-sm{padding:4px 12px;font-size:13px}
+.btn-lg{padding:12px 32px;font-size:16px}
+.btn-block{width:100%;justify-content:center}
+
+/* ===== Layout ===== */
+.page-wrapper{max-width:1280px;margin:0 auto;padding:24px}
+.page-wrapper.wide{max-width:1440px}
+.section{margin-bottom:32px}
+.section-title{font-size:20px;font-weight:700;margin-bottom:16px;color:#1a1a2e}
+.section-subtitle{font-size:14px;color:#64748b;margin-bottom:16px}
+
+/* ===== Cards ===== */
+.card{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.06);padding:24px}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.card-title{font-size:16px;font-weight:600}
+
+/* ===== Grid ===== */
+.grid{display:grid;gap:16px}
+.grid-2{grid-template-columns:repeat(2,1fr)}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+.grid-4{grid-template-columns:repeat(4,1fr)}
+.grid-5{grid-template-columns:repeat(5,1fr)}
+
+/* ===== Stats Card ===== */
+.stat-card{background:#fff;border-radius:10px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.stat-card .stat-label{font-size:13px;color:#64748b;margin-bottom:4px}
+.stat-card .stat-value{font-size:28px;font-weight:700;color:#1a1a2e}
+.stat-card .stat-change{font-size:12px;margin-top:4px}
+.stat-card .stat-change.up{color:#16a34a}
+.stat-card .stat-change.down{color:#ef4444}
+
+/* ===== Tags & Badges ===== */
+.tag{display:inline-block;padding:2px 10px;border-radius:10px;font-size:12px;font-weight:500}
+.tag-blue{background:#dbeafe;color:#1e40af}
+.tag-green{background:#dcfce7;color:#166534}
+.tag-orange{background:#fff7ed;color:#c2410c}
+.tag-red{background:#fef2f2;color:#991b1b}
+.tag-gray{background:#f1f5f9;color:#475569}
+.tag-chain{background:#f0fdf4;color:#166534;border:1px solid #86efac}
+.badge{display:inline-flex;align-items:center;gap:4px;font-size:12px}
+.badge-chain{color:#16a34a;font-weight:600}
+
+/* ===== Tables ===== */
+.table-wrap{overflow-x:auto}
+table th{text-align:left;padding:10px 12px;font-size:13px;color:#64748b;font-weight:500;border-bottom:1px solid #e5e7eb;white-space:nowrap}
+table td{padding:12px;font-size:14px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+table tr:hover td{background:#f8fafc}
+
+/* ===== Forms ===== */
+.form-group{margin-bottom:16px}
+.form-label{display:block;font-size:14px;font-weight:500;margin-bottom:6px;color:#374151}
+.form-label .required{color:#ef4444;margin-left:2px}
+.form-input,.form-select,.form-textarea{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;transition:border-color .2s}
+.form-input:focus,.form-select:focus,.form-textarea:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.form-textarea{min-height:80px;resize:vertical}
+.form-hint{font-size:12px;color:#94a3b8;margin-top:4px}
+.form-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}
+
+/* ===== Annotation (designer notes) ===== */
+.annotation{border:2px dashed #94a3b8;border-radius:8px;padding:12px 16px;margin:12px 0;background:#f8fafc;font-size:13px;color:#64748b}
+.annotation strong{color:#475569}
+
+/* ===== Hero (Landing) ===== */
+.hero{background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%);color:#fff;padding:64px 24px;text-align:center;border-radius:0 0 24px 24px}
+.hero h1{font-size:36px;font-weight:800;margin-bottom:12px}
+.hero p{font-size:16px;color:#94a3b8;margin-bottom:24px;max-width:600px;margin-left:auto;margin-right:auto}
+.hero .search-box{display:flex;max-width:560px;margin:0 auto;gap:0}
+.hero .search-box input{flex:1;padding:14px 20px;border:none;border-radius:8px 0 0 8px;font-size:15px}
+.hero .search-box button{padding:14px 32px;background:#2563eb;color:#fff;border:none;border-radius:0 8px 8px 0;font-weight:600;cursor:pointer}
+.hero .hero-cta{margin-top:20px;display:flex;gap:12px;justify-content:center}
+
+/* ===== Data Strip ===== */
+.data-strip{display:flex;justify-content:center;gap:48px;padding:24px;background:#fff;margin:-24px 24px 0;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.06);position:relative}
+.data-strip .strip-item{text-align:center}
+.data-strip .strip-value{font-size:24px;font-weight:700;color:#1a1a2e}
+.data-strip .strip-label{font-size:13px;color:#64748b;margin-top:2px}
+
+/* ===== Business Cards ===== */
+.biz-cards{display:grid;grid-template-columns:repeat(5,1fr);gap:16px}
+.biz-card{background:#fff;border-radius:10px;padding:24px;text-align:center;box-shadow:0 1px 3px rgba(0,0,0,.06);transition:all .2s;cursor:pointer;border:1px solid transparent}
+.biz-card:hover{border-color:#2563eb;transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.1)}
+.biz-card .biz-icon{font-size:36px;margin-bottom:12px}
+.biz-card .biz-title{font-size:16px;font-weight:600;margin-bottom:6px}
+.biz-card .biz-desc{font-size:13px;color:#64748b;line-height:1.5}
+
+/* ===== Product Card (算力市场) ===== */
+.product-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:16px}
+.product-card{background:#fff;border-radius:10px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.06);border:1px solid #f1f5f9;transition:all .2s;cursor:pointer}
+.product-card:hover{border-color:#2563eb;box-shadow:0 4px 12px rgba(0,0,0,.08)}
+.product-card .prod-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.product-card .prod-gpu{font-size:18px;font-weight:700}
+.product-card .prod-gpu small{font-size:13px;font-weight:400;color:#64748b;margin-left:6px}
+.product-card .prod-specs{display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:13px;color:#475569;margin-bottom:12px}
+.product-card .prod-footer{display:flex;justify-content:space-between;align-items:center;padding-top:12px;border-top:1px solid #f1f5f9}
+.product-card .prod-price{font-size:22px;font-weight:700;color:#1a1a2e}
+.product-card .prod-price small{font-size:13px;font-weight:400;color:#64748b}
+
+/* ===== Timeline ===== */
+.timeline{position:relative;padding-left:24px}
+.timeline::before{content:'';position:absolute;left:8px;top:4px;bottom:4px;width:2px;background:#e5e7eb}
+.timeline-item{position:relative;margin-bottom:20px;padding-left:8px}
+.timeline-item::before{content:'';position:absolute;left:-20px;top:4px;width:12px;height:12px;border-radius:50%;background:#2563eb;border:2px solid #fff;box-shadow:0 0 0 2px #2563eb}
+.timeline-item.done::before{background:#16a34a;box-shadow:0 0 0 2px #16a34a}
+.timeline-item.current::before{background:#fbbf24;box-shadow:0 0 0 2px #fbbf24;animation:pulse 2s infinite}
+.timeline-item .tl-time{font-size:12px;color:#94a3b8}
+.timeline-item .tl-label{font-size:14px;font-weight:500}
+.timeline-item .tl-chain{font-size:12px;color:#16a34a;margin-top:2px}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 2px #fbbf24}50%{box-shadow:0 0 0 6px rgba(251,191,36,.3)}}
+
+/* ===== Filter Bar ===== */
+.filter-bar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.filter-bar .filter-item{flex:1;min-width:140px}
+.filter-bar .filter-item select,.filter-bar .filter-item input{width:100%;padding:8px 12px;border:1px solid #d1d5db;border-radius:6px;font-size:14px}
+
+/* ===== Tabs ===== */
+.tabs{display:flex;gap:0;border-bottom:2px solid #e5e7eb;margin-bottom:20px}
+.tab{padding:10px 20px;font-size:14px;color:#64748b;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .2s}
+.tab:hover{color:#1a1a2e}
+.tab.active{color:#2563eb;border-bottom-color:#2563eb;font-weight:600}
+
+/* ===== Layout: Sidebar + Main ===== */
+.workspace{display:grid;grid-template-columns:220px 1fr;gap:24px;min-height:calc(100vh - 140px)}
+.sidebar{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.sidebar .sidebar-title{font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;padding:0 8px}
+.sidebar a{display:block;padding:8px 12px;border-radius:6px;font-size:14px;color:#475569;margin-bottom:2px;transition:all .15s}
+.sidebar a:hover,.sidebar a.active{background:#eff6ff;color:#2563eb}
+.main-content{min-width:0}
+
+/* ===== Compliance Box ===== */
+.compliance-box{background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px;font-size:14px;color:#991b1b;margin-bottom:16px}
+.compliance-box strong{display:block;margin-bottom:4px}
+
+/* ===== Footer ===== */
+.footer{background:#1a1a2e;color:#94a3b8;padding:32px 24px;font-size:13px;text-align:center}
+.footer .footer-links{display:flex;gap:16px;justify-content:center;margin-bottom:12px;flex-wrap:wrap}
+.footer .footer-links a{color:#94a3b8}
+.footer .footer-compliance{margin-top:8px;font-size:12px;color:#64748b}
+
+/* ===== Page visibility ===== */
+.page{display:none}
+.page.active{display:block}
+
+/* ===== Responsive helpers ===== */
+@media(max-width:1024px){
+  .biz-cards{grid-template-columns:repeat(3,1fr)}
+  .workspace{grid-template-columns:1fr}
+  .sidebar{display:none}
+}
+@media(max-width:768px){
+  .grid-4,.grid-3{grid-template-columns:repeat(2,1fr)}
+  .biz-cards{grid-template-columns:1fr}
+  .product-grid{grid-template-columns:1fr}
+  .data-strip{flex-wrap:wrap;gap:16px}
+  .top-nav{gap:12px;font-size:13px}
+  .hero h1{font-size:24px}
+}
+</style>
+</head>
+<body>
+
+<!-- ===== DEMO BAR ===== -->
+<div class="demo-bar">
+  <div>
+    <span class="demo-label">📐 交互线框稿</span>
+    <span style="color:#94a3b8">| 设计师请使用下方导航切换页面，感受信息层级与业务逻辑。灰色线框 = 布局骨架，蓝色 = 可交互/CTA，虚线框 = 设计备注。</span>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span style="font-size:12px;color:#94a3b8">模拟角色:</span>
+    <select id="roleSwitcher" onchange="switchRole(this.value)">
+      <option value="visitor">👤 访客（未登录）</option>
+      <option value="buyer">🧑‍💻 算力买家</option>
+      <option value="supplier">🏭 机房供给方</option>
+      <option value="operator">🛡️ 运营后台</option>
+    </select>
+  </div>
+</div>
+
+<!-- ===== TOP NAV ===== -->
+<nav class="top-nav" id="topNav">
+  <div class="logo">[Platform]<span>线框稿 v1.0</span></div>
+  <div class="nav-links">
+    <a href="#" onclick="navigate('market')" class="active">算力市场</a>
+    <a href="#" onclick="navigate('token')">Token 工厂</a>
+    <a href="#" onclick="navigate('equipment')">设备居间</a>
+    <a href="#" onclick="navigate('construction')">机电施工</a>
+    <a href="#" onclick="navigate('finance')">融资租赁</a>
+  </div>
+  <div class="nav-actions" id="navActions">
+    <button class="btn btn-outline btn-sm" onclick="navigate('login')">登录</button>
+    <button class="btn btn-primary btn-sm" onclick="navigate('register')">注册</button>
+  </div>
+</nav>
+
+<!-- ===== PAGE SWITCHER (for designer) ===== -->
+<div style="background:#f8fafc;border-bottom:1px solid #e5e7eb;padding:8px 24px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+  <span style="font-size:12px;color:#94a3b8;margin-right:8px">📄 跳转页面:</span>
+  <button class="btn btn-sm btn-secondary" onclick="navigate('landing')">🏠 Landing</button>
+  <button class="btn btn-sm btn-secondary" onclick="navigate('market')">🔍 算力市场</button>
+  <button class="btn btn-sm btn-secondary" onclick="navigate('product-detail')">📋 商品详情</button>
+  <button class="btn btn-sm btn-secondary" onclick="navigate('order-confirm')">💳 确认下单</button>
+  <span style="color:#d1d5db">|</span>
+  <button class="btn btn-sm btn-outline" onclick="navigate('buyer-dashboard')">🧑‍💻 买家工作台</button>
+  <button class="btn btn-sm btn-outline" onclick="navigate('buyer-order')">📦 买家订单详情</button>
+  <span style="color:#d1d5db">|</span>
+  <button class="btn btn-sm btn-outline" onclick="navigate('supplier-dashboard')">🏭 供给方工作台</button>
+  <button class="btn btn-sm btn-outline" onclick="navigate('supplier-publish')">📝 发布算力商品</button>
+  <span style="color:#d1d5db">|</span>
+  <button class="btn btn-sm btn-outline" onclick="navigate('token-factory')">🤖 Token 工厂</button>
+  <button class="btn btn-sm btn-outline" onclick="navigate('finance-page')">💰 融资租赁</button>
+  <span style="color:#d1d5db">|</span>
+  <button class="btn btn-sm btn-outline" onclick="navigate('admin-audit')">🛡️ 运营审核</button>
+  <button class="btn btn-sm btn-outline" onclick="navigate('admin-risk')">⚠️ 风控工作台</button>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: LANDING                                                                     -->
+<!-- ================================================================================= -->
+<div class="page active" id="page-landing">
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>全球算力 · 一站撮合</h1>
+    <p>合规机房挂牌、实时比价、在线交易、区块链信用存证——让算力像股票一样透明流通。</p>
+    <div class="search-box">
+      <input type="text" placeholder="搜索 GPU 型号，如 H100 / 昇腾910B / A100 ...">
+      <button>搜索算力</button>
+    </div>
+    <div class="hero-cta">
+      <button class="btn btn-primary btn-lg" onclick="navigate('market')">进入算力市场 →</button>
+      <button class="btn btn-outline btn-lg" style="background:rgba(255,255,255,.1);color:#fff;border-color:rgba(255,255,255,.3)" onclick="navigate('register')">成为供给方</button>
+    </div>
+  </div>
+
+  <!-- Data Strip -->
+  <div class="page-wrapper" style="margin-top:-24px">
+    <div class="data-strip">
+      <div class="strip-item"><div class="strip-value">328</div><div class="strip-label">已入驻合规机房</div></div>
+      <div class="strip-item"><div class="strip-value">1,250+</div><div class="strip-label">在售算力 P 数</div></div>
+      <div class="strip-item"><div class="strip-value">15,820</div><div class="strip-label">累计成交订单</div></div>
+      <div class="strip-item"><div class="strip-value">⛓ 100%</div><div class="strip-label">信用记录链上存证</div></div>
+    </div>
+
+    <!-- Business Cards -->
+    <div class="section" style="margin-top:48px">
+      <div class="section-title" style="text-align:center">五大业务板块</div>
+      <div class="biz-cards">
+        <div class="biz-card" onclick="navigate('market')">
+          <div class="biz-icon">⚡</div>
+          <div class="biz-title">算力现货撮合</div>
+          <div class="biz-desc">分时/包月租赁<br>实时报价、线上成交</div>
+        </div>
+        <div class="biz-card" onclick="navigate('token-factory')">
+          <div class="biz-icon">🤖</div>
+          <div class="biz-title">AI Token 工厂</div>
+          <div class="biz-desc">开源大模型部署<br>Token 代销/包销</div>
+        </div>
+        <div class="biz-card" onclick="navigate('equipment')">
+          <div class="biz-icon">🖥️</div>
+          <div class="biz-title">设备整机包销</div>
+          <div class="biz-desc">服务器/GPU 采购<br>居间撮合服务</div>
+        </div>
+        <div class="biz-card" onclick="navigate('construction')">
+          <div class="biz-icon">🔧</div>
+          <div class="biz-title">机电施工总包</div>
+          <div class="biz-desc">机房机电/制冷/机柜<br>施工项目居间</div>
+        </div>
+        <div class="biz-card" onclick="navigate('finance-page')">
+          <div class="biz-icon">💳</div>
+          <div class="biz-title">融资租赁</div>
+          <div class="biz-desc">设备分期/融资租赁<br>持牌资方对接</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Trust Highlight -->
+    <div class="section" style="margin-top:48px">
+      <div class="card" style="text-align:center;padding:48px 24px;border:2px solid #86efac;background:linear-gradient(to bottom,#f0fdf4,#fff)">
+        <div style="font-size:48px;margin-bottom:12px">⛓️</div>
+        <div class="section-title">信用基础设施 · 基于国家级区块链 BSN</div>
+        <div style="font-size:15px;color:#64748b;max-width:700px;margin:0 auto 24px;line-height:1.8">
+          机房履约率、交付时效、SLA 达成记录、违规处置——全部 <strong style="color:#166534">hash 上链存证，不可篡改</strong>。<br>
+          每一笔订单的关键节点生成链上凭证，<strong style="color:#166534">第三方可独立验证</strong>，不是平台一家说了算。
+        </div>
+        <div style="display:flex;gap:24px;justify-content:center">
+          <div style="text-align:center">
+            <div style="font-size:24px;font-weight:700;color:#16a34a">⛓ 链上可查</div>
+            <div style="font-size:12px;color:#64748b;margin-top:4px">机房信用不可篡改</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:24px;font-weight:700;color:#16a34a">🔏 三方签名</div>
+            <div style="font-size:12px;color:#64748b;margin-top:4px">数据写入前多方确认</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:24px;font-weight:700;color:#16a34a">🛡️ 违规必留痕</div>
+            <div style="font-size:12px;color:#64748b;margin-top:4px">作恶成本永久化</div>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:24px;font-weight:700;color:#16a34a">✅ 第三方可验</div>
+            <div style="font-size:12px;color:#64748b;margin-top:4px">不依赖平台自说自话</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="annotation">
+      <strong>📐 设计备注</strong>：Landing 页核心是"3秒让用户知道这是什么"。Hero 搜索框、数据条、五大板块卡片、区块链信任区——四个部分从上到下的信息递进。Hero 下方的数据条是浮起的白色卡片，形成层次。区块链区用浅绿渐变底+绿色边框，和主蓝调形成差异——突出"信任"是差异化卖点。
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div class="footer">
+    <div class="footer-links">
+      <a href="#">关于我们</a><a href="#">合作伙伴</a><a href="#">帮助中心</a><a href="#">用户协议</a><a href="#">隐私政策</a><a href="#">联系我们</a>
+    </div>
+    <div class="footer-compliance">
+      ICP 备案号：待申请 · EDI 许可证：待申请 · 等保三级：待认证 · 区块链信息服务备案：待申请 · 算法备案：待申请
+    </div>
+    <div style="margin-top:4px;font-size:12px;color:#64748b">© 2026 [Platform]. All rights reserved.</div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 算力市场                                                                      -->
+<!-- ================================================================================= -->
+<div class="page" id="page-market">
+  <div class="page-wrapper wide">
+    <div class="section-title">算力市场</div>
+    <div class="section-subtitle">合规机房挂牌 · 实时比价 · 线上成交</div>
+
+    <!-- Filters -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="filter-bar">
+        <div class="filter-item"><select><option>GPU 型号：全部</option><option>NVIDIA H100</option><option>NVIDIA H200</option><option>NVIDIA A100</option><option>华为昇腾910B</option><option>华为昇腾910C</option></select></div>
+        <div class="filter-item"><select><option>地域：全部</option><option>北京</option><option>上海</option><option>深圳</option><option>杭州</option><option>成都</option></select></div>
+        <div class="filter-item"><select><option>计费模式：全部</option><option>分时租赁</option><option>包月</option><option>包周</option></select></div>
+        <div class="filter-item"><input type="text" placeholder="价格区间，如 ¥20-50/卡·时"></div>
+        <div><button class="btn btn-primary btn-sm">筛选</button></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;font-size:13px;color:#64748b">
+        <span>排序：</span>
+        <a href="#" style="color:#2563eb;font-weight:600">价格 ↑</a><span>|</span><a href="#">价格 ↓</a><span>|</span><a href="#">算力规模</a><span>|</span><a href="#">⛓ 信用分</a><span>|</span><a href="#">最新上架</a>
+        <span style="margin-left:auto">共 47 个商品</span>
+      </div>
+    </div>
+
+    <!-- Product Grid -->
+    <div class="product-grid">
+      <!-- Product 1 -->
+      <div class="product-card" onclick="navigate('product-detail')">
+        <div class="prod-header">
+          <div>
+            <div class="prod-gpu">NVIDIA H100 <small>SXM 80GB</small></div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px">总算力 <strong>8P</strong>（FP16）· 8 卡</div>
+          </div>
+          <div><span class="tag tag-green">⭐ 持证 IDC</span></div>
+        </div>
+        <div class="prod-specs">
+          <div>CPU: 2×Intel 8480+</div><div>内存: 2TB DDR5</div>
+          <div>存储: 30TB NVMe</div><div>带宽: 10Gbps</div>
+          <div>地域: 北京</div><div>交付: 裸金属</div>
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-bottom:4px">可售时段: 全天 · 余量: <strong style="color:#16a34a">32 卡</strong></div>
+        <div class="prod-footer">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:13px;color:#475569">中联数据 · 北京</span>
+            <span class="tag tag-chain">⛓ 信用 98%</span>
+          </div>
+          <div class="prod-price">¥35<small>/卡·时</small></div>
+        </div>
+      </div>
+
+      <!-- Product 2 -->
+      <div class="product-card" onclick="navigate('product-detail')">
+        <div class="prod-header">
+          <div>
+            <div class="prod-gpu">华为昇腾 910B <small>64GB HBM2e</small></div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px">总算力 <strong>7.2P</strong>（FP16）· 24 卡</div>
+          </div>
+          <div><span class="tag tag-blue">大型智算 IDC</span></div>
+        </div>
+        <div class="prod-specs">
+          <div>CPU: 4×Kunpeng 920</div><div>内存: 1TB DDR4</div>
+          <div>存储: 15TB NVMe</div><div>带宽: 25Gbps</div>
+          <div>地域: 深圳</div><div>交付: 容器</div>
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-bottom:4px">可售时段: 22:00-08:00（夜间）· 余量: <strong style="color:#fbbf24">12 卡</strong></div>
+        <div class="prod-footer">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:13px;color:#475569">华为云 · 深圳</span>
+            <span class="tag tag-chain">⛓ 信用 95%</span>
+          </div>
+          <div class="prod-price">¥25<small>/卡·时</small></div>
+        </div>
+      </div>
+
+      <!-- Product 3 -->
+      <div class="product-card">
+        <div class="prod-header">
+          <div>
+            <div class="prod-gpu">NVIDIA A100 <small>SXM 80GB</small></div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px">总算力 <strong>2.5P</strong>（FP16）· 8 卡</div>
+          </div>
+          <div><span class="tag tag-green">⭐ 持证 IDC</span></div>
+        </div>
+        <div class="prod-specs">
+          <div>CPU: 2×AMD EPYC 7742</div><div>内存: 1TB DDR4</div>
+          <div>存储: 8TB NVMe</div><div>带宽: 10Gbps</div>
+          <div>地域: 上海</div><div>交付: 裸金属</div>
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-bottom:4px">可售时段: 全天 · 包月 · 余量: <strong style="color:#16a34a">16 卡</strong></div>
+        <div class="prod-footer">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:13px;color:#475569">万国数据 · 上海</span>
+            <span class="tag tag-chain">⛓ 信用 99%</span>
+          </div>
+          <div class="prod-price">¥28,000<small>/卡·月</small></div>
+        </div>
+      </div>
+
+      <!-- Product 4: Self-operated -->
+      <div class="product-card">
+        <div class="prod-header">
+          <div>
+            <div style="margin-bottom:4px"><span class="tag tag-blue">🏠 平台自营</span> <span class="tag tag-orange">🔥 限时特价</span></div>
+            <div class="prod-gpu">NVIDIA H100 <small>SXM 80GB</small></div>
+            <div style="font-size:13px;color:#64748b;margin-top:2px">总算力 <strong>4P</strong>（FP16）· 4 卡</div>
+          </div>
+        </div>
+        <div class="prod-specs">
+          <div>CPU: 2×Intel 8480+</div><div>内存: 1TB DDR5</div>
+          <div>存储: 15TB NVMe</div><div>带宽: 10Gbps</div>
+          <div>地域: 杭州</div><div>交付: 虚机</div>
+        </div>
+        <div style="font-size:12px;color:#64748b;margin-bottom:4px">可售时段: 22:00-06:00 · 余量: <strong style="color:#ef4444">仅剩 4 卡</strong></div>
+        <div class="prod-footer">
+          <div style="display:flex;align-items:center;gap:8px">
+            <span style="font-size:13px;color:#475569">平台集采 · 杭州</span>
+            <span class="tag tag-chain">⛓ 平台自营</span>
+          </div>
+          <div class="prod-price" style="color:#ef4444">¥28<small>/卡·时</small></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="annotation" style="margin-top:16px">
+      <strong>📐 设计备注</strong>：算力市场是核心页面——卡片信息密度高但要有呼吸感。关键信息：GPU型号、总算力P数、单价、地域、余量、供给方+信用徽章。筛选栏置顶固定。平台自营/限时特价用标签区分。信用徽章 ⛓ 是差异化元素，点击可弹出链上查验 panel。
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 商品详情 + 下单                                                                -->
+<!-- ================================================================================= -->
+<div class="page" id="page-product-detail">
+  <div class="page-wrapper">
+    <!-- Title -->
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+            <span class="tag tag-green">⭐ 持证 IDC</span>
+            <span class="tag tag-chain" style="cursor:pointer">⛓ 信用分 98% · 链上可查 →</span>
+          </div>
+          <h2 style="font-size:24px">NVIDIA H100 SXM 80GB · 8卡整机</h2>
+          <div style="font-size:15px;color:#64748b;margin-top:4px">总算力 <strong>8P</strong>（FP16稠密） · 北京 · 裸金属交付 · 中联数据</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 360px;gap:16px">
+      <!-- Specs -->
+      <div>
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title">规格参数</div>
+          <table>
+            <tr><td style="color:#64748b;width:100px">GPU</td><td>8× NVIDIA H100 SXM 80GB</td><td style="color:#64748b;width:100px">内存</td><td>2TB DDR5 ECC</td></tr>
+            <tr><td style="color:#64748b">CPU</td><td>2× Intel Xeon 8480+ (56C)</td><td style="color:#64748b">存储</td><td>30TB NVMe SSD</td></tr>
+            <tr><td style="color:#64748b">网络</td><td>10Gbps 公网 + 400Gbps IB</td><td style="color:#64748b">GPU 互联</td><td>NVLink 900GB/s</td></tr>
+            <tr><td style="color:#64748b">交付形态</td><td>裸金属服务器</td><td style="color:#64748b">地域</td><td>北京 · 亦庄</td></tr>
+            <tr><td style="color:#64748b">可售时段</td><td>全天 24h</td><td style="color:#64748b">最短租期</td><td>1 小时</td></tr>
+          </table>
+        </div>
+
+        <!-- Supplier Info -->
+        <div class="card">
+          <div class="card-title">供给方信息</div>
+          <div style="display:flex;gap:16px;align-items:center;margin-bottom:16px">
+            <div style="width:48px;height:48px;background:#dbeafe;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:20px">🏭</div>
+            <div>
+              <div style="font-weight:600">中联数据 · 北京亦庄智算中心</div>
+              <div style="font-size:13px;color:#64748b">⭐ 持证IDC · 入驻 2 年 · 历史成交 3,280 单</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;font-size:14px">
+            <div style="text-align:center;padding:12px;background:#f8fafc;border-radius:8px">
+              <div style="font-size:24px;font-weight:700;color:#16a34a">99.2%</div>
+              <div style="font-size:12px;color:#64748b">履约率 ⛓</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:#f8fafc;border-radius:8px">
+              <div style="font-size:24px;font-weight:700;color:#16a34a">99.8%</div>
+              <div style="font-size:12px;color:#64748b">SLA 可用率 ⛓</div>
+            </div>
+            <div style="text-align:center;padding:12px;background:#f8fafc;border-radius:8px">
+              <div style="font-size:24px;font-weight:700;color:#16a34a">0</div>
+              <div style="font-size:12px;color:#64748b">违规记录 ⛓</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Order Panel -->
+      <div>
+        <div class="card" style="position:sticky;top:80px">
+          <div class="card-title">下单</div>
+          <div style="font-size:28px;font-weight:700;margin-bottom:4px">¥35<span style="font-size:16px;font-weight:400;color:#64748b">/卡·时</span></div>
+          <div style="font-size:13px;color:#64748b;margin-bottom:16px">平台服务费包含在内</div>
+
+          <div class="form-group">
+            <label class="form-label">计费模式</label>
+            <select class="form-select"><option>分时租赁</option><option>包月 ¥25,200/卡·月</option></select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">GPU 卡数 <span class="required">*</span></label>
+            <select class="form-select"><option>8 卡</option><option>4 卡</option><option>16 卡</option></select>
+            <div class="form-hint">可用余量：32 卡</div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">租期 <span class="required">*</span></label>
+            <select class="form-select"><option>1 小时</option><option>24 小时</option><option>7 天</option><option>30 天</option></select>
+          </div>
+
+          <div style="background:#f8fafc;border-radius:8px;padding:16px;margin-bottom:16px">
+            <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:8px">
+              <span>商品金额 (8卡 × 1时 × ¥35)</span><span>¥280.00</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:8px">
+              <span>平台服务费 (5%)</span><span>¥14.00</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:18px;font-weight:700;padding-top:8px;border-top:1px solid #e5e7eb">
+              <span>合计</span><span>¥294.00</span>
+            </div>
+          </div>
+
+          <div class="form-group" style="font-size:13px;margin-bottom:12px">
+            <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+              <input type="checkbox" style="margin-top:3px">
+              <span>我承诺本算力<strong>不用于虚拟货币挖矿</strong>、不用于违法违规用途。了解算力合规使用规范。</span>
+            </label>
+          </div>
+
+          <button class="btn btn-primary btn-lg btn-block" onclick="navigate('order-confirm')">立即下单</button>
+          <div style="font-size:12px;color:#94a3b8;text-align:center;margin-top:8px">支付由易宝支付提供安全服务</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="annotation" style="margin-top:16px">
+      <strong>📐 设计备注</strong>：商品详情页左侧=信息，右侧=下单面板（sticky 固定）。下单区实时试算总价。合规承诺勾选是上线时必须的元素（挖矿红线）。信用数据（履约率/SLA/违规）均带 ⛓ 标记表示链上可查。右侧下单面板建议 sticky 定位，滚动时始终可见。
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 确认下单                                                                       -->
+<!-- ================================================================================= -->
+<div class="page" id="page-order-confirm">
+  <div class="page-wrapper" style="max-width:720px">
+    <div class="card">
+      <div class="card-title" style="font-size:20px;margin-bottom:20px">确认订单</div>
+
+      <div style="background:#f8fafc;border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="font-weight:600;margin-bottom:8px">NVIDIA H100 SXM 80GB · 8卡整机</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:14px">
+          <div style="color:#64748b">供给方</div><div>中联数据 · 北京</div>
+          <div style="color:#64748b">计费模式</div><div>分时租赁</div>
+          <div style="color:#64748b">数量</div><div>8 卡</div>
+          <div style="color:#64748b">租期</div><div>1 小时</div>
+        </div>
+      </div>
+
+      <div style="background:#f8fafc;border-radius:8px;padding:16px;margin-bottom:16px">
+        <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:6px"><span>商品金额</span><span>¥280.00</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:14px;margin-bottom:6px"><span>平台服务费 (5%)</span><span>¥14.00</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:18px;font-weight:700;padding-top:8px;border-top:1px solid #e5e7eb"><span>合计</span><span>¥294.00</span></div>
+      </div>
+
+      <div class="form-group" style="font-size:13px;margin-bottom:16px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+          <input type="checkbox" checked style="margin-top:3px">
+          <span>已阅读并同意《算力服务协议》，承诺不将本算力用于虚拟货币挖矿。</span>
+        </label>
+      </div>
+
+      <button class="btn btn-primary btn-lg btn-block">确认并支付 ¥294.00</button>
+      <div style="font-size:12px;color:#94a3b8;text-align:center;margin-top:12px;display:flex;align-items:center;justify-content:center;gap:8px">
+        <span>🔒 安全支付</span><span>由易宝支付提供</span><span>微信</span><span>支付宝</span><span>银行卡</span>
+      </div>
+
+      <div class="annotation" style="margin-top:16px">
+        <strong>📐 设计备注</strong>：下单确认页信息要精炼——商品摘要+费用明细+合规勾选+支付按钮。支付方式图标展示（实际支付跳易宝收银台）。这里仅做确认页示意，实际支付流程走易宝。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 买家工作台                                                                     -->
+<!-- ================================================================================= -->
+<div class="page" id="page-buyer-dashboard">
+  <div class="page-wrapper wide">
+    <div class="workspace">
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-title">买家工作台</div>
+        <a href="#" class="active">📊 工作台首页</a>
+        <a href="#">📦 我的订单</a>
+        <a href="#">🤖 我的 Token</a>
+        <a href="#">💳 账单中心</a>
+        <a href="#">🧾 发票管理</a>
+        <a href="#">🔧 工单售后</a>
+        <a href="#">👤 个人/企业中心</a>
+        <a href="#">🔔 消息中心</a>
+      </div>
+
+      <!-- Main Content -->
+      <div class="main-content">
+        <div class="section-title">工作台</div>
+
+        <!-- Stats -->
+        <div class="grid grid-4" style="margin-bottom:24px">
+          <div class="stat-card"><div class="stat-label">进行中订单</div><div class="stat-value">3</div><div class="stat-change up">2 笔待确认签收</div></div>
+          <div class="stat-card"><div class="stat-label">本月消费</div><div class="stat-value">¥12,580</div><div class="stat-change up">较上月 +23%</div></div>
+          <div class="stat-card"><div class="stat-label">Token 余额</div><div class="stat-value">850K</div><div class="stat-change down">约剩余 12 天</div></div>
+          <div class="stat-card"><div class="stat-label">待处理事项</div><div class="stat-value">2</div><div class="stat-change down">1 笔待支付 · 1 笔待确认</div></div>
+        </div>
+
+        <!-- Recent Orders -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header"><div class="card-title">最近订单</div><a href="#" style="font-size:14px">查看全部 →</a></div>
+          <table>
+            <thead><tr><th>订单号</th><th>商品</th><th>金额</th><th>状态</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr>
+                <td style="font-family:monospace">#ORD20260711001</td>
+                <td>H100 · 8卡 · 包月</td><td>¥201,600</td>
+                <td><span class="tag tag-green">履约中</span></td><td>07-11 14:30</td>
+                <td><button class="btn btn-sm btn-outline" onclick="navigate('buyer-order')">详情</button></td>
+              </tr>
+              <tr>
+                <td style="font-family:monospace">#ORD20260710002</td>
+                <td>A100 · 4卡 · 分时</td><td>¥480</td>
+                <td><span class="tag tag-orange">待确认签收</span></td><td>07-10 22:00</td>
+                <td><button class="btn btn-sm btn-primary">确认签收</button></td>
+              </tr>
+              <tr>
+                <td style="font-family:monospace">#ORD20260709003</td>
+                <td>昇腾910B · 24卡 · 包周</td><td>¥42,000</td>
+                <td><span class="tag tag-blue">已完成</span></td><td>07-09 09:00</td>
+                <td><button class="btn btn-sm btn-outline">详情</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Token Overview -->
+        <div class="card">
+          <div class="card-header"><div class="card-title">Token 用量概览</div><a href="#" style="font-size:14px">管理 Token →</a></div>
+          <div style="display:grid;grid-template-columns:1fr 2fr;gap:24px">
+            <div style="text-align:center;padding:24px">
+              <div style="font-size:36px;font-weight:700;color:#2563eb">850K</div>
+              <div style="font-size:14px;color:#64748b">剩余 Token</div>
+              <div style="margin-top:8px;width:100%;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden">
+                <div style="width:68%;height:100%;background:#2563eb;border-radius:4px"></div>
+              </div>
+              <div style="font-size:12px;color:#94a3b8;margin-top:4px">已用 32% · 约剩余 12 天</div>
+            </div>
+            <div>
+              <div style="font-size:14px;color:#64748b;margin-bottom:8px">API Key</div>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <code style="flex:1;background:#f1f5f9;padding:8px 12px;border-radius:6px;font-size:13px">sk-****a1b2</code>
+                <button class="btn btn-sm btn-secondary">📋</button>
+                <button class="btn btn-sm btn-secondary">🔄</button>
+              </div>
+              <div style="font-size:13px;color:#64748b">Base URL: <code style="background:#f1f5f9;padding:2px 6px;border-radius:4px">https://token.[platform].com/v1</code></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="annotation" style="margin-top:16px">
+          <strong>📐 设计备注</strong>：买家工作台首页 = 数据卡片 + 最近订单 + Token概览。这是用户登录后的默认落地页，信息密度高但分区清晰。侧边栏左侧固定。Token 额度用环形图/进度条更直观（此处用简化条形示意）。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 买家订单详情（含 ⛓ 存证时间线）                                                -->
+<!-- ================================================================================= -->
+<div class="page" id="page-buyer-order">
+  <div class="page-wrapper" style="max-width:900px">
+    <div style="margin-bottom:16px"><a href="#" onclick="navigate('buyer-dashboard')" style="font-size:14px">← 返回工作台</a></div>
+
+    <!-- Status Banner -->
+    <div class="card" style="background:#f0fdf4;border:1px solid #86efac;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div style="font-size:36px">✅</div>
+        <div>
+          <div style="font-size:20px;font-weight:700;color:#166534">履约中</div>
+          <div style="font-size:14px;color:#64748b">算力已开通 · 距到期剩余 29 天 18 小时</div>
+        </div>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn btn-outline btn-sm">申请发票</button>
+          <button class="btn btn-outline btn-sm">发起工单</button>
+          <button class="btn btn-danger btn-sm">申请退款</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Order Info -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">订单信息</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:14px">
+        <div><span style="color:#64748b">订单号：</span><code>#ORD20260711001</code></div>
+        <div><span style="color:#64748b">下单时间：</span>2026-07-11 14:30</div>
+        <div><span style="color:#64748b">商品：</span>NVIDIA H100 · 8卡 · 包月</div>
+        <div><span style="color:#64748b">付费金额：</span>¥201,600.00</div>
+        <div><span style="color:#64748b">供给方：</span>中联数据 · 北京 <span class="tag tag-chain">⛓ 98%</span></div>
+        <div><span style="color:#64748b">租期：</span>2026-07-11 ~ 2026-08-11</div>
+      </div>
+    </div>
+
+    <!-- Delivery Credentials -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">交付凭证 <span class="tag tag-green" style="margin-left:8px">已确认签收</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:14px">
+        <div><span style="color:#64748b">IP：</span><code>***.***.***.128</code> <button class="btn btn-sm btn-outline">查看完整</button></div>
+        <div><span style="color:#64748b">SSH 端口：</span><code>22</code></div>
+        <div><span style="color:#64748b">账号：</span><code>root</code></div>
+        <div><span style="color:#64748b">签收时间：</span>2026-07-11 15:02</div>
+      </div>
+    </div>
+
+    <!-- ⛓ Blockchain Timeline -->
+    <div class="card" style="margin-bottom:16px;border:1px solid #86efac;background:linear-gradient(to right,#f0fdf4 0%,#fff 100%)">
+      <div class="card-title" style="display:flex;align-items:center;gap:8px">
+        ⛓ 区块链存证时间线
+        <span class="tag tag-chain">BSN 文昌链</span>
+      </div>
+      <div class="timeline">
+        <div class="timeline-item done">
+          <div class="tl-time">2026-07-11 14:30:15</div>
+          <div class="tl-label">订单创建</div>
+          <div class="tl-chain">⛓ TX: 0x7a3b...c21d <a href="#" style="font-size:12px">链上查验 →</a></div>
+        </div>
+        <div class="timeline-item done">
+          <div class="tl-time">2026-07-11 14:30:48</div>
+          <div class="tl-label">支付成功（易宝合单支付）</div>
+          <div class="tl-chain">⛓ TX: 0x8f2e...a91b <a href="#" style="font-size:12px">链上查验 →</a></div>
+        </div>
+        <div class="timeline-item done">
+          <div class="tl-time">2026-07-11 15:02:30</div>
+          <div class="tl-label">交付确认（机房回填 + 买家签收）</div>
+          <div class="tl-chain">⛓ TX: 0x3d1c...f78a <a href="#" style="font-size:12px">链上查验 →</a></div>
+        </div>
+        <div class="timeline-item current">
+          <div class="tl-time">进行中...</div>
+          <div class="tl-label">履约中</div>
+          <div style="font-size:12px;color:#94a3b8">到期后将生成履约完成存证</div>
+        </div>
+      </div>
+      <div class="annotation" style="margin-top:16px">
+        <strong>📐 设计备注</strong>：⛓ 存证时间线是本平台的核心差异化 UI 元素。每个已完成节点都可点击"链上查验"跳转到 BSN 区块链浏览器。当前进行中的节点用脉冲动画表示。时间线左侧竖线+圆点，绿色=已完成，黄色脉冲=进行中。建议用专属的绿色区块背景突出。
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 供给方工作台                                                                   -->
+<!-- ================================================================================= -->
+<div class="page" id="page-supplier-dashboard">
+  <div class="page-wrapper wide">
+    <div class="workspace">
+      <div class="sidebar">
+        <div class="sidebar-title">机房工作台</div>
+        <a href="#" class="active">📊 工作台首页</a>
+        <a href="#">📋 算力商品管理</a>
+        <a href="#">📦 订单管理</a>
+        <a href="#">💰 结算中心</a>
+        <a href="#">📄 资质管理</a>
+        <a href="#">📊 数据看板</a>
+        <a href="#">🔔 消息中心</a>
+      </div>
+      <div class="main-content">
+        <div class="section-title">机房工作台 · 中联数据 · 北京</div>
+
+        <div class="grid grid-4" style="margin-bottom:24px">
+          <div class="stat-card"><div class="stat-label">今日订单</div><div class="stat-value">12</div><div class="stat-change up">+3 较昨日</div></div>
+          <div class="stat-card"><div class="stat-label">今日收入</div><div class="stat-value">¥34,580</div><div class="stat-change up">+18%</div></div>
+          <div class="stat-card"><div class="stat-label">在售商品</div><div class="stat-value">8</div><div class="stat-change">32 P 总算力在售</div></div>
+          <div class="stat-card"><div class="stat-label">⛓ 信用分</div><div class="stat-value" style="color:#16a34a">98%</div><div class="stat-change">链上存证 · 不可篡改</div></div>
+        </div>
+
+        <!-- Pending Actions -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title" style="color:#ef4444">待处理</div>
+          <div style="display:flex;gap:16px;font-size:14px">
+            <div style="background:#fef2f2;padding:12px 20px;border-radius:8px;flex:1;display:flex;justify-content:space-between;align-items:center">
+              <span>🕐 待接单 <strong>3 笔</strong></span>
+              <button class="btn btn-sm btn-primary">去处理 →</button>
+            </div>
+            <div style="background:#fff7ed;padding:12px 20px;border-radius:8px;flex:1;display:flex;justify-content:space-between;align-items:center">
+              <span>📝 待开通 <strong>2 笔</strong></span>
+              <button class="btn btn-sm btn-outline">去处理 →</button>
+            </div>
+            <div style="background:#f8fafc;padding:12px 20px;border-radius:8px;flex:1;display:flex;justify-content:space-between;align-items:center">
+              <span>📄 资质 30 天后到期</span>
+              <button class="btn btn-sm btn-outline">续期 →</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recent Orders -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-header"><div class="card-title">最近订单</div></div>
+          <table>
+            <thead><tr><th>订单号</th><th>商品</th><th>买家</th><th>金额</th><th>状态</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr><td style="font-family:monospace">#ORD...001</td><td>H100 · 8卡 · 包月</td><td>某科技公司</td><td>¥201,600</td><td><span class="tag tag-green">履约中</span></td><td><button class="btn btn-sm btn-outline">详情</button></td></tr>
+              <tr><td style="font-family:monospace">#ORD...005</td><td>H100 · 4卡 · 分时</td><td>某研究院</td><td>¥1,200</td><td><span class="tag tag-orange">待接单</span></td><td><button class="btn btn-sm btn-primary">接单</button></td></tr>
+              <tr><td style="font-family:monospace">#ORD...008</td><td>A100 · 8卡 · 包周</td><td>某AI公司</td><td>¥28,000</td><td><span class="tag tag-orange">待开通</span></td><td><button class="btn btn-sm btn-outline">回填凭证</button></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Quick Actions -->
+        <div style="display:flex;gap:12px">
+          <button class="btn btn-primary" onclick="navigate('supplier-publish')">+ 发布新商品</button>
+          <button class="btn btn-secondary">结算中心</button>
+          <button class="btn btn-secondary">数据看板</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 供给方发布商品                                                                  -->
+<!-- ================================================================================= -->
+<div class="page" id="page-supplier-publish">
+  <div class="page-wrapper" style="max-width:900px">
+    <div style="margin-bottom:16px"><a href="#" onclick="navigate('supplier-dashboard')" style="font-size:14px">← 返回工作台</a></div>
+    <div class="section-title">发布算力商品</div>
+
+    <div style="display:grid;grid-template-columns:1fr 320px;gap:16px">
+      <div>
+        <!-- Section 1: GPU Specs -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title">1. GPU 规格</div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">GPU 型号 <span class="required">*</span></label><select class="form-select"><option>NVIDIA H100 SXM 80GB</option></select></div>
+            <div class="form-group"><label class="form-label">卡数 <span class="required">*</span></label><input class="form-input" type="number" value="64" placeholder="可售总卡数"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">CPU</label><input class="form-input" value="2× Intel Xeon 8480+" placeholder="如 2× Intel Xeon 8480+"></div>
+            <div class="form-group"><label class="form-label">内存</label><input class="form-input" value="2TB DDR5" placeholder="如 2TB DDR5"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">存储</label><input class="form-input" value="30TB NVMe" placeholder="如 30TB NVMe"></div>
+            <div class="form-group"><label class="form-label">带宽</label><input class="form-input" value="10Gbps" placeholder="如 10Gbps"></div>
+          </div>
+        </div>
+
+        <!-- Section 2: Pricing & Delivery -->
+        <div class="card" style="margin-bottom:16px">
+          <div class="card-title">2. 交付与定价</div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">交付形态 <span class="required">*</span></label><select class="form-select"><option>裸金属</option><option>容器</option><option>虚机</option><option>整机柜</option></select></div>
+            <div class="form-group"><label class="form-label">计费模式 <span class="required">*</span></label><select class="form-select"><option>分时租赁</option><option>包月</option><option>包周</option></select></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">单价（元/卡·时）<span class="required">*</span></label><input class="form-input" type="number" value="35" placeholder="如 35"></div>
+            <div class="form-group"><label class="form-label">地域 <span class="required">*</span></label><select class="form-select"><option>北京</option></select></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">可售时段</label><select class="form-select"><option>全天 24h</option><option>自定义时段</option></select></div>
+            <div class="form-group"><label class="form-label">最短租期</label><select class="form-select"><option>1 小时</option><option>1 天</option><option>1 周</option></select></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label class="form-label">当前余量（卡）<span class="required">*</span></label><input class="form-input" type="number" value="64"><div class="form-hint">成交后自动扣减，释放后自动回增</div></div>
+            <div class="form-group"><label class="form-label">起订量（卡）</label><input class="form-input" type="number" value="1"></div>
+          </div>
+        </div>
+
+        <!-- Section 3: Compliance -->
+        <div class="card">
+          <div class="card-title">3. 合规承诺</div>
+          <div style="font-size:14px;color:#475569;margin-bottom:12px">
+            <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+              <input type="checkbox" style="margin-top:3px">
+              <span>本算力商品来自 <strong>合规持证 IDC</strong>，来源可追溯。<br>承诺不提供、不协助、不默许任何形式的虚拟货币挖矿用途。</span>
+            </label>
+          </div>
+          <div class="annotation">
+            <strong>📐 设计备注</strong>：此合规承诺是风控红线——机房上架每一笔算力时都必须勾选。记录会随商品信息保存，作为日后风控追溯依据。
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Preview -->
+      <div>
+        <div class="card" style="position:sticky;top:80px">
+          <div class="card-title">商品卡片预览</div>
+          <div style="font-size:12px;color:#94a3b8;margin-bottom:12px">实时随表单更新</div>
+          <div style="border:1px solid #e5e7eb;border-radius:8px;padding:16px">
+            <div style="font-weight:700;font-size:16px;margin-bottom:4px">NVIDIA H100 SXM 80GB</div>
+            <div style="font-size:13px;color:#64748b;margin-bottom:8px">总算力 64P（FP16）· 64 卡 · 裸金属</div>
+            <div style="font-size:12px;color:#475569;margin-bottom:8px">2×Intel 8480+ · 2TB DDR5 · 30TB NVMe · 10Gbps</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;padding-top:8px;border-top:1px solid #f1f5f9">
+              <span style="font-size:12px;color:#475569">北京 · 全天</span>
+              <span style="font-size:20px;font-weight:700">¥35<small style="font-size:13px">/卡·时</small></span>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-block" style="margin-top:12px">提交审核</button>
+          <button class="btn btn-secondary btn-block" style="margin-top:8px">保存草稿</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: Token 工厂                                                                    -->
+<!-- ================================================================================= -->
+<div class="page" id="page-token-factory">
+  <div class="page-wrapper">
+    <div class="section-title">AI Token 工厂</div>
+    <div class="section-subtitle">开源大模型部署 · 标准 OpenAI API · 精准计量 · 合规备案</div>
+
+    <!-- Model Cards -->
+    <div class="grid grid-3" style="margin-bottom:32px">
+      <div class="card" style="text-align:center">
+        <div style="font-size:40px;margin-bottom:12px">🦙</div>
+        <div style="font-size:18px;font-weight:700;margin-bottom:4px">Llama 3.1 70B</div>
+        <div style="font-size:13px;color:#64748b;margin-bottom:12px">开源大模型 · vLLM 推理加速</div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">上下文 128K · 支持 Function Call</div>
+        <div style="margin-bottom:8px"><span class="tag tag-green">已备案</span> <span class="tag tag-blue">自部署</span></div>
+        <div style="font-size:24px;font-weight:700;margin-bottom:4px">¥0.008<span style="font-size:14px;font-weight:400;color:#64748b">/K Token</span></div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:16px">输入 ¥0.004 · 输出 ¥0.012</div>
+        <button class="btn btn-primary btn-block btn-sm">购买套餐</button>
+      </div>
+      <div class="card" style="text-align:center">
+        <div style="font-size:40px;margin-bottom:12px">🚀</div>
+        <div style="font-size:18px;font-weight:700;margin-bottom:4px">Qwen 2.5 72B</div>
+        <div style="font-size:13px;color:#64748b;margin-bottom:12px">通义千问 · TensorRT-LLM</div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">上下文 128K · 中文优化</div>
+        <div style="margin-bottom:8px"><span class="tag tag-green">已备案</span> <span class="tag tag-blue">代销</span></div>
+        <div style="font-size:24px;font-weight:700;margin-bottom:4px">¥0.006<span style="font-size:14px;font-weight:400;color:#64748b">/K Token</span></div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:16px">输入 ¥0.003 · 输出 ¥0.009</div>
+        <button class="btn btn-primary btn-block btn-sm">购买套餐</button>
+      </div>
+      <div class="card" style="text-align:center">
+        <div style="font-size:40px;margin-bottom:12px">🔮</div>
+        <div style="font-size:18px;font-weight:700;margin-bottom:4px">DeepSeek V3</div>
+        <div style="font-size:13px;color:#64748b;margin-bottom:12px">MoE 架构 · 高性能推理</div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:8px">上下文 128K · 极低价格</div>
+        <div style="margin-bottom:8px"><span class="tag tag-green">已备案</span> <span class="tag tag-orange">包销</span></div>
+        <div style="font-size:24px;font-weight:700;margin-bottom:4px">¥0.002<span style="font-size:14px;font-weight:400;color:#64748b">/K Token</span></div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:16px">输入 ¥0.001 · 输出 ¥0.003</div>
+        <button class="btn btn-primary btn-block btn-sm">购买套餐</button>
+      </div>
+    </div>
+
+    <div class="annotation">
+      <strong>📐 设计备注</strong>：Token 工厂 = 模型卡片（公开）+ "我的 Token"页面（登录后）。每张卡片展示：模型名、推理框架、上下文长度、备案标签（已备案/待备案）、自部署/代销/包销类型、价格（input/output 分开）。是 AI 开发者最常浏览的页面之一。
+    </div>
+
+    <!-- My Token (simulated logged-in view) -->
+    <div class="card" style="margin-top:24px">
+      <div class="card-title">我的 Token 余额 & API</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+        <div>
+          <div style="font-size:36px;font-weight:700;color:#2563eb;margin-bottom:4px">850,000</div>
+          <div style="font-size:14px;color:#64748b;margin-bottom:12px">剩余 Token · 约够 12 天用量</div>
+          <button class="btn btn-primary btn-sm">充值</button>
+        </div>
+        <div>
+          <div style="font-size:13px;color:#64748b;margin-bottom:4px">API Key</div>
+          <div style="display:flex;gap:8px;margin-bottom:4px">
+            <code style="flex:1;background:#f1f5f9;padding:6px 10px;border-radius:4px;font-size:12px">sk-8a7b...c3d1</code>
+            <button class="btn btn-sm btn-secondary">📋</button>
+          </div>
+          <div style="font-size:12px;color:#94a3b8">Base URL: https://token.[platform].com/v1</div>
+          <div style="margin-top:8px;background:#f8fafc;padding:8px 12px;border-radius:4px;font-family:monospace;font-size:12px;color:#475569">
+            curl https://token.[platform].com/v1/chat/completions \<br>
+            &nbsp;&nbsp;-H "Authorization: Bearer sk-8a7b...c3d1" \<br>
+            &nbsp;&nbsp;-d '{"model":"llama-3.1-70b","messages":[...]}'
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 融资租赁                                                                       -->
+<!-- ================================================================================= -->
+<div class="page" id="page-finance-page">
+  <div class="page-wrapper" style="max-width:720px">
+    <div class="section-title">设备融资租赁</div>
+    <div class="section-subtitle">为算力机房客户提供设备分期、融资租赁方案对接</div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div style="font-size:15px;line-height:1.8;color:#475569">
+        <p>面向<strong>算力中心、AI 企业、数据中心运营商</strong>，提供 GPU 服务器、机电设备、制冷系统、机柜等硬件设备的融资租赁居间服务。</p>
+        <p style="margin-top:8px">我们已对接多家<strong>持牌融资租赁公司及产业基金</strong>，可为客户提供灵活的分期付款、经营性租赁、直租/回租方案。</p>
+      </div>
+    </div>
+
+    <!-- Compliance Notice -->
+    <div class="compliance-box">
+      <strong>⚖️ 合规声明</strong>
+      融资租赁服务由持牌资方提供，本平台仅提供居间撮合服务，<strong>不从事放贷、融资租赁经营活动</strong>。具体融资方案、利率、期限以资方最终审批和合同为准。
+    </div>
+
+    <!-- Contact Form -->
+    <div class="card">
+      <div class="card-title">留资登记</div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">主体名称 <span class="required">*</span></label><input class="form-input" placeholder="公司/机构全称"></div>
+        <div class="form-group"><label class="form-label">联系人 <span class="required">*</span></label><input class="form-input" placeholder="姓名"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">设备金额范围</label><select class="form-select"><option>100万–500万</option><option>500万–2000万</option><option>2000万以上</option></select></div>
+        <div class="form-group"><label class="form-label">期望期限</label><select class="form-select"><option>1年</option><option>2–3年</option><option>3–5年</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">电话 <span class="required">*</span></label><input class="form-input" placeholder="手机号码"></div>
+        <div class="form-group"><label class="form-label">邮箱</label><input class="form-input" placeholder="联系邮箱"></div>
+      </div>
+      <div class="form-group"><label class="form-label">补充说明</label><textarea class="form-textarea" placeholder="描述您的具体需求，如设备类型、数量等..."></textarea></div>
+      <button class="btn btn-primary btn-lg btn-block">提交需求</button>
+      <div style="font-size:12px;color:#94a3b8;text-align:center;margin-top:8px">提交后我们将在 1–2 个工作日内联系您</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 运营审核中心                                                                   -->
+<!-- ================================================================================= -->
+<div class="page" id="page-admin-audit">
+  <div class="page-wrapper wide">
+    <div class="workspace">
+      <div class="sidebar">
+        <div class="sidebar-title">运营后台</div>
+        <a href="#" class="active">📋 审核中心</a>
+        <a href="#">📦 商品管理</a>
+        <a href="#">📊 订单管理</a>
+        <a href="#">💰 资金分账</a>
+        <a href="#">📈 CRM 线索</a>
+        <a href="#">👥 用户管理</a>
+        <a href="#">📝 内容管理</a>
+        <a href="#">⚠️ 风控工作台</a>
+        <a href="#">⚙️ 系统配置</a>
+      </div>
+      <div class="main-content">
+        <div class="section-title">审核中心</div>
+
+        <div class="tabs">
+          <div class="tab active">机房入驻 <span class="tag tag-orange" style="margin-left:4px">5</span></div>
+          <div class="tab">商品上架 <span class="tag tag-orange" style="margin-left:4px">12</span></div>
+          <div class="tab">厂商入驻 <span class="tag tag-gray" style="margin-left:4px">2</span></div>
+          <div class="tab">内容审核 <span class="tag tag-gray" style="margin-left:4px">0</span></div>
+        </div>
+
+        <!-- Audit Card -->
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <span style="font-weight:600;font-size:16px">成都智云数据科技有限公司</span>
+                <span class="tag tag-gray">提交于 2026-07-11 10:23</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:13px;color:#475569">
+                <div>统一社会信用代码：91510100MA6******</div>
+                <div>机房地址：四川省成都市双流区</div>
+                <div>资质类型：持证 IDC（IDC 许可证号：B1-2023****）</div>
+                <div>联系人：张某某 · 138****6789</div>
+              </div>
+              <div style="margin-top:8px;display:flex;gap:8px">
+                <button class="btn btn-sm btn-outline">📎 营业执照</button>
+                <button class="btn btn-sm btn-outline">📎 IDC 许可证</button>
+                <button class="btn btn-sm btn-outline">📎 电力接入证明</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-left:24px">
+              <button class="btn btn-primary btn-sm">✓ 通过</button>
+              <button class="btn btn-outline btn-sm">↩ 驳回</button>
+              <button class="btn btn-outline btn-sm">📝 补件</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start">
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                <span style="font-weight:600;font-size:16px">深圳市量子云计算有限公司</span>
+                <span class="tag tag-gray">提交于 2026-07-10 16:45</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:13px;color:#475569">
+                <div>统一社会信用代码：91440300MA5******</div>
+                <div>机房地址：深圳市南山区</div>
+                <div>资质类型：大型智算 IDC</div>
+                <div>联系人：李某某 · 139****5678</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-left:24px">
+              <button class="btn btn-primary btn-sm">✓ 通过</button>
+              <button class="btn btn-outline btn-sm">↩ 驳回</button>
+              <button class="btn btn-outline btn-sm">📝 补件</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="annotation" style="margin-top:16px">
+          <strong>📐 设计备注</strong>：审核中心 = 队列 tab + 审核卡片列表。每张卡片展示关键字段+证照附件预览+三个操作按钮（通过/驳回/补件）。驳回必须弹窗填原因（预设模板+自定义）。审核历史可展开时间线。批量审核场景下可考虑支持勾选后批量通过。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================================= -->
+<!-- PAGE: 风控工作台                                                                    -->
+<!-- ================================================================================= -->
+<div class="page" id="page-admin-risk">
+  <div class="page-wrapper wide">
+    <div class="workspace">
+      <div class="sidebar">
+        <div class="sidebar-title">运营后台</div>
+        <a href="#">📋 审核中心</a>
+        <a href="#">📦 商品管理</a>
+        <a href="#">📊 订单管理</a>
+        <a href="#">💰 资金分账</a>
+        <a href="#">📈 CRM 线索</a>
+        <a href="#">👥 用户管理</a>
+        <a href="#">📝 内容管理</a>
+        <a href="#" class="active">⚠️ 风控工作台</a>
+        <a href="#">⚙️ 系统配置</a>
+      </div>
+      <div class="main-content">
+        <div class="section-title">风控工作台</div>
+
+        <div class="grid grid-3" style="margin-bottom:24px">
+          <div class="stat-card" style="border-left:3px solid #ef4444"><div class="stat-label">🔴 高危告警</div><div class="stat-value" style="color:#ef4444">2</div><div class="stat-change">待处置</div></div>
+          <div class="stat-card" style="border-left:3px solid #fbbf24"><div class="stat-label">🟡 疑似异常</div><div class="stat-value" style="color:#d97706">7</div><div class="stat-change">待确认</div></div>
+          <div class="stat-card" style="border-left:3px solid #16a34a"><div class="stat-label">✅ 今日处置</div><div class="stat-value">15</div><div class="stat-change">较昨日 +3</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-header"><div class="card-title">告警列表</div></div>
+          <table>
+            <thead><tr><th>级别</th><th>类型</th><th>对象</th><th>触发规则</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><span class="tag tag-red">🔴 高危</span></td>
+                <td>疑似挖矿</td>
+                <td>订单 #ORD...0032</td>
+                <td style="font-size:13px">持续满载+特定端口流量</td>
+                <td style="font-size:13px">07-11 03:15</td>
+                <td><button class="btn btn-sm btn-danger">冻结</button> <button class="btn btn-sm btn-outline">详情</button></td>
+              </tr>
+              <tr>
+                <td><span class="tag tag-red">🔴 高危</span></td>
+                <td>虚假交付</td>
+                <td>机房 某科技公司</td>
+                <td style="font-size:13px">买家举报+回填凭证无效</td>
+                <td style="font-size:13px">07-11 08:42</td>
+                <td><button class="btn btn-sm btn-outline">核查</button></td>
+              </tr>
+              <tr>
+                <td><span class="tag tag-orange">🟡 疑似</span></td>
+                <td>异常下单</td>
+                <td>买家 王某某</td>
+                <td style="font-size:13px">同对供给方高频小额订单×15</td>
+                <td style="font-size:13px">07-10 22:30</td>
+                <td><button class="btn btn-sm btn-outline">核查</button></td>
+              </tr>
+              <tr>
+                <td><span class="tag tag-orange">🟡 疑似</span></td>
+                <td>资金异常</td>
+                <td>订单 #ORD...0045</td>
+                <td style="font-size:13px">金额与经营范围不符</td>
+                <td style="font-size:13px">07-10 16:20</td>
+                <td><button class="btn btn-sm btn-outline">核查</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="annotation" style="margin-top:16px">
+          <strong>📐 设计备注</strong>：风控工作台 = 告警统计卡片（左侧色条区分级别）+ 告警列表。关键操作：冻结订单/账号、标记误报、查看详情（展开证据时间线）。冻结操作是高风险动作，需二次确认弹窗。处置结论自动触发区块链存证（运营不可跳过）。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SCRIPTS ===== -->
+<script>
+// Get all pages
+var pages = document.querySelectorAll('.page');
+
+// Navigate to a specific page
+function navigate(pageName) {
+  pages.forEach(function(p) { p.classList.remove('active'); });
+  var target = document.getElementById('page-' + pageName);
+  if (target) {
+    target.classList.add('active');
+    // Update nav active state
+    document.querySelectorAll('.top-nav .nav-links a').forEach(function(a) { a.classList.remove('active'); });
+    // Scroll to top
+    window.scrollTo(0, 0);
+  }
+}
+
+// Switch user role (updates nav bar)
+function switchRole(role) {
+  var navActions = document.getElementById('navActions');
+  var topNav = document.getElementById('topNav');
+
+  // Remove existing role tag
+  var existingTag = topNav.querySelector('.role-tag');
+  if (existingTag) existingTag.remove();
+
+  if (role === 'visitor') {
+    navActions.innerHTML = '<button class="btn btn-outline btn-sm" onclick="navigate(\'login\')">登录</button><button class="btn btn-primary btn-sm" onclick="navigate(\'register\')">注册</button>';
+  } else if (role === 'buyer') {
+    navActions.innerHTML = '<span style="font-size:13px;color:#475569">🧑‍💻 某科技公司</span><span class="role-tag">买家</span><button class="btn btn-sm btn-secondary">切换身份</button><button class="btn btn-sm btn-outline">退出</button>';
+    navigate('buyer-dashboard');
+  } else if (role === 'supplier') {
+    navActions.innerHTML = '<span style="font-size:13px;color:#475569">🏭 中联数据·北京</span><span class="role-tag">供给方</span><button class="btn btn-sm btn-secondary">切换身份</button><button class="btn btn-sm btn-outline">退出</button>';
+    navigate('supplier-dashboard');
+  } else if (role === 'operator') {
+    navActions.innerHTML = '<span style="font-size:13px;color:#475569">🛡️ 运营管理员</span><span class="role-tag">运营</span><button class="btn btn-sm btn-outline">退出</button>';
+    navigate('admin-audit');
+  }
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,673 @@
+openapi: "3.0.3"
+info:
+  title: 算力撮合交易平台 API
+  description: |
+    ## 概述
+    算力现货挂牌撮合交易平台 v1 API。包含账户认证、算力撮合、支付分账、居间金融、运营管理、区块链存证六大模块。
+
+    **Base URL**: `http://localhost:8080/api/v1`
+
+    ## 鉴权
+    除公开接口外，所有接口需 `Authorization: Bearer <jwt_token>`
+
+    ## 金额单位
+    所有金额单位为**分（fen）**，即 `100 = ¥1.00`
+
+    ## 通用响应格式
+    ```json
+    { "code": 0, "message": "success", "data": {}, "request_id": "xxx" }
+    ```
+  version: "1.0.0"
+  contact:
+    name: Platform Team
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: 本地开发环境
+
+tags:
+  - name: 认证 Auth
+  - name: 用户 User
+  - name: 算力撮合 Compute
+  - name: 支付分账 Payment
+  - name: 居间金融 Intermediary
+  - name: 运营管理 Admin
+  - name: 区块链存证 Blockchain
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Response:
+      type: object
+      properties:
+        code: { type: integer, example: 0 }
+        message: { type: string, example: "success" }
+        data: { type: object }
+        request_id: { type: string }
+
+    PageData:
+      type: object
+      properties:
+        list: { type: array, items: {} }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+
+    Product:
+      type: object
+      properties:
+        id: { type: integer }
+        supplier_id: { type: integer }
+        gpu_model: { type: string, example: "NVIDIA H100 SXM 80GB" }
+        card_count: { type: integer, example: 8 }
+        cpu_spec: { type: string }
+        memory_spec: { type: string }
+        storage_spec: { type: string }
+        bandwidth_spec: { type: string }
+        delivery_mode: { type: string, enum: [bare_metal, container, vm, rack] }
+        pricing_mode: { type: string, enum: [hourly, weekly, monthly] }
+        unit_price: { type: integer, description: "单价(分)/卡·时", example: 3500 }
+        available_hours: { type: string, example: "全天 24h" }
+        stock: { type: integer }
+        min_order: { type: integer }
+        min_duration: { type: integer }
+        region: { type: string, example: "北京" }
+        status: { type: string }
+        self_operated: { type: boolean }
+
+    CreditScore:
+      type: object
+      properties:
+        supplier_id: { type: integer }
+        fulfill_rate: { type: number, example: 99.2 }
+        sla_rate: { type: number, example: 99.8 }
+        violation_count: { type: integer }
+        total_orders: { type: integer }
+
+    Order:
+      type: object
+      properties:
+        id: { type: integer }
+        order_no: { type: string, example: "ORD20260713143000123abc" }
+        buyer_id: { type: integer }
+        product_id: { type: integer }
+        quantity: { type: integer }
+        duration: { type: integer, description: "租期(小时)" }
+        unit_price: { type: integer, description: "单价(分)" }
+        total_amount: { type: integer, description: "总金额(分)" }
+        platform_fee: { type: integer, description: "平台佣金(分)" }
+        status: { type: string, enum: [pending_payment, paid, provisioning, active, completed, cancelled, refunding, refunded, frozen] }
+        payment_expires_at: { type: string, format: date-time }
+        lease_start_at: { type: string, format: date-time }
+        lease_end_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    Delivery:
+      type: object
+      properties:
+        id: { type: integer }
+        order_id: { type: integer }
+        confirmed_by_buyer: { type: boolean }
+        buyer_confirmed_at: { type: string, format: date-time }
+
+    KYCStatus:
+      type: object
+      properties:
+        personal: { $ref: '#/components/schemas/KYCItem' }
+        enterprise: { $ref: '#/components/schemas/KYCItem' }
+
+    KYCItem:
+      type: object
+      properties:
+        status: { type: string, enum: [none, pending, verified, rejected] }
+        real_name: { type: string }
+        name: { type: string }
+
+    Lead:
+      type: object
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [equipment, construction, finance_lease] }
+        contact_name: { type: string }
+        contact_phone: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [new, assigned, following, quoted, closed, cancelled] }
+        assignee_id: { type: integer }
+
+    Alert:
+      type: object
+      properties:
+        id: { type: integer }
+        level: { type: string, enum: [high, medium, low] }
+        alert_type: { type: string }
+        target_type: { type: string }
+        target_id: { type: integer }
+        status: { type: string }
+        created_at: { type: string, format: date-time }
+
+    VerifyResult:
+      type: object
+      properties:
+        verified: { type: boolean }
+        tx_id: { type: string }
+        chain_timestamp: { type: string }
+        verify_url: { type: string }
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ==================== 认证 ====================
+  /auth/register:
+    post:
+      tags: [认证 Auth]
+      summary: 用户注册
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, sms_code, password, agree_tos]
+              properties:
+                phone: { type: string, example: "13800138000" }
+                sms_code: { type: string, example: "123456" }
+                password: { type: string, minLength: 8, example: "Abc12345!" }
+                agree_tos: { type: boolean, example: true }
+      responses:
+        '200': { description: "注册成功", content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Response' }, { type: object, properties: { data: { type: object, properties: { user_id: { type: integer } } } } }] } } } }
+
+  /auth/login:
+    post:
+      tags: [认证 Auth]
+      summary: 用户登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [account, password]
+              properties:
+                account: { type: string, example: "13800138000" }
+                password: { type: string, example: "Abc12345!" }
+      responses:
+        '200':
+          description: "登录成功"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          access_token: { type: string }
+                          refresh_token: { type: string }
+                          expires_in: { type: integer, example: 900 }
+                          user: { type: object }
+
+  /auth/refresh:
+    post:
+      tags: [认证 Auth]
+      summary: 刷新 Token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+
+  /auth/logout:
+    post:
+      tags: [认证 Auth]
+      summary: 登出
+
+  /auth/me:
+    get:
+      tags: [认证 Auth]
+      summary: 当前用户信息
+      responses:
+        '200':
+          description: "用户信息"
+
+  # ==================== 用户 ====================
+  /user/kyc/personal:
+    post:
+      tags: [用户 User]
+      summary: 个人实名认证
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [real_name, id_card]
+              properties:
+                real_name: { type: string, example: "张三" }
+                id_card: { type: string, example: "110101199001011234" }
+
+  /user/kyc/enterprise:
+    post:
+      tags: [用户 User]
+      summary: 企业认证
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enterprise_name, uscc, license_url, legal_person]
+              properties:
+                enterprise_name: { type: string, example: "某科技有限公司" }
+                uscc: { type: string }
+                license_url: { type: string }
+                legal_person: { type: string }
+
+  /user/kyc/status:
+    get:
+      tags: [用户 User]
+      summary: KYC 认证状态
+      responses:
+        '200': { description: "OK", content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Response' }, { type: object, properties: { data: { $ref: '#/components/schemas/KYCStatus' } } }] } } } }
+
+  /user/roles:
+    post:
+      tags: [用户 User]
+      summary: 申请角色
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [supplier, vendor, funder] }
+
+  /user/profile:
+    get:
+      tags: [用户 User]
+      summary: 个人信息
+    put:
+      tags: [用户 User]
+      summary: 更新个人信息
+
+  # ==================== 算力撮合 ====================
+  /products:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 算力商品列表
+      security: []
+      parameters:
+        - { name: gpu_model, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: pricing_mode, in: query, schema: { type: string, enum: [hourly, weekly, monthly] } }
+        - { name: price_min, in: query, schema: { type: integer } }
+        - { name: price_max, in: query, schema: { type: integer } }
+        - { name: sort, in: query, schema: { type: string, enum: [price_asc, price_desc, created_at_desc] } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: page_size, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200': { description: "商品列表" }
+    post:
+      tags: [算力撮合 Compute]
+      summary: 上架算力商品（供给方）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [gpu_model, card_count, delivery_mode, pricing_mode, unit_price, stock, region, compliance_agreed]
+              properties:
+                gpu_model: { type: string }
+                card_count: { type: integer }
+                cpu_spec: { type: string }
+                memory_spec: { type: string }
+                storage_spec: { type: string }
+                bandwidth_spec: { type: string }
+                delivery_mode: { type: string }
+                pricing_mode: { type: string }
+                unit_price: { type: integer, description: "单价(分)/卡·时" }
+                available_hours: { type: string }
+                stock: { type: integer }
+                min_order: { type: integer }
+                min_duration: { type: integer }
+                region: { type: string }
+                compliance_agreed: { type: boolean }
+
+  /products/{id}:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 商品详情（含信用分）
+      security: []
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        '200': { description: "OK" }
+
+  /orders:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 下单
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [product_id, quantity, duration, compliance_agreed]
+              properties:
+                product_id: { type: integer }
+                quantity: { type: integer }
+                duration: { type: integer, description: "租期(小时)" }
+                compliance_agreed: { type: boolean }
+      responses:
+        '200': { description: "订单创建成功" }
+    get:
+      tags: [算力撮合 Compute]
+      summary: 我的订单（买家）
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /orders/{id}:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 订单详情
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: "订单号或ID" }
+
+  /orders/{id}/deliver:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 回填交付凭证（供给方）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ip_address: { type: string }
+                ssh_port: { type: integer }
+                username: { type: string }
+                credential_note: { type: string }
+
+  /orders/{id}/confirm:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 确认签收（买家）
+
+  /orders/{id}/renew:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 续费
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [duration]
+              properties:
+                duration: { type: integer }
+
+  /orders/{id}/refund:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 申请退款
+
+  /supplier/qualifications:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 我的资质
+    post:
+      tags: [算力撮合 Compute]
+      summary: 提交资质
+
+  /supplier/products:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 我的商品
+
+  /supplier/orders:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 供给方订单
+
+  # ==================== 支付 ====================
+  /payment/pay:
+    post:
+      tags: [支付分账 Payment]
+      summary: 发起支付
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_no, channel]
+              properties:
+                order_no: { type: string }
+                channel: { type: string, enum: [wechat, alipay, bank] }
+
+  /payment/status/{order_no}:
+    get:
+      tags: [支付分账 Payment]
+      summary: 支付状态查询
+      parameters:
+        - { name: order_no, in: path, required: true, schema: { type: string } }
+
+  /payment/callback:
+    post:
+      tags: [支付分账 Payment]
+      summary: 易宝支付回调
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tx_id: { type: string }
+                order_no: { type: string }
+                status: { type: string }
+                amount: { type: integer }
+
+  /payment/supplier/onboard:
+    post:
+      tags: [支付分账 Payment]
+      summary: 供给方易宝进件
+
+  /payment/supplier/onboard/status:
+    get:
+      tags: [支付分账 Payment]
+      summary: 进件状态
+
+  /payment/settlements:
+    get:
+      tags: [支付分账 Payment]
+      summary: 分账记录
+
+  # ==================== 居间 ====================
+  /leads:
+    post:
+      tags: [居间金融 Intermediary]
+      summary: 创建线索
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: { type: string, enum: [equipment, construction] }
+                contact_name: { type: string }
+                contact_phone: { type: string }
+                contact_email: { type: string }
+                description: { type: string }
+                amount_range: { type: string }
+                term: { type: string }
+
+  /finance/lease/contact:
+    post:
+      tags: [居间金融 Intermediary]
+      summary: 融资租赁留资
+      security: []
+
+  /commissions:
+    get:
+      tags: [居间金融 Intermediary]
+      summary: 佣金台账
+
+  /vendor/leads:
+    get:
+      tags: [居间金融 Intermediary]
+      summary: 厂商线索
+
+  /leads/{id}/quote:
+    post:
+      tags: [居间金融 Intermediary]
+      summary: 报价
+
+  /leads/{id}/close:
+    post:
+      tags: [居间金融 Intermediary]
+      summary: 成交登记
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deal_amount, commission_rate]
+              properties:
+                deal_amount: { type: integer, description: "成交金额(分)" }
+                commission_rate: { type: number, description: "佣金率(%)" }
+
+  # ==================== 运营管理 ====================
+  /admin/audits/qualifications:
+    get:
+      tags: [运营管理 Admin]
+      summary: 资质审核列表
+
+  /admin/audits/qualifications/{id}/approve:
+    post:
+      tags: [运营管理 Admin]
+      summary: 通过资质审核
+
+  /admin/audits/qualifications/{id}/reject:
+    post:
+      tags: [运营管理 Admin]
+      summary: 驳回资质审核
+
+  /admin/audits/products/{id}/approve:
+    post:
+      tags: [运营管理 Admin]
+      summary: 通过商品审核
+
+  /admin/audits/products/{id}/reject:
+    post:
+      tags: [运营管理 Admin]
+      summary: 驳回商品审核
+
+  /admin/products:
+    get:
+      tags: [运营管理 Admin]
+      summary: 全平台商品
+
+  /admin/products/{id}/offline:
+    patch:
+      tags: [运营管理 Admin]
+      summary: 强制下架
+
+  /admin/orders:
+    get:
+      tags: [运营管理 Admin]
+      summary: 全平台订单
+
+  /admin/orders/{id}/status:
+    patch:
+      tags: [运营管理 Admin]
+      summary: 订单干预
+
+  /admin/risk/alerts:
+    get:
+      tags: [运营管理 Admin]
+      summary: 告警列表
+
+  /admin/risk/alerts/{id}/freeze:
+    post:
+      tags: [运营管理 Admin]
+      summary: 冻结处置
+
+  /admin/risk/alerts/{id}/dismiss:
+    post:
+      tags: [运营管理 Admin]
+      summary: 标记误报
+
+  /admin/audit-logs:
+    get:
+      tags: [运营管理 Admin]
+      summary: 审计日志
+
+  /admin/config:
+    get:
+      tags: [运营管理 Admin]
+      summary: 系统配置
+    put:
+      tags: [运营管理 Admin]
+      summary: 更新配置
+
+  /admin/users:
+    get:
+      tags: [运营管理 Admin]
+      summary: 用户列表
+
+  /admin/users/{id}/freeze:
+    patch:
+      tags: [运营管理 Admin]
+      summary: 冻结用户
+
+  /admin/cms/notices:
+    post:
+      tags: [运营管理 Admin]
+      summary: 发布公告
+
+  # ==================== 区块链 ====================
+  /blockchain/verify:
+    get:
+      tags: [区块链存证 Blockchain]
+      summary: 链上存证验证
+      security: []
+      parameters:
+        - { name: type, in: query, required: true, schema: { type: string }, example: "order" }
+        - { name: id, in: query, required: true, schema: { type: string }, example: "123" }
+      responses:
+        '200': { description: "OK", content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Response' }, { type: object, properties: { data: { $ref: '#/components/schemas/VerifyResult' } } }] } } } }
+
+  /blockchain/attestations/{target_type}/{target_id}:
+    get:
+      tags: [区块链存证 Blockchain]
+      summary: 查询存证记录
+      parameters:
+        - { name: target_type, in: path, required: true, schema: { type: string } }
+        - { name: target_id, in: path, required: true, schema: { type: string } }
+
+  # ==================== 健康检查 ====================
+  /health:
+    get:
+      tags: [系统]
+      summary: 健康检查
+      security: []
+      responses:
+        '200': { description: "OK" }

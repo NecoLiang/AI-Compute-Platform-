@@ -1,0 +1,17 @@
+server:
+  port: "8080"
+  mode: debug
+
+database:
+  dsn: "root:password@tcp(127.0.0.1:3306)/tokenfactory?parseTime=true&charset=utf8mb4"
+
+redis:
+  addr: "127.0.0.1:6379"
+  password: ""
+  db: 0
+
+jwt:
+  access_secret: "change-me-access-secret-key-32chars"
+  refresh_secret: "change-me-refresh-secret-key-32chars"
+  access_ttl: 900
+  refresh_ttl: 604800
