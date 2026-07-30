@@ -41,12 +41,72 @@ const (
 // 下单参数硬上限: 防止 int64 溢出与恶意超大值。
 const (
 	MaxOrderQuantity = 100000              // 单笔最大数量
-	MaxOrderDuration = 87600               // 单笔最大时长(小时, 约 10 年)
 	MaxOrderTotalFen = int64(1e12)         // 单笔订单金额上限(分) = 100 亿元
 	AccessKeyPrefix  = "ak-"               // 访问凭证标识前缀
 	accessKeyRandLen = 16                  // 16 字节 -> 32 位 hex
 	accessValRandLen = 24                  // 24 字节 -> 48 位 hex
 )
+
+// ===== duration 语义（C-04 口径） =====
+//
+// `duration` 表示**计费周期数**，不是小时数：
+//   hourly  -> 小时数     daily -> 天数
+//   weekly  -> 周数       monthly -> 月数
+//   perpetual -> 买断无租期，强制归一为 1
+//
+// 单价 `unit_price` 相应是「元/卡·该计费周期」。这样前后端只need传一个数字，
+// 不引入除不尽的取整误差（涉及资金，取整规则越少越安全）。
+
+// maxDurationByPricingMode 各计费模式的单笔最大周期数，统一折合约 10 年。
+var maxDurationByPricingMode = map[string]int{
+	PricingHourly:    87600, // 10 年 ≈ 87600 小时
+	PricingDaily:     3650,  // 10 年
+	PricingWeekly:    520,   // 10 年
+	PricingMonthly:   120,   // 10 年
+	PricingPerpetual: 1,     // 买断无租期
+}
+
+// durationUnitLabel 用于拼中文错误提示，避免"租期超出上限 120"这种没有单位的歧义提示。
+var durationUnitLabel = map[string]string{
+	PricingHourly:    "小时",
+	PricingDaily:     "天",
+	PricingWeekly:    "周",
+	PricingMonthly:   "个月",
+	PricingPerpetual: "次",
+}
+
+// MaxDurationFor 返回该计费模式允许的最大周期数；未知模式回退到最严格的上限。
+func MaxDurationFor(pricingMode string) int {
+	if m, ok := maxDurationByPricingMode[pricingMode]; ok { return m }
+	return maxDurationByPricingMode[PricingMonthly]
+}
+
+// DurationUnit 返回该计费模式下 duration 的单位中文名。
+func DurationUnit(pricingMode string) string {
+	if u, ok := durationUnitLabel[pricingMode]; ok { return u }
+	return "个周期"
+}
+
+// LeaseEndAt 按计费模式把「计费周期数」换算成租期结束时间。
+// monthly / weekly 走自然日历（AddDate），不用固定 30 天/720 小时近似，
+// 避免"买 1 个月却在 2 月少给 2 天"这类与账单不符的情况。
+// 买断（perpetual）无结束时间，返回零值 time.Time，调用方必须判空。
+func LeaseEndAt(start time.Time, pricingMode string, duration int) time.Time {
+	switch pricingMode {
+	case PricingHourly:
+		return start.Add(time.Duration(duration) * time.Hour)
+	case PricingDaily:
+		return start.AddDate(0, 0, duration)
+	case PricingWeekly:
+		return start.AddDate(0, 0, duration*7)
+	case PricingMonthly:
+		return start.AddDate(0, duration, 0)
+	case PricingPerpetual:
+		return time.Time{}
+	default:
+		return start.Add(time.Duration(duration) * time.Hour)
+	}
+}
 
 // AnomalyRatioThreshold 盘点异常阈值: |diff|/stock_before > 0.3 判为异常 (C-05)。
 // 用整数比值(3/10)判定, 避免 float 精度问题。
@@ -376,7 +436,7 @@ func (s *Service) OfflineProduct(id int64) error {
 type PlaceOrderReq struct {
 	ProductID        int64 `json:"product_id"`
 	Quantity         int   `json:"quantity"`
-	Duration         int   `json:"duration"` // hours
+	Duration         int   `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
 	ComplianceAgreed bool  `json:"compliance_agreed"`
 }
 
@@ -427,13 +487,15 @@ func validateOrderParams(p *Product, quantity, duration int, checkStock bool) (i
 		return quantity, 1, nil
 	}
 
+	unit := DurationUnit(p.PricingMode)
 	minDuration := p.MinDuration
 	if minDuration < 1 { minDuration = 1 }
 	if duration < minDuration {
-		return 0, 0, fmt.Errorf("租期不能少于最短租期 %d", minDuration)
+		return 0, 0, fmt.Errorf("租期不能少于最短租期 %d%s", minDuration, unit)
 	}
-	if duration > MaxOrderDuration {
-		return 0, 0, fmt.Errorf("租期超出上限 %d", MaxOrderDuration)
+	maxDuration := MaxDurationFor(p.PricingMode)
+	if duration > maxDuration {
+		return 0, 0, fmt.Errorf("租期超出上限 %d%s", maxDuration, unit)
 	}
 	return quantity, duration, nil
 }
@@ -549,7 +611,10 @@ func (s *Service) ActivateOrder(orderNo string) error {
 	if p != nil && p.PricingMode == PricingPerpetual {
 		if _, err := tx.Exec("UPDATE orders SET lease_start_at=?, lease_end_at=NULL WHERE order_no=?", now, orderNo); err != nil { return err }
 	} else {
-		end := now.Add(time.Duration(o.Duration) * time.Hour)
+		// duration 是计费周期数, 必须按 pricing_mode 换算, 不能一律当小时。
+		mode := ""
+		if p != nil { mode = p.PricingMode }
+		end := LeaseEndAt(now, mode, o.Duration)
 		if _, err := tx.Exec("UPDATE orders SET lease_start_at=?, lease_end_at=? WHERE order_no=?", now, end, orderNo); err != nil { return err }
 	}
 	return tx.Commit()
@@ -671,10 +736,11 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 	accessEnc, err := crypto.Encrypt(accessVal, s.credentialKey)
 	if err != nil { return nil, err }
 
-	// 永久使用权无到期时间; 其余按租期时长设定, 到期后由 RevokeExpiredAccess 吊销。
+	// 永久使用权无到期时间; 其余按租期换算, 到期后由 RevokeExpiredAccess 吊销。
+	// duration 是计费周期数, 必须走 LeaseEndAt 换算, 否则 monthly 订单的凭证会在几小时后就失效。
 	var expiresAt *time.Time
 	if p.PricingMode != PricingPerpetual {
-		e := time.Now().Add(time.Duration(o.Duration) * time.Hour)
+		e := LeaseEndAt(time.Now(), p.PricingMode, o.Duration)
 		expiresAt = &e
 	}
 

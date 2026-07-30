@@ -103,7 +103,7 @@ CREATE TABLE orders (
     buyer_id BIGINT NOT NULL,
     product_id BIGINT NOT NULL,
     quantity INT NOT NULL,
-    duration INT NOT NULL COMMENT '租期(小时)',
+    duration INT NOT NULL COMMENT '计费周期数: hourly=小时 daily=天 weekly=周 monthly=月 perpetual=1',
     unit_price BIGINT NOT NULL COMMENT '单价(分)',
     total_amount BIGINT NOT NULL COMMENT '总金额(分)',
     platform_fee BIGINT NOT NULL COMMENT '平台佣金(分)',

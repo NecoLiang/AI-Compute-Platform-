@@ -4,6 +4,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -183,9 +184,41 @@ func TestValidateOrderParams_FundSafety(t *testing.T) {
 	})
 
 	t.Run("时长超上限必须被拒绝", func(t *testing.T) {
-		_, _, err := ValidateOrderParams(orderableProduct(), 1, MaxOrderDuration+1)
+		p := orderableProduct() // hourly
+		_, _, err := ValidateOrderParams(p, 1, MaxDurationFor(PricingHourly)+1)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "租期超出上限")
+	})
+
+	// C-04: duration 语义为「计费周期数」，上限按计费模式分别设定，
+	// 否则 monthly 商品可以传 87600 表示 7300 年租期。
+	t.Run("时长上限按计费模式分别生效", func(t *testing.T) {
+		cases := []struct {
+			mode string
+			max  int
+			unit string
+		}{
+			{PricingHourly, 87600, "小时"},
+			{PricingDaily, 3650, "天"},
+			{PricingWeekly, 520, "周"},
+			{PricingMonthly, 120, "个月"},
+		}
+		for _, tc := range cases {
+			p := orderableProduct()
+			p.PricingMode = tc.mode
+
+			// 恰好等于上限：通过
+			_, dur, err := ValidateOrderParams(p, 1, tc.max)
+			assert.NoError(t, err, "%s 模式下 %d 应通过", tc.mode, tc.max)
+			assert.Equal(t, tc.max, dur)
+
+			// 超出一个周期：拒绝，且提示里带正确单位
+			_, _, err = ValidateOrderParams(p, 1, tc.max+1)
+			assert.Error(t, err, "%s 模式下 %d 应被拒绝", tc.mode, tc.max+1)
+			assert.Contains(t, err.Error(), tc.unit, "错误提示必须带单位，避免无单位歧义")
+			assert.Equal(t, tc.max, MaxDurationFor(tc.mode))
+			assert.Equal(t, tc.unit, DurationUnit(tc.mode))
+		}
 	})
 
 	t.Run("超过库存必须被拒绝", func(t *testing.T) {
@@ -485,6 +518,45 @@ func TestGroupProductsByType(t *testing.T) {
 	sum := 0
 	for _, g := range groups { sum += len(g.Products) }
 	assert.Equal(t, len(list), sum, "分组后商品总数必须守恒")
+}
+
+// ===== C-04: duration 为「计费周期数」，租期换算必须按模式走日历 =====
+
+func TestLeaseEndAt(t *testing.T) {
+	start := time.Date(2026, 1, 31, 10, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name string
+		mode string
+		dur  int
+		want time.Time
+	}{
+		{"按小时: 24 小时", PricingHourly, 24, time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)},
+		{"按天: 3 天", PricingDaily, 3, time.Date(2026, 2, 3, 10, 0, 0, 0, time.UTC)},
+		{"按周: 2 周 = 14 天", PricingWeekly, 2, time.Date(2026, 2, 14, 10, 0, 0, 0, time.UTC)},
+		// 自然月：1月31日 + 1 个月，Go 规范化为 3 月 3 日（2026 非闰年，2 月 28 天）
+		{"按月: 走自然日历而非固定30天", PricingMonthly, 1, time.Date(2026, 3, 3, 10, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, LeaseEndAt(start, tc.mode, tc.dur))
+		})
+	}
+
+	t.Run("买断无到期时间", func(t *testing.T) {
+		assert.True(t, LeaseEndAt(start, PricingPerpetual, 1).IsZero(),
+			"永久使用权必须返回零值，由调用方置 lease_end_at = NULL")
+	})
+
+	t.Run("同样的 duration 在不同模式下租期长度不同", func(t *testing.T) {
+		// 这正是修复的核心：duration=30 在 hourly 下是 30 小时，在 daily 下是 30 天。
+		hourly := LeaseEndAt(start, PricingHourly, 30)
+		daily := LeaseEndAt(start, PricingDaily, 30)
+		assert.True(t, daily.After(hourly),
+			"daily 的 30 个周期必须远长于 hourly 的 30 个周期，否则就是把周期数当成了小时数")
+		assert.Equal(t, 30*24, int(daily.Sub(start).Hours()))
+		assert.Equal(t, 30, int(hourly.Sub(start).Hours()))
+	})
 }
 
 // ===== 回归: 分页默认值 =====
