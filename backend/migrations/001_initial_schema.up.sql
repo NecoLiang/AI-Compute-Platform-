@@ -51,7 +51,7 @@ CREATE TABLE enterprises (
 CREATE TABLE user_roles (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id BIGINT NOT NULL,
-    role ENUM('buyer','supplier','vendor','funder') NOT NULL,
+    role ENUM('buyer','supplier','vendor','funder','operator','admin') NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_user_role (user_id, role),
     INDEX idx_user (user_id)

@@ -46,7 +46,16 @@ type CallbackReq struct {
 	Amount  int64  `json:"amount"`
 }
 
+// HandleCallback 处理易宝支付异步回调。
+//
+// 🔴 安全铁律：回调接口无鉴权（由第三方服务器直连调用），因此**验签是唯一的信任来源**，
+// 必须先于任何业务处理执行。易宝尚未接入时没有可用公钥来验签，因此直接拒绝全部回调 ——
+// 绝不能因为"还没接支付"就放行：那等于任何人知道 order_no 就能把订单刷成已支付并触发分账。
 func (s *Service) HandleCallback(req CallbackReq) error {
+	if err := s.yeepay.VerifyCallback(req); err != nil {
+		return err
+	}
+
 	existing, _ := s.repo.GetPaymentByYeepayTx(req.TxID)
 	if existing != nil && existing.Status == "paid" {
 		return nil // idempotent

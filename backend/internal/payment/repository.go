@@ -152,9 +152,14 @@ func (y *YeepayClient) CreatePayment(orderNo string, amount int64, channel strin
 	return "", "", ErrYeepayNotConfigured
 }
 
-func (y *YeepayClient) VerifyCallback(data map[string]string) bool {
-	// TODO: 接入后验证易宝回调 RSA 签名
-	return false
+// VerifyCallback 验证易宝回调的 RSA 签名。
+//
+// 🔴 返回 error 而非 bool 是刻意的：bool 的 false 在调用方很容易被忽略或误读成
+// "验签没通过就算了"，而回调接口本身没有鉴权，验签是唯一信任来源。
+// 未接入易宝时这里没有公钥可验，必须明确报错阻断，不得放行。
+func (y *YeepayClient) VerifyCallback(req CallbackReq) error {
+	// TODO: 接入后用易宝公钥验证回调报文 RSA 签名，并校验 amount 与本地订单一致
+	return ErrYeepayCallbackUnverifiable
 }
 
 func (y *YeepayClient) CreateSplit(orderNo string, settlements []SplitItem) error {
@@ -162,6 +167,10 @@ func (y *YeepayClient) CreateSplit(orderNo string, settlements []SplitItem) erro
 }
 
 var ErrYeepayNotConfigured = fmt.Errorf("易宝支付未接入: 需配置 merchant_no + RSA私钥 + API地址")
+
+// ErrYeepayCallbackUnverifiable 支付回调无法验签时返回。回调接口无鉴权，
+// 放行未验签的回调等于允许任何人伪造支付成功并触发分账，因此一律拒绝。
+var ErrYeepayCallbackUnverifiable = fmt.Errorf("支付回调无法验签，已拒绝: 需配置易宝公钥后方可处理回调（未接入期间平台不接受任何支付回调）")
 
 type SplitItem struct {
 	PayeeType string

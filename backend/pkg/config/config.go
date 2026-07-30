@@ -7,6 +7,7 @@ type Config struct {
 	Database DatabaseConfig
 	Redis    RedisConfig
 	JWT      JWTConfig
+	Security SecurityConfig
 }
 
 type ServerConfig struct {
@@ -29,6 +30,13 @@ type JWTConfig struct {
 	RefreshSecret string
 	AccessTTL     int // seconds, default 900 (15min)
 	RefreshTTL    int // seconds, default 604800 (7 days)
+}
+
+type SecurityConfig struct {
+	// CredentialKey 是交付访问凭证的 AES-256-GCM 加密密钥, 64 位 hex 表示 32 字节。
+	// 默认留空: 留空时生成访问凭证会返回明确错误而非降级存明文。
+	// 生产环境应从 KMS / 环境变量注入, 不要提交进仓库。
+	CredentialKey string
 }
 
 func Load(path string) (*Config, error) {
@@ -55,6 +63,9 @@ func Load(path string) (*Config, error) {
 			RefreshSecret: viper.GetString("jwt.refresh_secret"),
 			AccessTTL:     viper.GetInt("jwt.access_ttl"),
 			RefreshTTL:    viper.GetInt("jwt.refresh_ttl"),
+		},
+		Security: SecurityConfig{
+			CredentialKey: viper.GetString("security.credential_key"),
 		},
 	}
 	if cfg.JWT.AccessTTL == 0 {
