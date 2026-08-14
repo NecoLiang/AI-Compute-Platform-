@@ -8,14 +8,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	"tokenfactory/internal/admin"
 	"tokenfactory/internal/auth"
-	"tokenfactory/internal/user"
+	"tokenfactory/internal/blockchain"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
-	"tokenfactory/internal/payment"
 	"tokenfactory/internal/intermediary"
-	"tokenfactory/internal/admin"
-	"tokenfactory/internal/blockchain"
+	"tokenfactory/internal/payment"
+	"tokenfactory/internal/user"
 	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/db"
 	mw "tokenfactory/pkg/middleware"
@@ -47,6 +47,12 @@ func main() {
 	// Redis
 	rdb := redis.NewRedis(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
 	defer rdb.Close()
+	redisCtx, cancelRedisPing := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRedisPing()
+	if err := rdb.Ping(redisCtx).Err(); err != nil {
+		slog.Error("connect redis", "error", err)
+		os.Exit(1)
+	}
 
 	// Repositories
 	authRepo := auth.NewRepository(sqlDB)

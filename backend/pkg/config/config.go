@@ -1,6 +1,11 @@
 package config
 
-import "github.com/spf13/viper"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/spf13/viper"
+)
 
 type Config struct {
 	Server   ServerConfig
@@ -40,32 +45,34 @@ type SecurityConfig struct {
 }
 
 func Load(path string) (*Config, error) {
-	viper.SetConfigFile(path)
-	viper.AutomaticEnv()
-	if err := viper.ReadInConfig(); err != nil {
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	if err := v.ReadInConfig(); err != nil {
 		return nil, err
 	}
 	cfg := &Config{
 		Server: ServerConfig{
-			Port: viper.GetString("server.port"),
-			Mode: viper.GetString("server.mode"),
+			Port: v.GetString("server.port"),
+			Mode: v.GetString("server.mode"),
 		},
 		Database: DatabaseConfig{
-			DSN: viper.GetString("database.dsn"),
+			DSN: v.GetString("database.dsn"),
 		},
 		Redis: RedisConfig{
-			Addr:     viper.GetString("redis.addr"),
-			Password: viper.GetString("redis.password"),
-			DB:       viper.GetInt("redis.db"),
+			Addr:     v.GetString("redis.addr"),
+			Password: v.GetString("redis.password"),
+			DB:       v.GetInt("redis.db"),
 		},
 		JWT: JWTConfig{
-			AccessSecret:  viper.GetString("jwt.access_secret"),
-			RefreshSecret: viper.GetString("jwt.refresh_secret"),
-			AccessTTL:     viper.GetInt("jwt.access_ttl"),
-			RefreshTTL:    viper.GetInt("jwt.refresh_ttl"),
+			AccessSecret:  v.GetString("jwt.access_secret"),
+			RefreshSecret: v.GetString("jwt.refresh_secret"),
+			AccessTTL:     v.GetInt("jwt.access_ttl"),
+			RefreshTTL:    v.GetInt("jwt.refresh_ttl"),
 		},
 		Security: SecurityConfig{
-			CredentialKey: viper.GetString("security.credential_key"),
+			CredentialKey: v.GetString("security.credential_key"),
 		},
 	}
 	if cfg.JWT.AccessTTL == 0 {
@@ -76,6 +83,14 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = "8080"
+	}
+	if cfg.Server.Mode == "release" {
+		if len(cfg.JWT.AccessSecret) < 32 || strings.HasPrefix(cfg.JWT.AccessSecret, "change-me-") {
+			return nil, fmt.Errorf("jwt.access_secret must be a non-default secret of at least 32 characters in release mode")
+		}
+		if len(cfg.JWT.RefreshSecret) < 32 || strings.HasPrefix(cfg.JWT.RefreshSecret, "change-me-") {
+			return nil, fmt.Errorf("jwt.refresh_secret must be a non-default secret of at least 32 characters in release mode")
+		}
 	}
 	return cfg, nil
 }

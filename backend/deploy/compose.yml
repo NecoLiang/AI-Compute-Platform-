@@ -1,0 +1,41 @@
+name: wanxiang-backend
+
+services:
+  backend:
+    image: wanxiang-backend:${IMAGE_TAG:?IMAGE_TAG is required}
+    container_name: wanxiang-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        format: raw
+        required: true
+    environment:
+      SERVER_PORT: "8080"
+      SERVER_MODE: release
+      REDIS_ADDR: wanxiang-redis:6379
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks:
+      - middleware
+      - frontend
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+networks:
+  middleware:
+    external: true
+    name: config_default
+  frontend:
+    external: true
+    name: wanxiang-frontend_default
