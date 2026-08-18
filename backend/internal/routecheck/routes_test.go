@@ -42,7 +42,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	r := gin.New()
 
 	public := r.Group("/api/v1")
-	authH.RegisterRoutes(public, "secret", nil)
+	authH.RegisterRoutes(public)
 	computeH.RegisterPublicRoutes(public)
 	intermediaryH.RegisterPublicRoutes(public)
 	equipmentH.RegisterPublicRoutes(public)
@@ -80,11 +80,15 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	seen := map[string]bool{}
 	for _, rt := range routes {
 		k := rt.Method + " " + rt.Path
-		if seen[k] { t.Errorf("重复路由: %s", k) }
+		if seen[k] {
+			t.Errorf("重复路由: %s", k)
+		}
 		seen[k] = true
 		lines = append(lines, k)
 	}
 	sort.Strings(lines)
 	t.Logf("共注册 %d 条路由:", len(lines))
-	for _, l := range lines { t.Logf("  %s", l) }
+	for _, l := range lines {
+		t.Logf("  %s", l)
+	}
 }

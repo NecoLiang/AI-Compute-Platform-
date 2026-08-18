@@ -163,6 +163,44 @@ security:
 
 paths:
   # ==================== 认证 ====================
+  /auth/sms/code:
+    post:
+      tags: [认证 Auth]
+      summary: 发送登录或注册验证码
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, purpose]
+              properties:
+                phone: { type: string, example: "13800138000" }
+                purpose: { type: string, enum: [register, login], example: "login" }
+      responses:
+        '200':
+          description: "请求已处理；验证码有效期默认 300 秒"
+
+  /auth/sms/login:
+    post:
+      tags: [认证 Auth]
+      summary: 已注册用户短信验证码登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, sms_code]
+              properties:
+                phone: { type: string, example: "13800138000" }
+                sms_code: { type: string, pattern: '^[0-9]{6}$', example: "123456" }
+      responses:
+        '200':
+          description: "登录成功，返回 access_token、refresh_token 与用户信息"
+
   /auth/register:
     post:
       tags: [认证 Auth]

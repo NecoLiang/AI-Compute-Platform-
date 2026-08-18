@@ -1,7 +1,10 @@
 package auth
 
 import (
+	"errors"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -25,14 +28,34 @@ func NewRepository(db *sqlx.DB) *Repository {
 }
 
 func (r *Repository) CreateUser(phone, email, passwordHash string) (int64, error) {
-	res, err := r.db.Exec(
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
 		"INSERT INTO users (phone, email, password_hash, status) VALUES (?, ?, ?, 'active')",
 		phone, email, passwordHash,
 	)
 	if err != nil {
+		var mysqlErr *mysql.MySQLError
+		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+			return 0, ErrUserExists
+		}
 		return 0, err
 	}
-	return res.LastInsertId()
+	userID, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec("INSERT INTO user_roles (user_id, role) VALUES (?, 'buyer')", userID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return userID, nil
 }
 
 func (r *Repository) FindByPhone(phone string) (*User, error) {

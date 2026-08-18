@@ -12,6 +12,7 @@ type Config struct {
 	Database DatabaseConfig
 	Redis    RedisConfig
 	JWT      JWTConfig
+	SMS      SMSConfig
 	Security SecurityConfig
 }
 
@@ -35,6 +36,15 @@ type JWTConfig struct {
 	RefreshSecret string
 	AccessTTL     int // seconds, default 900 (15min)
 	RefreshTTL    int // seconds, default 604800 (7 days)
+}
+
+type SMSConfig struct {
+	Enabled              bool
+	SignName             string
+	LoginTemplateCode    string
+	RegisterTemplateCode string
+	Endpoint             string
+	CodeTTL              int // seconds
 }
 
 type SecurityConfig struct {
@@ -71,6 +81,14 @@ func Load(path string) (*Config, error) {
 			AccessTTL:     v.GetInt("jwt.access_ttl"),
 			RefreshTTL:    v.GetInt("jwt.refresh_ttl"),
 		},
+		SMS: SMSConfig{
+			Enabled:              v.GetBool("sms.enabled"),
+			SignName:             v.GetString("sms.sign_name"),
+			LoginTemplateCode:    v.GetString("sms.login_template_code"),
+			RegisterTemplateCode: v.GetString("sms.register_template_code"),
+			Endpoint:             v.GetString("sms.endpoint"),
+			CodeTTL:              v.GetInt("sms.code_ttl"),
+		},
 		Security: SecurityConfig{
 			CredentialKey: v.GetString("security.credential_key"),
 		},
@@ -80,6 +98,15 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.JWT.RefreshTTL == 0 {
 		cfg.JWT.RefreshTTL = 604800
+	}
+	if cfg.SMS.Endpoint == "" {
+		cfg.SMS.Endpoint = "dysmsapi.aliyuncs.com"
+	}
+	if cfg.SMS.CodeTTL == 0 {
+		cfg.SMS.CodeTTL = 300
+	}
+	if cfg.SMS.Enabled && (cfg.SMS.SignName == "" || cfg.SMS.LoginTemplateCode == "" || cfg.SMS.RegisterTemplateCode == "") {
+		return nil, fmt.Errorf("sms.sign_name, sms.login_template_code and sms.register_template_code are required when sms is enabled")
 	}
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = "8080"

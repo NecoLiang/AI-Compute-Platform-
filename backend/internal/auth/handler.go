@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"log/slog"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
 
@@ -15,12 +16,27 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-func (h *Handler) RegisterRoutes(r *gin.RouterGroup, jwtSecret string, rdb interface{}) {
+func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+	r.POST("/auth/sms/code", h.SendSMSCode)
+	r.POST("/auth/sms/login", h.SMSLogin)
 	r.POST("/auth/register", h.Register)
 	r.POST("/auth/login", h.Login)
 	r.POST("/auth/refresh", h.RefreshToken)
 	r.POST("/auth/logout", h.Logout)
 	r.GET("/auth/me", h.Me)
+}
+
+func (h *Handler) SendSMSCode(c *gin.Context) {
+	var req SendSMSCodeReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.svc.SendSMSCode(c.Request.Context(), req.Phone, req.Purpose, c.ClientIP()); err != nil {
+		writeAuthError(c, err)
+		return
+	}
+	response.Success(c, gin.H{"expires_in": int(h.svc.smsCodeTTL.Seconds())})
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -29,12 +45,31 @@ func (h *Handler) Register(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	userID, err := h.svc.Register(req)
+	userID, err := h.svc.Register(c.Request.Context(), req)
 	if err != nil {
-		response.Error(c, ErrToCode(err), err.Error())
+		writeAuthError(c, err)
 		return
 	}
 	response.Success(c, gin.H{"user_id": userID})
+}
+
+func (h *Handler) SMSLogin(c *gin.Context) {
+	var req SMSLoginReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	tokens, user, err := h.svc.SMSLogin(c.Request.Context(), req)
+	if err != nil {
+		writeAuthError(c, err)
+		return
+	}
+	response.Success(c, gin.H{
+		"access_token":  tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+		"expires_in":    tokens.ExpiresIn,
+		"user":          user,
+	})
 }
 
 func (h *Handler) Login(c *gin.Context) {
@@ -45,7 +80,7 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 	tokens, user, err := h.svc.Login(req)
 	if err != nil {
-		response.Error(c, ErrToCode(err), err.Error())
+		writeAuthError(c, err)
 		return
 	}
 	response.Success(c, gin.H{
@@ -54,6 +89,16 @@ func (h *Handler) Login(c *gin.Context) {
 		"expires_in":    tokens.ExpiresIn,
 		"user":          user,
 	})
+}
+
+func writeAuthError(c *gin.Context, err error) {
+	code := ErrToCode(err)
+	message := err.Error()
+	if code == errcode.InternalError {
+		slog.Error("authentication request failed", "error", err)
+		message = errcode.Message(code)
+	}
+	response.Error(c, code, message)
 }
 
 func (h *Handler) RefreshToken(c *gin.Context) {

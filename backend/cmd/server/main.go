@@ -15,6 +15,7 @@ import (
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/payment"
+	"tokenfactory/internal/sms"
 	"tokenfactory/internal/user"
 	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/db"
@@ -59,7 +60,17 @@ func main() {
 	userRepo := user.NewRepository(sqlDB)
 
 	// Services
-	authSvc := auth.NewService(authRepo, userRepo, rdb, cfg.JWT.AccessSecret, cfg.JWT.RefreshSecret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	var smsSender auth.SMSSender
+	if cfg.SMS.Enabled {
+		smsSender, err = sms.NewAliyunSender(cfg.SMS.SignName, cfg.SMS.LoginTemplateCode, cfg.SMS.RegisterTemplateCode, cfg.SMS.Endpoint)
+		if err != nil {
+			slog.Error("configure Alibaba Cloud SMS", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		slog.Warn("SMS login is disabled; configure SMS sign and templates to enable it")
+	}
+	authSvc := auth.NewService(authRepo, userRepo, rdb, smsSender, time.Duration(cfg.SMS.CodeTTL)*time.Second, cfg.JWT.AccessSecret, cfg.JWT.RefreshSecret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
 	userSvc := user.NewService(userRepo)
 	computeRepo := compute.NewRepository(sqlDB)
 	computeSvc := compute.NewService(computeRepo, sqlDB, cfg.Security.CredentialKey)
@@ -91,7 +102,7 @@ func main() {
 
 	// Public API
 	public := r.Group("/api/v1")
-	auth.NewHandler(authSvc).RegisterRoutes(public, cfg.JWT.AccessSecret, rdb)
+	auth.NewHandler(authSvc).RegisterRoutes(public)
 	compute.NewHandler(computeSvc).RegisterPublicRoutes(public)
 	intermediary.NewHandler(intermediarySvc).RegisterPublicRoutes(public)
 	equipment.NewHandler(equipmentSvc).RegisterPublicRoutes(public)
