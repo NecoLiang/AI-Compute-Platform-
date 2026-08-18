@@ -9,14 +9,16 @@ import (
 )
 
 type Handler struct {
-	svc *Service
+	svc             *Service
+	captchaVerifier *CapVerifier
 }
 
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+func NewHandler(svc *Service, captchaVerifier *CapVerifier) *Handler {
+	return &Handler{svc: svc, captchaVerifier: captchaVerifier}
 }
 
 func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+	r.POST("/auth/captcha/verify", h.VerifyCaptcha)
 	r.POST("/auth/sms/code", h.SendSMSCode)
 	r.POST("/auth/sms/login", h.SMSLogin)
 	r.POST("/auth/register", h.Register)
@@ -26,10 +28,29 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.GET("/auth/me", h.Me)
 }
 
+func (h *Handler) VerifyCaptcha(c *gin.Context) {
+	var req struct {
+		CaptchaToken string `json:"captcha_token" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.captchaVerifier.Verify(c.Request.Context(), req.CaptchaToken); err != nil {
+		writeAuthError(c, err)
+		return
+	}
+	response.Success(c, nil)
+}
+
 func (h *Handler) SendSMSCode(c *gin.Context) {
 	var req SendSMSCodeReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.captchaVerifier.Verify(c.Request.Context(), req.CaptchaToken); err != nil {
+		writeAuthError(c, err)
 		return
 	}
 	if err := h.svc.SendSMSCode(c.Request.Context(), req.Phone, req.Purpose, c.ClientIP()); err != nil {

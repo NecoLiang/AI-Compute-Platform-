@@ -71,6 +71,7 @@ func main() {
 		slog.Warn("SMS login is disabled; configure SMS sign and templates to enable it")
 	}
 	authSvc := auth.NewService(authRepo, userRepo, rdb, smsSender, time.Duration(cfg.SMS.CodeTTL)*time.Second, cfg.JWT.AccessSecret, cfg.JWT.RefreshSecret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	capVerifier := auth.NewCapVerifier(cfg.Security.CapSiteVerifyURL, cfg.Security.CapSecret)
 	userSvc := user.NewService(userRepo)
 	computeRepo := compute.NewRepository(sqlDB)
 	computeSvc := compute.NewService(computeRepo, sqlDB, cfg.Security.CredentialKey)
@@ -102,7 +103,7 @@ func main() {
 
 	// Public API
 	public := r.Group("/api/v1")
-	auth.NewHandler(authSvc).RegisterRoutes(public)
+	auth.NewHandler(authSvc, capVerifier).RegisterRoutes(public)
 	compute.NewHandler(computeSvc).RegisterPublicRoutes(public)
 	intermediary.NewHandler(intermediarySvc).RegisterPublicRoutes(public)
 	equipment.NewHandler(equipmentSvc).RegisterPublicRoutes(public)

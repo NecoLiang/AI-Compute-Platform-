@@ -97,8 +97,9 @@ type RegisterReq struct {
 }
 
 type SendSMSCodeReq struct {
-	Phone   string `json:"phone" binding:"required"`
-	Purpose string `json:"purpose" binding:"required,oneof=register login"`
+	Phone        string `json:"phone" binding:"required"`
+	Purpose      string `json:"purpose" binding:"required,oneof=register login"`
+	CaptchaToken string `json:"captcha_token" binding:"required"`
 }
 
 type SMSLoginReq struct {
@@ -348,6 +349,8 @@ func ErrToCode(err error) int {
 		return errcode.ParamInvalid
 	case errors.Is(err, ErrInvalidSMSCode):
 		return errcode.Unauthorized
+	case errors.Is(err, ErrCaptchaInvalid):
+		return errcode.ParamInvalid
 	case errors.Is(err, ErrSMSRateLimited):
 		return errcode.TooManyRequests
 	case errors.Is(err, sql.ErrNoRows):

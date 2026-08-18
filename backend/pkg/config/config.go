@@ -51,7 +51,9 @@ type SecurityConfig struct {
 	// CredentialKey 是交付访问凭证的 AES-256-GCM 加密密钥, 64 位 hex 表示 32 字节。
 	// 默认留空: 留空时生成访问凭证会返回明确错误而非降级存明文。
 	// 生产环境应从 KMS / 环境变量注入, 不要提交进仓库。
-	CredentialKey string
+	CredentialKey    string
+	CapSiteVerifyURL string
+	CapSecret        string
 }
 
 func Load(path string) (*Config, error) {
@@ -90,7 +92,9 @@ func Load(path string) (*Config, error) {
 			CodeTTL:              v.GetInt("sms.code_ttl"),
 		},
 		Security: SecurityConfig{
-			CredentialKey: v.GetString("security.credential_key"),
+			CredentialKey:    v.GetString("security.credential_key"),
+			CapSiteVerifyURL: v.GetString("security.cap_siteverify_url"),
+			CapSecret:        v.GetString("security.cap_secret"),
 		},
 	}
 	if cfg.JWT.AccessTTL == 0 {
@@ -107,6 +111,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.SMS.Enabled && (cfg.SMS.SignName == "" || cfg.SMS.LoginTemplateCode == "" || cfg.SMS.RegisterTemplateCode == "") {
 		return nil, fmt.Errorf("sms.sign_name, sms.login_template_code and sms.register_template_code are required when sms is enabled")
+	}
+	if (cfg.Security.CapSiteVerifyURL == "") != (cfg.Security.CapSecret == "") {
+		return nil, fmt.Errorf("security.cap_siteverify_url and security.cap_secret must be configured together")
 	}
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = "8080"

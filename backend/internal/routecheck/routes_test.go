@@ -37,7 +37,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	adminH := admin.NewHandler(nil)
 	userH := user.NewHandler(nil)
 	blockchainH := blockchain.NewHandler(nil)
-	authH := auth.NewHandler(nil)
+	authH := auth.NewHandler(nil, nil)
 
 	r := gin.New()
 

@@ -163,6 +163,24 @@ security:
 
 paths:
   # ==================== 认证 ====================
+  /auth/captcha/verify:
+    post:
+      tags: [认证 Auth]
+      summary: 校验一次性人机验证 token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [captcha_token]
+              properties:
+                captcha_token: { type: string }
+      responses:
+        '200':
+          description: "请求已处理；token 仅可成功使用一次"
+
   /auth/sms/code:
     post:
       tags: [认证 Auth]
@@ -174,10 +192,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [phone, purpose]
+              required: [phone, purpose, captcha_token]
               properties:
                 phone: { type: string, example: "13800138000" }
                 purpose: { type: string, enum: [register, login], example: "login" }
+                captcha_token: { type: string }
       responses:
         '200':
           description: "请求已处理；验证码有效期默认 300 秒"
