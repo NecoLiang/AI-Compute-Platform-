@@ -86,6 +86,9 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 		seen[k] = true
 		lines = append(lines, k)
 	}
+	if seen["POST /api/v1/auth/login"] {
+		t.Error("账号密码登录尚未开放，不应注册公开路由")
+	}
 	sort.Strings(lines)
 	t.Logf("共注册 %d 条路由:", len(lines))
 	for _, l := range lines {

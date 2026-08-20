@@ -26,30 +26,6 @@
           }
         },
         {
-          "name": "登录",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"account\": \"13800138000\",\n  \"password\": \"Abc12345!\"\n}" },
-            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
-          },
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "exec": [
-                  "var data = JSON.parse(responseBody);",
-                  "if (data.code === 0) {",
-                  "  pm.collectionVariables.set('token', data.data.access_token);",
-                  "  console.log('Token saved: ' + data.data.access_token.substring(0, 20) + '...');",
-                  "}"
-                ],
-                "type": "text/javascript"
-              }
-            }
-          ]
-        },
-        {
           "name": "刷新 Token",
           "request": {
             "method": "POST",

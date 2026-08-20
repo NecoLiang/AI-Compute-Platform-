@@ -22,7 +22,6 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 	r.POST("/auth/sms/code", h.SendSMSCode)
 	r.POST("/auth/sms/login", h.SMSLogin)
 	r.POST("/auth/register", h.Register)
-	r.POST("/auth/login", h.Login)
 	r.POST("/auth/refresh", h.RefreshToken)
 	r.POST("/auth/logout", h.Logout)
 	r.GET("/auth/me", h.Me)

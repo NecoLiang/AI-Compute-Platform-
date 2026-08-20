@@ -1,6 +1,6 @@
 # 认证 Auth API
 
-**Base**: `http://localhost:8080/api/v1` | **Auth**: 除注册/登录/刷新外均需 `Bearer <token>`
+**Base**: `http://localhost:8080/api/v1` | **Auth**: `/auth/me` 需 `Bearer <token>`
 
 ---
 
@@ -29,32 +29,6 @@ curl -X POST http://localhost:8080/api/v1/auth/register \
 ```json
 {"code":50000,"message":"短信验证码服务未接入: 请配置短信服务商(AccessKey+签名+模板ID)"}
 ```
-
----
-
-## POST /auth/login · 登录
-
-```
-curl -X POST http://localhost:8080/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"account":"13800138000","password":"Abc12345!"}'
-```
-
-| 参数 | 类型 | 必填 | 说明 |
-|------|------|:--:|------|
-| account | string | ✅ | 手机号 |
-| password | string | ✅ | 密码 |
-
-**成功** `200`
-```json
-{"code":0,"data":{
-  "access_token":"eyJ...","refresh_token":"eyJ...","expires_in":900,
-  "user":{"id":1,"phone":"138****8000","roles":["buyer"]}
-}}
-```
-> 前端需存储 `access_token`，后续请求加 `Authorization: Bearer <access_token>`
-
-**测试账号**：`admin` / `admin123`（有 buyer + operator + admin 角色）
 
 ---
 

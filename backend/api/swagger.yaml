@@ -240,39 +240,6 @@ paths:
       responses:
         '200': { description: "注册成功", content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Response' }, { type: object, properties: { data: { type: object, properties: { user_id: { type: integer } } } } }] } } } }
 
-  /auth/login:
-    post:
-      tags: [认证 Auth]
-      summary: 用户登录
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [account, password]
-              properties:
-                account: { type: string, example: "13800138000" }
-                password: { type: string, example: "Abc12345!" }
-      responses:
-        '200':
-          description: "登录成功"
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/Response'
-                  - type: object
-                    properties:
-                      data:
-                        type: object
-                        properties:
-                          access_token: { type: string }
-                          refresh_token: { type: string }
-                          expires_in: { type: integer, example: 900 }
-                          user: { type: object }
-
   /auth/refresh:
     post:
       tags: [认证 Auth]
