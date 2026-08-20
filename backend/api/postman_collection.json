@@ -10,28 +10,52 @@
   },
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:8080/api/v1" },
-    { "key": "token", "value": "" }
+    { "key": "token", "value": "" },
+    { "key": "refresh_token", "value": "" },
+    { "key": "captcha_token", "value": "" }
   ],
   "item": [
     {
       "name": "认证 Auth",
       "item": [
         {
+          "name": "获取短信验证码",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800138000\",\n  \"purpose\": \"login\",\n  \"captcha_token\": \"{{captcha_token}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/sms/code", "host": ["{{baseUrl}}"], "path": ["auth", "sms", "code"] }
+          }
+        },
+        {
           "name": "注册",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800138000\",\n  \"sms_code\": \"123456\",\n  \"password\": \"Abc12345!\",\n  \"agree_tos\": true\n}" },
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800138000\",\n  \"sms_code\": \"123456\",\n  \"agree_tos\": true\n}" },
             "url": { "raw": "{{baseUrl}}/auth/register", "host": ["{{baseUrl}}"], "path": ["auth", "register"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "var data = JSON.parse(responseBody);",
+                "if (data.code === 0) {",
+                "  pm.collectionVariables.set('token', data.data.access_token);",
+                "  pm.collectionVariables.set('refresh_token', data.data.refresh_token);",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }]
         },
         {
-          "name": "登录",
+          "name": "手机号验证码登录",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": { "mode": "raw", "raw": "{\n  \"account\": \"13800138000\",\n  \"password\": \"Abc12345!\"\n}" },
-            "url": { "raw": "{{baseUrl}}/auth/login", "host": ["{{baseUrl}}"], "path": ["auth", "login"] }
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800138000\",\n  \"sms_code\": \"123456\"\n}" },
+            "url": { "raw": "{{baseUrl}}/auth/sms/login", "host": ["{{baseUrl}}"], "path": ["auth", "sms", "login"] }
           },
           "event": [
             {
@@ -41,7 +65,7 @@
                   "var data = JSON.parse(responseBody);",
                   "if (data.code === 0) {",
                   "  pm.collectionVariables.set('token', data.data.access_token);",
-                  "  console.log('Token saved: ' + data.data.access_token.substring(0, 20) + '...');",
+                  "  pm.collectionVariables.set('refresh_token', data.data.refresh_token);",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -56,14 +80,42 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}" },
             "url": { "raw": "{{baseUrl}}/auth/refresh", "host": ["{{baseUrl}}"], "path": ["auth", "refresh"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "var data = JSON.parse(responseBody);",
+                "if (data.code === 0) {",
+                "  pm.collectionVariables.set('token', data.data.access_token);",
+                "  pm.collectionVariables.set('refresh_token', data.data.refresh_token);",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }]
         },
         {
           "name": "登出",
           "request": {
             "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}" },
             "url": { "raw": "{{baseUrl}}/auth/logout", "host": ["{{baseUrl}}"], "path": ["auth", "logout"] }
-          }
+          },
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": [
+                "var data = JSON.parse(responseBody);",
+                "if (data.code === 0) {",
+                "  pm.collectionVariables.unset('token');",
+                "  pm.collectionVariables.unset('refresh_token');",
+                "}"
+              ],
+              "type": "text/javascript"
+            }
+          }]
         },
         {
           "name": "当前用户信息",

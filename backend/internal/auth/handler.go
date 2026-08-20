@@ -17,14 +17,16 @@ func NewHandler(svc *Service, captchaVerifier *CapVerifier) *Handler {
 	return &Handler{svc: svc, captchaVerifier: captchaVerifier}
 }
 
-func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
+func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 	r.POST("/auth/captcha/verify", h.VerifyCaptcha)
 	r.POST("/auth/sms/code", h.SendSMSCode)
 	r.POST("/auth/sms/login", h.SMSLogin)
 	r.POST("/auth/register", h.Register)
-	r.POST("/auth/login", h.Login)
 	r.POST("/auth/refresh", h.RefreshToken)
 	r.POST("/auth/logout", h.Logout)
+}
+
+func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.GET("/auth/me", h.Me)
 }
 
@@ -57,7 +59,10 @@ func (h *Handler) SendSMSCode(c *gin.Context) {
 		writeAuthError(c, err)
 		return
 	}
-	response.Success(c, gin.H{"expires_in": int(h.svc.smsCodeTTL.Seconds())})
+	response.Success(c, gin.H{
+		"expires_in":   int(h.svc.smsCodeTTL.Seconds()),
+		"resend_after": int(smsCooldown.Seconds()),
+	})
 }
 
 func (h *Handler) Register(c *gin.Context) {
@@ -66,12 +71,17 @@ func (h *Handler) Register(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	userID, err := h.svc.Register(c.Request.Context(), req)
+	tokens, user, err := h.svc.Register(c.Request.Context(), req)
 	if err != nil {
 		writeAuthError(c, err)
 		return
 	}
-	response.Success(c, gin.H{"user_id": userID})
+	response.Success(c, gin.H{
+		"access_token":  tokens.AccessToken,
+		"refresh_token": tokens.RefreshToken,
+		"expires_in":    tokens.ExpiresIn,
+		"user":          user,
+	})
 }
 
 func (h *Handler) SMSLogin(c *gin.Context) {
@@ -130,7 +140,7 @@ func (h *Handler) RefreshToken(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	tokens, err := h.svc.RefreshToken(req.RefreshToken)
+	tokens, err := h.svc.RefreshToken(c.Request.Context(), req.RefreshToken)
 	if err != nil {
 		response.Error(c, errcode.Unauthorized, err.Error())
 		return
@@ -139,11 +149,15 @@ func (h *Handler) RefreshToken(c *gin.Context) {
 }
 
 func (h *Handler) Logout(c *gin.Context) {
+	var req struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&req)
 	token := c.GetHeader("Authorization")
 	if len(token) > 7 {
 		token = token[7:]
 	}
-	if err := h.svc.Logout(c.Request.Context(), token); err != nil {
+	if err := h.svc.Logout(c.Request.Context(), token, req.RefreshToken); err != nil {
 		response.Error(c, errcode.InternalError, err.Error())
 		return
 	}
@@ -151,8 +165,12 @@ func (h *Handler) Logout(c *gin.Context) {
 }
 
 func (h *Handler) Me(c *gin.Context) {
-	userID, _ := c.Get("user_id")
-	uid := userID.(int64)
+	userID, ok := c.Get("user_id")
+	uid, ok := userID.(int64)
+	if !ok {
+		response.Error(c, errcode.Unauthorized, errcode.Message(errcode.Unauthorized))
+		return
+	}
 	info, err := h.svc.GetUser(uid)
 	if err != nil {
 		response.Error(c, errcode.NotFound, "用户不存在")
@@ -165,6 +183,5 @@ func (h *Handler) Me(c *gin.Context) {
 			info.Roles = rl
 		}
 	}
-	info.Phone = c.GetString("phone")
 	response.Success(c, info)
 }

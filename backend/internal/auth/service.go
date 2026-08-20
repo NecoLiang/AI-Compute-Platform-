@@ -21,7 +21,7 @@ import (
 
 var (
 	ErrUserExists        = errors.New("用户已存在")
-	ErrInvalidLogin      = errors.New("手机号或密码错误")
+	ErrInvalidLogin      = errors.New("账号或凭证不正确")
 	ErrUserFrozen        = errors.New("账号已被冻结")
 	ErrInvalidPhone      = errors.New("手机号格式不正确")
 	ErrInvalidSMSCode    = errors.New("验证码错误或已失效")
@@ -29,8 +29,8 @@ var (
 	ErrSMSNotConfigured  = errors.New("短信服务未配置")
 	ErrSMSSendFailed     = errors.New("短信发送失败")
 	ErrTermsRequired     = errors.New("必须同意用户协议和隐私政策")
-	ErrWeakPassword      = errors.New("密码长度不能少于8位")
 	ErrInvalidSMSPurpose = errors.New("验证码用途必须是 register 或 login")
+	ErrInvalidRefresh    = errors.New("登录状态已失效，请重新登录")
 )
 
 var (
@@ -92,8 +92,7 @@ func NewService(repo UserRepository, userRoleRepo UserRoleRepository, rdb *redis
 type RegisterReq struct {
 	Phone    string `json:"phone" binding:"required"`
 	SmsCode  string `json:"sms_code" binding:"required"`
-	Password string `json:"password" binding:"required,min=8"`
-	AgreeTOS bool   `json:"agree_tos" binding:"required"`
+	AgreeTOS bool   `json:"agree_tos"`
 }
 
 type SendSMSCodeReq struct {
@@ -161,43 +160,40 @@ func (s *Service) SendSMSCode(ctx context.Context, phone, purpose, clientIP stri
 	return nil
 }
 
-func (s *Service) Register(ctx context.Context, req RegisterReq) (int64, error) {
+func (s *Service) Register(ctx context.Context, req RegisterReq) (*TokenPair, *UserInfo, error) {
 	if !mainlandPhonePattern.MatchString(req.Phone) {
-		return 0, ErrInvalidPhone
+		return nil, nil, ErrInvalidPhone
 	}
 	if !req.AgreeTOS {
-		return 0, ErrTermsRequired
-	}
-	if len(req.Password) < 8 {
-		return 0, ErrWeakPassword
-	}
-	if _, err := s.repo.FindByPhone(req.Phone); err == nil {
-		return 0, ErrUserExists
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return 0, err
+		return nil, nil, ErrTermsRequired
 	}
 	if err := s.verifySMSCode(ctx, req.Phone, "register", req.SmsCode); err != nil {
-		return 0, err
+		return nil, nil, err
 	}
-	hash, err := HashPassword(req.Password)
+	if _, err := s.repo.FindByPhone(req.Phone); err == nil {
+		return nil, nil, ErrUserExists
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, err
+	}
+	userID, err := s.repo.CreateUser(req.Phone, "", "")
 	if err != nil {
-		return 0, err
+		return nil, nil, err
 	}
-	return s.repo.CreateUser(req.Phone, "", hash)
+	return s.issueTokens(&User{ID: userID, Phone: req.Phone, Status: "active"})
 }
 
 func (s *Service) SMSLogin(ctx context.Context, req SMSLoginReq) (*TokenPair, *UserInfo, error) {
 	if !mainlandPhonePattern.MatchString(req.Phone) {
 		return nil, nil, ErrInvalidPhone
 	}
+	if err := s.verifySMSCode(ctx, req.Phone, "login", req.SMSCode); err != nil {
+		return nil, nil, err
+	}
 	user, err := s.repo.FindByPhone(req.Phone)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrInvalidLogin
 	}
 	if err != nil {
-		return nil, nil, err
-	}
-	if err := s.verifySMSCode(ctx, req.Phone, "login", req.SMSCode); err != nil {
 		return nil, nil, err
 	}
 	if user.Status == "frozen" {
@@ -273,35 +269,80 @@ func generateSMSCode() (string, error) {
 	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
-func (s *Service) RefreshToken(refreshToken string) (*TokenPair, error) {
-	claims := &middleware.Claims{}
-	parsed, err := jwt.ParseWithClaims(refreshToken, claims, func(t *jwt.Token) (interface{}, error) {
-		return []byte(s.jwtRefreshSec), nil
-	})
-	if err != nil || !parsed.Valid {
-		return nil, errors.New("invalid refresh token")
+func (s *Service) RefreshToken(ctx context.Context, refreshToken string) (*TokenPair, error) {
+	claims, err := parseTokenClaims(refreshToken, s.jwtRefreshSec)
+	if err != nil || s.rdb == nil || claims.ExpiresAt == nil {
+		return nil, ErrInvalidRefresh
 	}
-	accessToken, err := s.genToken(claims.UserID, claims.Phone, claims.Roles, s.jwtAccessSec, s.accessTTL)
+	user, err := s.repo.FindByID(claims.UserID)
+	if err != nil || user.Status == "frozen" {
+		return nil, ErrInvalidRefresh
+	}
+	roles, err := s.userRoleRepo.GetRoles(user.ID)
 	if err != nil {
 		return nil, err
 	}
-	newRefreshToken, err := s.genToken(claims.UserID, claims.Phone, claims.Roles, s.jwtRefreshSec, s.refreshTTL)
+	if len(roles) == 0 {
+		roles = []string{"buyer"}
+	}
+	ttl := time.Until(claims.ExpiresAt.Time)
+	if ttl <= 0 {
+		return nil, ErrInvalidRefresh
+	}
+	consumed, err := s.rdb.SetNX(ctx, refreshTokenKey(refreshToken), "1", ttl).Result()
+	if err != nil {
+		return nil, err
+	}
+	if !consumed {
+		return nil, ErrInvalidRefresh
+	}
+	accessToken, err := s.genToken(user.ID, user.Phone, roles, s.jwtAccessSec, s.accessTTL)
+	if err != nil {
+		return nil, err
+	}
+	newRefreshToken, err := s.genToken(user.ID, user.Phone, roles, s.jwtRefreshSec, s.refreshTTL)
 	if err != nil {
 		return nil, err
 	}
 	return &TokenPair{AccessToken: accessToken, RefreshToken: newRefreshToken, ExpiresIn: s.accessTTL}, nil
 }
 
-func (s *Service) Logout(ctx context.Context, accessToken string) error {
-	claims := &middleware.Claims{}
-	_, _ = jwt.ParseWithClaims(accessToken, claims, func(t *jwt.Token) (interface{}, error) {
-		return []byte(s.jwtAccessSec), nil
-	})
-	ttl := time.Until(claims.ExpiresAt.Time)
-	if ttl < 0 {
-		return nil
+func (s *Service) Logout(ctx context.Context, accessToken, refreshToken string) error {
+	if s.rdb == nil {
+		return errors.New("redis is not configured")
 	}
-	return s.rdb.Set(ctx, "session:"+accessToken, "1", ttl).Err()
+	pipe := s.rdb.Pipeline()
+	if claims, err := parseTokenClaims(accessToken, s.jwtAccessSec); err == nil && claims.ExpiresAt != nil {
+		if ttl := time.Until(claims.ExpiresAt.Time); ttl > 0 {
+			pipe.Set(ctx, "session:"+accessToken, "1", ttl)
+		}
+	}
+	if claims, err := parseTokenClaims(refreshToken, s.jwtRefreshSec); err == nil && claims.ExpiresAt != nil {
+		if ttl := time.Until(claims.ExpiresAt.Time); ttl > 0 {
+			pipe.Set(ctx, refreshTokenKey(refreshToken), "1", ttl)
+		}
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func parseTokenClaims(token, secret string) (*middleware.Claims, error) {
+	claims := &middleware.Claims{}
+	parsed, err := jwt.ParseWithClaims(
+		token,
+		claims,
+		func(*jwt.Token) (interface{}, error) { return []byte(secret), nil },
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+	)
+	if err != nil || !parsed.Valid {
+		return nil, ErrInvalidRefresh
+	}
+	return claims, nil
+}
+
+func refreshTokenKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "session:refresh:" + hex.EncodeToString(sum[:])
 }
 
 func (s *Service) GetUser(userID int64) (*UserInfo, error) {
@@ -317,6 +358,10 @@ func (s *Service) GetUser(userID int64) (*UserInfo, error) {
 }
 
 func (s *Service) genToken(userID int64, phone string, roles []string, secret string, ttl int) (string, error) {
+	tokenID := make([]byte, 16)
+	if _, err := rand.Read(tokenID); err != nil {
+		return "", err
+	}
 	claims := &middleware.Claims{
 		UserID: userID,
 		Phone:  phone,
@@ -324,6 +369,7 @@ func (s *Service) genToken(userID int64, phone string, roles []string, secret st
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Duration(ttl) * time.Second)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        hex.EncodeToString(tokenID),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -343,9 +389,11 @@ func ErrToCode(err error) int {
 		return errcode.Conflict
 	case errors.Is(err, ErrInvalidLogin):
 		return errcode.Unauthorized
+	case errors.Is(err, ErrInvalidRefresh):
+		return errcode.Unauthorized
 	case errors.Is(err, ErrUserFrozen):
 		return errcode.Forbidden
-	case errors.Is(err, ErrInvalidPhone), errors.Is(err, ErrInvalidSMSPurpose), errors.Is(err, ErrTermsRequired), errors.Is(err, ErrWeakPassword):
+	case errors.Is(err, ErrInvalidPhone), errors.Is(err, ErrInvalidSMSPurpose), errors.Is(err, ErrTermsRequired):
 		return errcode.ParamInvalid
 	case errors.Is(err, ErrInvalidSMSCode):
 		return errcode.Unauthorized

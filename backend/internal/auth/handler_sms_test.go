@@ -32,7 +32,7 @@ func TestSMSCodeConsumesCaptchaBeforeSending(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
-	NewHandler(svc, NewCapVerifier(capServer.URL, "site-secret")).RegisterRoutes(router.Group("/api/v1"))
+	NewHandler(svc, NewCapVerifier(capServer.URL, "site-secret")).RegisterPublicRoutes(router.Group("/api/v1"))
 
 	require.Equal(t, 0, postSMSCode(t, router, "once"))
 	require.Equal(t, 1, sender.calls)

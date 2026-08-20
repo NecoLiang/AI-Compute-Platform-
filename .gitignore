@@ -1,4 +1,5 @@
 .claude/
 .DS_Store
 backend/tmp/
+backend/.env.sms.local
 *.log

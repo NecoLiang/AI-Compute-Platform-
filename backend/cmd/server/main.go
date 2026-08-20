@@ -102,8 +102,9 @@ func main() {
 	})
 
 	// Public API
+	authHandler := auth.NewHandler(authSvc, capVerifier)
 	public := r.Group("/api/v1")
-	auth.NewHandler(authSvc, capVerifier).RegisterRoutes(public)
+	authHandler.RegisterPublicRoutes(public)
 	compute.NewHandler(computeSvc).RegisterPublicRoutes(public)
 	intermediary.NewHandler(intermediarySvc).RegisterPublicRoutes(public)
 	equipment.NewHandler(equipmentSvc).RegisterPublicRoutes(public)
@@ -113,6 +114,7 @@ func main() {
 	// Authenticated API
 	protected := r.Group("/api/v1")
 	protected.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
+	authHandler.RegisterProtectedRoutes(protected)
 	user.NewHandler(userSvc).RegisterRoutes(protected)
 
 	// Buyer API

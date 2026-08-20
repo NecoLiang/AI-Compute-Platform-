@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"context"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 	"tokenfactory/pkg/errcode"
@@ -14,9 +14,9 @@ import (
 )
 
 type Claims struct {
-	UserID   int64    `json:"user_id"`
-	Phone    string   `json:"phone"`
-	Roles    []string `json:"roles"`
+	UserID int64    `json:"user_id"`
+	Phone  string   `json:"phone"`
+	Roles  []string `json:"roles"`
 	jwt.RegisteredClaims
 }
 
@@ -29,21 +29,24 @@ func AuthRequired(secret string, rdb *redis.Client) gin.HandlerFunc {
 			return
 		}
 
-		// check blacklist
-		ctx := context.Background()
-		exists, _ := rdb.Exists(ctx, "session:"+token).Result()
-		if exists > 0 {
-			response.ErrorWithStatus(c, 401, errcode.Unauthorized, "token已失效")
+		claims := &Claims{}
+		parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
+			return []byte(secret), nil
+		}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
+		if err != nil || !parsed.Valid {
+			response.ErrorWithStatus(c, 401, errcode.TokenExpired, errcode.Message(errcode.TokenExpired))
 			c.Abort()
 			return
 		}
 
-		claims := &Claims{}
-		parsed, err := jwt.ParseWithClaims(token, claims, func(t *jwt.Token) (interface{}, error) {
-			return []byte(secret), nil
-		})
-		if err != nil || !parsed.Valid {
-			response.ErrorWithStatus(c, 401, errcode.TokenExpired, errcode.Message(errcode.TokenExpired))
+		exists, err := rdb.Exists(c.Request.Context(), "session:"+token).Result()
+		if err != nil {
+			response.ErrorWithStatus(c, http.StatusServiceUnavailable, errcode.InternalError, "认证服务暂不可用")
+			c.Abort()
+			return
+		}
+		if exists > 0 {
+			response.ErrorWithStatus(c, http.StatusUnauthorized, errcode.Unauthorized, "token已失效")
 			c.Abort()
 			return
 		}

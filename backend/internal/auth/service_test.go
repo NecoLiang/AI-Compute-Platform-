@@ -3,10 +3,12 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"os"
 	"testing"
 	"time"
 	"tokenfactory/pkg/config"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,13 +38,6 @@ func TestJWTGeneration(t *testing.T) {
 	token, err := svc.genToken(1, "138****8000", []string{"buyer"}, cfg.AccessSecret, cfg.AccessTTL)
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
-}
-
-func TestRegisterReqValidation(t *testing.T) {
-	// Test that password < 8 chars is rejected
-	req := RegisterReq{Phone: "13800138000", SmsCode: "123456", Password: "short", AgreeTOS: true}
-	assert.Len(t, req.Password, 5) // just checking field value
-	assert.True(t, req.AgreeTOS)
 }
 
 func TestErrToCode(t *testing.T) {
@@ -81,7 +76,7 @@ func TestSMSLoginAuthenticatesExistingUserAndConsumesCode(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidSMSCode)
 }
 
-func TestRegisterVerifiesSMSCodeAndStoresPassword(t *testing.T) {
+func TestRegisterVerifiesSMSCodeAndStartsPasswordlessBuyerSession(t *testing.T) {
 	repo := newFakeUserRepository()
 	sender := &fakeSMSSender{}
 	store := &fakeSMSCodeStore{}
@@ -89,16 +84,30 @@ func TestRegisterVerifiesSMSCodeAndStoresPassword(t *testing.T) {
 
 	require.NoError(t, svc.SendSMSCode(context.Background(), "13900139000", "register", "127.0.0.1"))
 	assert.Equal(t, "register", sender.purpose)
-	userID, err := svc.Register(context.Background(), RegisterReq{
+	tokens, sessionUser, err := svc.Register(context.Background(), RegisterReq{
 		Phone:    "13900139000",
 		SmsCode:  sender.code,
-		Password: "StrongPass123!",
 		AgreeTOS: true,
 	})
 	require.NoError(t, err)
-	user, err := repo.FindByID(userID)
+	require.NotNil(t, tokens)
+	assert.NotEmpty(t, tokens.AccessToken)
+	assert.Equal(t, []string{"buyer"}, sessionUser.Roles)
+	user, err := repo.FindByPhone("13900139000")
 	require.NoError(t, err)
-	assert.True(t, CheckPassword(user.PasswordHash, "StrongPass123!"))
+	assert.Empty(t, user.PasswordHash)
+	assert.False(t, CheckPassword(user.PasswordHash, "any-password"))
+}
+
+func TestRegisterRequiresExplicitTermsConsent(t *testing.T) {
+	repo := newFakeUserRepository()
+	sender := &fakeSMSSender{}
+	svc := newSMSService(repo, sender, &fakeSMSCodeStore{})
+
+	_, _, err := svc.Register(context.Background(), RegisterReq{
+		Phone: "13900139000", SmsCode: "123456", AgreeTOS: false,
+	})
+	assert.ErrorIs(t, err, ErrTermsRequired)
 }
 
 func TestSendSMSCodeRejectsInvalidPhoneBeforeSending(t *testing.T) {
@@ -122,6 +131,71 @@ func TestSendSMSCodeDoesNotRevealAccountState(t *testing.T) {
 	assert.Empty(t, sender.code)
 	require.NoError(t, svc.SendSMSCode(context.Background(), "13900139000", "login", "127.0.0.1"))
 	assert.Empty(t, sender.code)
+}
+
+func TestSMSAuthenticationDoesNotRevealAccountStateBeforeCodeVerification(t *testing.T) {
+	repo := newFakeUserRepository()
+	_, err := repo.CreateUser("13800138000", "", "")
+	require.NoError(t, err)
+	svc := newSMSService(repo, &fakeSMSSender{}, &fakeSMSCodeStore{})
+
+	_, _, registeredLoginErr := svc.SMSLogin(context.Background(), SMSLoginReq{
+		Phone: "13800138000", SMSCode: "000000",
+	})
+	_, _, unknownLoginErr := svc.SMSLogin(context.Background(), SMSLoginReq{
+		Phone: "13900139000", SMSCode: "000000",
+	})
+	assert.ErrorIs(t, registeredLoginErr, ErrInvalidSMSCode)
+	assert.ErrorIs(t, unknownLoginErr, ErrInvalidSMSCode)
+
+	_, _, existingRegisterErr := svc.Register(context.Background(), RegisterReq{
+		Phone: "13800138000", SmsCode: "000000", AgreeTOS: true,
+	})
+	_, _, newRegisterErr := svc.Register(context.Background(), RegisterReq{
+		Phone: "13900139000", SmsCode: "000000", AgreeTOS: true,
+	})
+	assert.ErrorIs(t, existingRegisterErr, ErrInvalidSMSCode)
+	assert.ErrorIs(t, newRegisterErr, ErrInvalidSMSCode)
+}
+
+func TestRefreshTokenCanOnlyBeUsedOnceAndLogoutRevokesIt(t *testing.T) {
+	addr := os.Getenv("TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("set TEST_REDIS_ADDR to run the Redis session integration check")
+	}
+
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	defer rdb.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	repo := newFakeUserRepository()
+	_, err := repo.CreateUser("13800138000", "", "")
+	require.NoError(t, err)
+	svc := newSMSService(repo, &fakeSMSSender{}, &fakeSMSCodeStore{})
+	svc.rdb = rdb
+	original, err := svc.genToken(1, "13800138000", []string{"buyer"}, svc.jwtRefreshSec, svc.refreshTTL)
+	require.NoError(t, err)
+	defer rdb.Del(context.Background(), refreshTokenKey(original))
+
+	rotated, err := svc.RefreshToken(ctx, original)
+	require.NoError(t, err)
+	assert.NotEqual(t, original, rotated.RefreshToken)
+	defer rdb.Del(context.Background(), refreshTokenKey(rotated.RefreshToken))
+	_, err = svc.RefreshToken(ctx, original)
+	assert.ErrorIs(t, err, ErrInvalidRefresh)
+
+	repo.byID[1].Status = "frozen"
+	_, err = svc.RefreshToken(ctx, rotated.RefreshToken)
+	assert.ErrorIs(t, err, ErrInvalidRefresh)
+	repo.byID[1].Status = "active"
+
+	access, err := svc.genToken(1, "13800138000", []string{"buyer"}, svc.jwtAccessSec, svc.accessTTL)
+	require.NoError(t, err)
+	require.NoError(t, svc.Logout(ctx, access, rotated.RefreshToken))
+	defer rdb.Del(context.Background(), "session:"+access)
+	_, err = svc.RefreshToken(ctx, rotated.RefreshToken)
+	assert.ErrorIs(t, err, ErrInvalidRefresh)
 }
 
 type fakeUserRepository struct {

@@ -47,6 +47,14 @@ docker rm -f "$candidate" >/dev/null 2>&1 || true
 cleanup() {
   docker rm -f "$candidate" >/dev/null 2>&1 || true
 }
+
+password_login_is_public() {
+	docker exec "$1" wget -q -O /dev/null \
+		--header='Content-Type: application/json' \
+		--post-data='{}' \
+		http://127.0.0.1:8080/api/v1/auth/login >/dev/null 2>&1
+}
+
 trap cleanup EXIT INT TERM
 
 docker run -d \
@@ -91,6 +99,12 @@ if ! docker exec "$candidate" wget -q -O /dev/null 'http://127.0.0.1:8080/api/v1
 	exit 1
 fi
 
+if password_login_is_public "$candidate"; then
+	docker logs --tail 100 "$candidate" >&2 || true
+	echo "candidate exposes deferred password login route" >&2
+	exit 1
+fi
+
 cleanup
 trap - EXIT INT TERM
 
@@ -119,6 +133,13 @@ fi
 
 if ! docker exec wanxiang-backend wget -q -O /dev/null 'http://127.0.0.1:8080/api/v1/products?page=1&page_size=1'; then
 	docker logs --tail 100 wanxiang-backend >&2 || true
+	rollback
+	exit 1
+fi
+
+if password_login_is_public wanxiang-backend; then
+	docker logs --tail 100 wanxiang-backend >&2 || true
+	echo "deployed backend exposes deferred password login route" >&2
 	rollback
 	exit 1
 fi

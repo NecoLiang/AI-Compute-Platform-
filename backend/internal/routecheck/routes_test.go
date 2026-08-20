@@ -42,7 +42,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	r := gin.New()
 
 	public := r.Group("/api/v1")
-	authH.RegisterRoutes(public)
+	authH.RegisterPublicRoutes(public)
 	computeH.RegisterPublicRoutes(public)
 	intermediaryH.RegisterPublicRoutes(public)
 	equipmentH.RegisterPublicRoutes(public)
@@ -50,6 +50,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	blockchainH.RegisterRoutes(public)
 
 	protected := r.Group("/api/v1")
+	authH.RegisterProtectedRoutes(protected)
 	userH.RegisterRoutes(protected)
 
 	buyer := r.Group("/api/v1")
@@ -85,6 +86,12 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 		}
 		seen[k] = true
 		lines = append(lines, k)
+	}
+	if seen["POST /api/v1/auth/login"] {
+		t.Error("账号密码登录尚未开放，不应注册公开路由")
+	}
+	if !seen["POST /api/v1/auth/sms/login"] {
+		t.Error("缺少手机号验证码登录路由")
 	}
 	sort.Strings(lines)
 	t.Logf("共注册 %d 条路由:", len(lines))

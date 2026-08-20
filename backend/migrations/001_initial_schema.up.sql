@@ -238,7 +238,3 @@ CREATE TABLE blockchain_attestations (
     confirmed_at TIMESTAMP NULL,
     INDEX idx_target (target_type, target_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Seed: default admin user (password: admin123)
-INSERT INTO users (phone, password_hash, status) VALUES ('admin', '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy', 'active');
-INSERT INTO user_roles (user_id, role) VALUES (1, 'buyer'), (1, 'operator'), (1, 'admin');
