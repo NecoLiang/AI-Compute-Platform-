@@ -163,10 +163,83 @@ security:
 
 paths:
   # ==================== 认证 ====================
+  /auth/captcha/verify:
+    post:
+      tags: [认证 Auth]
+      summary: 校验一次性人机验证 token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [captcha_token]
+              properties:
+                captcha_token: { type: string }
+      responses:
+        '200':
+          description: "请求已处理；token 仅可成功使用一次"
+
+  /auth/sms/code:
+    post:
+      tags: [认证 Auth]
+      summary: 发送登录或注册验证码
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, purpose, captcha_token]
+              properties:
+                phone: { type: string, example: "13800138000" }
+                purpose: { type: string, enum: [register, login], example: "login" }
+                captcha_token: { type: string }
+      responses:
+        '200':
+          description: "请求已处理；注册手机号已存在时返回业务码 40900 且不发送验证码；否则验证码有效期默认 300 秒，60 秒后可重新获取"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: integer, example: 0 }
+                  message: { type: string, example: success }
+                  data:
+                    type: object
+                    properties:
+                      expires_in: { type: integer, example: 300 }
+                      resend_after: { type: integer, example: 60 }
+                      preview_code:
+                        type: string
+                        pattern: '^[0-9]{6}$'
+                        description: "仅本地 debug preview 模式返回；release 模式禁止启用"
+
+  /auth/sms/login:
+    post:
+      tags: [认证 Auth]
+      summary: 已注册用户短信验证码登录
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, sms_code]
+              properties:
+                phone: { type: string, example: "13800138000" }
+                sms_code: { type: string, pattern: '^[0-9]{6}$', example: "123456" }
+      responses:
+        '200':
+          description: "登录成功，返回 access_token、refresh_token 与用户信息"
+
   /auth/register:
     post:
       tags: [认证 Auth]
-      summary: 用户注册
+      summary: 手机号验证码注册并建立会话
       security: []
       requestBody:
         required: true
@@ -174,33 +247,14 @@ paths:
           application/json:
             schema:
               type: object
-              required: [phone, sms_code, password, agree_tos]
+              required: [phone, sms_code, agree_tos]
               properties:
                 phone: { type: string, example: "13800138000" }
                 sms_code: { type: string, example: "123456" }
-                password: { type: string, minLength: 8, example: "Abc12345!" }
                 agree_tos: { type: boolean, example: true }
       responses:
-        '200': { description: "注册成功", content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Response' }, { type: object, properties: { data: { type: object, properties: { user_id: { type: integer } } } } }] } } } }
-
-  /auth/login:
-    post:
-      tags: [认证 Auth]
-      summary: 用户登录
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [account, password]
-              properties:
-                account: { type: string, example: "13800138000" }
-                password: { type: string, example: "Abc12345!" }
-      responses:
         '200':
-          description: "登录成功"
+          description: "注册成功，返回 access_token、refresh_token 与默认 buyer 用户信息"
           content:
             application/json:
               schema:
@@ -219,7 +273,7 @@ paths:
   /auth/refresh:
     post:
       tags: [认证 Auth]
-      summary: 刷新 Token
+      summary: 刷新 Token（refresh token 一次性轮换）
       security: []
       requestBody:
         required: true
@@ -235,6 +289,14 @@ paths:
     post:
       tags: [认证 Auth]
       summary: 登出
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string, description: "传入时与 access token 一并撤销" }
 
   /auth/me:
     get:

@@ -2,11 +2,13 @@ package compute
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"strconv"
+	"strings"
+	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/middleware"
 	"tokenfactory/pkg/response"
-	"tokenfactory/pkg/errcode"
 
 	"github.com/gin-gonic/gin"
 )
@@ -64,18 +66,42 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 
 func (h *Handler) ListProducts(c *gin.Context) {
 	f := ProductFilter{
-		ProductType: c.Query("product_type"),
-		GpuModel:    c.Query("gpu_model"),
-		Region:      c.Query("region"),
-		PricingMode: c.Query("pricing_mode"),
-		Sort:        c.DefaultQuery("sort", "created_at_desc"),
+		Query:          c.Query("q"),
+		ProductType:    c.Query("product_type"),
+		GpuModel:       c.Query("gpu_model"),
+		Region:         c.Query("region"),
+		DeliveryMode:   c.Query("delivery_mode"),
+		PricingMode:    c.Query("pricing_mode"),
+		AvailableHours: c.Query("available_hours"),
+		Sort:           c.DefaultQuery("sort", "created_at_desc"),
 	}
-	f.Page, _ = strconv.Atoi(c.DefaultQuery("page", "1"))
-	f.PageSize, _ = strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	f.PriceMin, _ = strconv.ParseInt(c.Query("price_min"), 10, 64)
-	f.PriceMax, _ = strconv.ParseInt(c.Query("price_max"), 10, 64)
+	var err error
+	if f.Page, err = positiveIntQuery(c, "page", 1); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if f.PageSize, err = positiveIntQuery(c, "page_size", 20); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if f.PriceMin, err = nonNegativeInt64Query(c, "price_min"); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if f.PriceMax, err = nonNegativeInt64Query(c, "price_max"); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if f.CardCountMin, err = nonNegativeIntQuery(c, "card_count_min"); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	f.Normalize()
 	list, total, err := h.svc.ListProducts(f)
-	if err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	var result []gin.H
 	for _, p := range list {
 		result = append(result, productToJSON(&p))
@@ -83,10 +109,48 @@ func (h *Handler) ListProducts(c *gin.Context) {
 	response.SuccessPage(c, result, total, f.Page, f.PageSize)
 }
 
+func positiveIntQuery(c *gin.Context, name string, fallback int) (int, error) {
+	raw := strings.TrimSpace(c.Query(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s 必须为正整数", name)
+	}
+	return value, nil
+}
+
+func nonNegativeIntQuery(c *gin.Context, name string) (int, error) {
+	value, err := nonNegativeInt64Query(c, name)
+	if err != nil {
+		return 0, err
+	}
+	if int64(int(value)) != value {
+		return 0, fmt.Errorf("%s 超出范围", name)
+	}
+	return int(value), nil
+}
+
+func nonNegativeInt64Query(c *gin.Context, name string) (int64, error) {
+	raw := strings.TrimSpace(c.Query(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("%s 必须为非负整数", name)
+	}
+	return value, nil
+}
+
 func (h *Handler) GetProduct(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	p, credit, err := h.svc.GetProduct(id)
-	if err != nil { response.Error(c, errcode.NotFound, "商品不存在"); return }
+	if err != nil {
+		response.Error(c, errcode.NotFound, "商品不存在")
+		return
+	}
 	response.Success(c, gin.H{
 		"product": productToJSON(p),
 		"credit":  credit,
@@ -96,17 +160,28 @@ func (h *Handler) GetProduct(c *gin.Context) {
 // CreateProduct 发布商品。差异化校验在 service 层做 (C-02), 校验失败回 40001 + 中文原因。
 func (h *Handler) CreateProduct(c *gin.Context) {
 	var req CreateProductReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	id, err := h.svc.CreateProduct(c.GetInt64("user_id"), req)
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, gin.H{"id": id})
 }
 
 func (h *Handler) GetMyProducts(c *gin.Context) {
 	list, err := h.svc.GetSupplierProducts(c.GetInt64("user_id"))
-	if err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	var result []gin.H
-	for _, p := range list { result = append(result, productToJSON(&p)) }
+	for _, p := range list {
+		result = append(result, productToJSON(&p))
+	}
 	response.Success(c, result)
 }
 
@@ -114,11 +189,16 @@ func (h *Handler) GetMyProducts(c *gin.Context) {
 // GET /supplier/products/summary
 func (h *Handler) GetMyProductsGrouped(c *gin.Context) {
 	groups, err := h.svc.GetSupplierProductsGrouped(c.GetInt64("user_id"))
-	if err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	result := make([]gin.H, 0, len(groups))
 	for _, g := range groups {
 		items := make([]gin.H, 0, len(g.Products))
-		for i := range g.Products { items = append(items, productToJSON(&g.Products[i])) }
+		for i := range g.Products {
+			items = append(items, productToJSON(&g.Products[i]))
+		}
 		result = append(result, gin.H{
 			"product_type": g.ProductType, "label": g.Label,
 			"count": g.Count, "active_count": g.ActiveCount,
@@ -138,9 +218,15 @@ func (h *Handler) SubmitQualification(c *gin.Context) {
 		CertNumber string `json:"cert_number"`
 		CertURL    string `json:"cert_url"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	id, err := h.svc.SubmitQualification(c.GetInt64("user_id"), req.QualType, req.CertName, req.CertNumber, req.CertURL, nil)
-	if err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, gin.H{"id": id})
 }
 
@@ -153,9 +239,15 @@ func (h *Handler) GetMyQualifications(c *gin.Context) {
 
 func (h *Handler) PlaceOrder(c *gin.Context) {
 	var req PlaceOrderReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	o, err := h.svc.PlaceOrder(c.GetInt64("user_id"), req)
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, gin.H{
 		"order_no": o.OrderNo, "total_amount": o.TotalAmount,
 		"platform_fee": o.PlatformFee, "status": o.Status,
@@ -171,7 +263,10 @@ func (h *Handler) GetOrder(c *gin.Context) {
 		id, _ := strconv.ParseInt(idOrNo, 10, 64)
 		o, err = h.svc.GetOrderByID(id)
 	}
-	if err != nil || o == nil { response.Error(c, errcode.NotFound, "订单不存在"); return }
+	if err != nil || o == nil {
+		response.Error(c, errcode.NotFound, "订单不存在")
+		return
+	}
 
 	// 归属校验: 只有买家本人 / 商品所属供给方 / 运营可看单, 否则遍历 id 就能拖走全站订单。
 	if allowed, err := h.svc.CanAccessOrder(c.GetInt64("user_id"), o, hasAdminRole(c)); err != nil || !allowed {
@@ -213,9 +308,15 @@ func (h *Handler) ListSupplierOrders(c *gin.Context) {
 func (h *Handler) Deliver(c *gin.Context) {
 	idOrNo := c.Param("id")
 	var req DeliverInfo
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	ac, err := h.svc.DeliverWithAccess(c.GetInt64("user_id"), idOrNo, req, false)
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, ac)
 }
 
@@ -223,7 +324,10 @@ func (h *Handler) Deliver(c *gin.Context) {
 // GET /orders/:id/access-credential
 func (h *Handler) GetAccessCredential(c *gin.Context) {
 	ac, err := h.svc.GetAccessCredentialMasked(c.GetInt64("user_id"), c.Param("id"))
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, ac)
 }
 
@@ -231,7 +335,10 @@ func (h *Handler) GetAccessCredential(c *gin.Context) {
 // POST /orders/:id/access-credential/reveal
 func (h *Handler) RevealAccessCredential(c *gin.Context) {
 	ac, err := h.svc.RevealAccessCredential(c.GetInt64("user_id"), c.Param("id"), c.ClientIP())
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, ac)
 }
 
@@ -243,7 +350,10 @@ func (h *Handler) ListResourceSyncs(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
 	list, total, err := h.svc.ListResourceSyncs(c.GetInt64("user_id"), hasAdminRole(c), productID, page, pageSize)
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.SuccessPage(c, list, total, page, pageSize)
 }
 
@@ -262,7 +372,10 @@ func (h *Handler) resourceSync(c *gin.Context, syncType string) {
 	// 当成"清空库存", 必须区分"显式传 0"与"没传"。ShouldBindJSON 会消费 body,
 	// 所以这里自己读一次再解析。
 	body, err := io.ReadAll(c.Request.Body)
-	if err != nil { response.Error(c, errcode.ParamInvalid, "读取请求体失败: "+err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, "读取请求体失败: "+err.Error())
+		return
+	}
 
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -275,10 +388,16 @@ func (h *Handler) resourceSync(c *gin.Context, syncType string) {
 	}
 
 	var req ResourceSyncReq
-	if err := json.Unmarshal(body, &req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := json.Unmarshal(body, &req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 
 	snap, err := h.svc.SyncResource(c.GetInt64("user_id"), hasAdminRole(c), syncType, req)
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, snap)
 }
 
@@ -287,14 +406,19 @@ func hasAdminRole(c *gin.Context) bool {
 	roles, _ := c.Get("roles")
 	list, _ := roles.([]string)
 	for _, r := range list {
-		if r == "admin" || r == "operator" { return true }
+		if r == "admin" || r == "operator" {
+			return true
+		}
 	}
 	return false
 }
 
 func (h *Handler) ConfirmDelivery(c *gin.Context) {
 	idOrNo := c.Param("id")
-	if err := h.svc.ConfirmDelivery(c.GetInt64("user_id"), idOrNo); err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err := h.svc.ConfirmDelivery(c.GetInt64("user_id"), idOrNo); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
@@ -303,15 +427,24 @@ func (h *Handler) RenewOrder(c *gin.Context) {
 	var req struct {
 		Duration int `json:"duration"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	o, err := h.svc.RenewOrder(c.GetInt64("user_id"), idOrNo, req.Duration)
-	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, gin.H{"order_no": o.OrderNo, "total_amount": o.TotalAmount, "platform_fee": o.PlatformFee})
 }
 
 func (h *Handler) RequestRefund(c *gin.Context) {
 	idOrNo := c.Param("id")
-	if err := h.svc.RequestRefund(c.GetInt64("user_id"), idOrNo); err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	if err := h.svc.RequestRefund(c.GetInt64("user_id"), idOrNo); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
@@ -324,7 +457,10 @@ func (h *Handler) ListPendingQualifications(c *gin.Context) {
 
 func (h *Handler) ApproveQualification(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err := h.svc.ApproveQualification(id); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := h.svc.ApproveQualification(id); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
@@ -333,26 +469,41 @@ func (h *Handler) RejectQualification(c *gin.Context) {
 	var req struct {
 		Reason string `json:"reason" binding:"required"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
-	if err := h.svc.RejectQualification(id, req.Reason); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.svc.RejectQualification(id, req.Reason); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) ApproveProduct(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err := h.svc.ApproveProduct(id); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := h.svc.ApproveProduct(id); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) RejectProduct(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err := h.svc.RejectProduct(id); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := h.svc.RejectProduct(id); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) OfflineProduct(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err := h.svc.OfflineProduct(id); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := h.svc.OfflineProduct(id); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
@@ -375,24 +526,30 @@ func (h *Handler) AdminUpdateOrderStatus(c *gin.Context) {
 	var req struct {
 		Status string `json:"status" binding:"required"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
-	if err := h.svc.AdminUpdateOrderStatus(idOrNo, req.Status); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.svc.AdminUpdateOrderStatus(idOrNo, req.Status); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
 func productToJSON(p *Product) gin.H {
 	return gin.H{
 		"id": p.ID, "supplier_id": p.SupplierID, "product_type": p.ProductType,
-		"gpu_model": p.GpuModel,
+		"gpu_model":  p.GpuModel,
 		"card_count": p.CardCount, "machine_count": p.MachineCount,
 		"total_pflops_approx": p.TotalPflopsApprox,
-		"power_capacity_kw": p.PowerCapacityKw, "rack_count": p.RackCount,
+		"power_capacity_kw":   p.PowerCapacityKw, "rack_count": p.RackCount,
 		"cpu_spec": p.CpuSpec, "memory_spec": p.MemorySpec,
 		"storage_spec": p.StorageSpec, "bandwidth_spec": p.BandwidthSpec,
 		"delivery_mode": p.DeliveryMode, "pricing_mode": p.PricingMode,
 		"unit_price": p.UnitPrice, "price_negotiable": p.PriceNegotiable,
 		"available_hours": p.AvailableHours,
-		"stock": p.Stock, "min_order": p.MinOrder, "min_duration": p.MinDuration,
+		"stock":           p.Stock, "min_order": p.MinOrder, "min_duration": p.MinDuration,
 		"region": p.Region, "status": p.Status, "self_operated": p.SelfOperated,
 	}
 }

@@ -138,7 +138,9 @@ func TestValidateProductReq_TypeAndPricingMatrix(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := validCardRentalReq()
-			if tc.mutate != nil { tc.mutate(&req) }
+			if tc.mutate != nil {
+				tc.mutate(&req)
+			}
 			err := ValidateProductReq(req)
 			if tc.wantErr == "" {
 				assert.NoError(t, err)
@@ -501,7 +503,9 @@ func TestGroupProductsByType(t *testing.T) {
 	groups := GroupProductsByType(list)
 
 	byType := map[string]ProductTypeGroup{}
-	for _, g := range groups { byType[g.ProductType] = g }
+	for _, g := range groups {
+		byType[g.ProductType] = g
+	}
 
 	assert.Len(t, byType[ProductTypeCardRental].Products, 2)
 	assert.Len(t, byType[ProductTypeCenter].Products, 1)
@@ -516,7 +520,9 @@ func TestGroupProductsByType(t *testing.T) {
 
 	// 商品总数守恒
 	sum := 0
-	for _, g := range groups { sum += len(g.Products) }
+	for _, g := range groups {
+		sum += len(g.Products)
+	}
 	assert.Equal(t, len(list), sum, "分组后商品总数必须守恒")
 }
 
@@ -561,10 +567,34 @@ func TestLeaseEndAt(t *testing.T) {
 
 // ===== 回归: 分页默认值 =====
 
-func TestProductFilterDefaults(t *testing.T) {
-	f := ProductFilter{}
-	if f.Page <= 0 { f.Page = 1 }
-	if f.PageSize <= 0 { f.PageSize = 20 }
+func TestProductFilterNormalize(t *testing.T) {
+	f := ProductFilter{Query: " H100 ", Page: -1, PageSize: 1000}
+	f.Normalize()
+	assert.Equal(t, "H100", f.Query)
 	assert.Equal(t, 1, f.Page)
-	assert.Equal(t, 20, f.PageSize)
+	assert.Equal(t, maxProductPageSize, f.PageSize)
+
+	f.Page = maxProductPage + 1
+	f.Normalize()
+	assert.Equal(t, maxProductPage, f.Page)
+}
+
+func TestProductFilterBuildWhereAndSort(t *testing.T) {
+	f := ProductFilter{
+		Query: "H100", ProductType: ProductTypeCardRental, DeliveryMode: "container",
+		AvailableHours: "夜间", PriceMin: 1000, PriceMax: 5000, CardCountMin: 8,
+		Sort: "stock_desc",
+	}
+	where, args := f.buildWhere()
+
+	assert.Contains(t, where, "gpu_model LIKE ?")
+	assert.Contains(t, where, "product_type=?")
+	assert.Contains(t, where, "delivery_mode=?")
+	assert.Contains(t, where, "available_hours LIKE ?")
+	assert.Contains(t, where, "price_negotiable=0")
+	assert.Contains(t, where, "card_count >= ?")
+	assert.Contains(t, args, "%H100%")
+	assert.Contains(t, args, "%夜间%")
+	assert.Equal(t, "ORDER BY stock DESC", f.orderBy())
+	assert.Equal(t, "ORDER BY price_negotiable ASC, unit_price ASC", ProductFilter{Sort: "price_asc"}.orderBy())
 }

@@ -1,7 +1,9 @@
-version: "3.8"
 services:
   app:
     build: .
+    env_file:
+      - path: .env.sms.local
+        required: false
     ports:
       - "8080:8080"
     depends_on:
@@ -10,7 +12,7 @@ services:
       redis:
         condition: service_started
     volumes:
-      - ./config.yaml:/app/config.yaml
+      - ./config.docker.yaml:/app/config.yaml:ro
     restart: unless-stopped
 
   mysql:
@@ -18,11 +20,14 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: password
       MYSQL_DATABASE: tokenfactory
-    ports:
-      - "3306:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./migrations:/docker-entrypoint-initdb.d
+      - ./migrations/001_initial_schema.up.sql:/docker-entrypoint-initdb.d/001.sql:ro
+      - ./migrations/002_compute_market_expansion.up.sql:/docker-entrypoint-initdb.d/002.sql:ro
+      - ./migrations/003_equipment_and_collateral.up.sql:/docker-entrypoint-initdb.d/003.sql:ro
+      - ./migrations/004_fix_user_role_enum.up.sql:/docker-entrypoint-initdb.d/004.sql:ro
+      - ./migrations/005_clarify_order_duration_semantics.up.sql:/docker-entrypoint-initdb.d/005.sql:ro
+      - ./migrations/006_remove_default_admin_seed.up.sql:/docker-entrypoint-initdb.d/006.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s
@@ -32,8 +37,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped

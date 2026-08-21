@@ -1,49 +1,69 @@
 # 认证 Auth API
 
-**Base**: `http://localhost:8080/api/v1` | **Auth**: 除注册/登录/刷新外均需 `Bearer <token>`
+**Base**: `http://localhost:8080/api/v1` | **Auth**: `/auth/me` 需 `Bearer <token>`
 
 ---
 
-## POST /auth/register · 注册
+## POST /auth/sms/code · 获取短信验证码
 
-> ⚠️ 短信验证码未接入，当前拒绝所有注册请求
+`captcha_token` 由 Cap programmatic mode 生成，只能在本接口消费一次。
+
+```json
+{"phone":"13800138000","purpose":"login","captcha_token":"..."}
+```
+
+**成功** `200`
+```json
+{"code":0,"message":"success","data":{"expires_in":300,"resend_after":60}}
+```
+
+本地 Docker 的 debug preview 模式会额外返回 `data.preview_code`，用于本地联调；release 模式会拒绝启用该能力。
+
+注册用途的手机号已存在时不会发送验证码，并返回：
+```json
+{"code":40900,"message":"用户已存在"}
+```
+
+`expires_in` 是验证码有效期，`resend_after` 是可重新获取的倒计时，两者不可混用。
+
+---
+
+## POST /auth/register · 手机号验证码注册并建立会话
 
 ```
 curl -X POST http://localhost:8080/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"phone":"13800138000","sms_code":"123456","password":"Abc12345!","agree_tos":true}'
+  -d '{"phone":"13800138000","sms_code":"123456","agree_tos":true}'
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:--:|------|
 | phone | string | ✅ | 手机号 |
 | sms_code | string | ✅ | 短信验证码 |
-| password | string | ✅ | ≥8位 |
 | agree_tos | bool | ✅ | 同意用户协议 |
 
 **成功** `200`
 ```json
-{"code":0,"message":"success","data":{"user_id":1},"request_id":"..."}
-```
-**失败** `200` - 短信服务未接入
-```json
-{"code":50000,"message":"短信验证码服务未接入: 请配置短信服务商(AccessKey+签名+模板ID)"}
+{"code":0,"message":"success","data":{
+  "access_token":"eyJ...","refresh_token":"eyJ...","expires_in":900,
+  "user":{"id":1,"phone":"138****8000","roles":["buyer"]}
+}}
 ```
 
 ---
 
-## POST /auth/login · 登录
+## POST /auth/sms/login · 手机号验证码登录
 
 ```
-curl -X POST http://localhost:8080/api/v1/auth/login \
+curl -X POST http://localhost:8080/api/v1/auth/sms/login \
   -H "Content-Type: application/json" \
-  -d '{"account":"13800138000","password":"Abc12345!"}'
+  -d '{"phone":"13800138000","sms_code":"123456"}'
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:--:|------|
-| account | string | ✅ | 手机号 |
-| password | string | ✅ | 密码 |
+| phone | string | ✅ | 已注册手机号 |
+| sms_code | string | ✅ | 登录用途的短信验证码 |
 
 **成功** `200`
 ```json
@@ -52,13 +72,13 @@ curl -X POST http://localhost:8080/api/v1/auth/login \
   "user":{"id":1,"phone":"138****8000","roles":["buyer"]}
 }}
 ```
-> 前端需存储 `access_token`，后续请求加 `Authorization: Bearer <access_token>`
-
-**测试账号**：`admin` / `admin123`（有 buyer + operator + admin 角色）
+> 浏览器前端通过同源 BFF 将 token 写入 HttpOnly Cookie，不把 token 暴露给客户端状态或 localStorage。账号密码登录尚未开放公开路由。
 
 ---
 
 ## POST /auth/refresh · 刷新 Token
+
+`refresh_token` 仅能成功使用一次，刷新后必须使用新 token。
 
 ```
 curl -X POST http://localhost:8080/api/v1/auth/refresh \
@@ -72,7 +92,9 @@ curl -X POST http://localhost:8080/api/v1/auth/refresh \
 
 ```
 curl -X POST http://localhost:8080/api/v1/auth/logout \
-  -H "Authorization: Bearer <access_token>"
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"refresh_token":"eyJ..."}'
 ```
 
 ---

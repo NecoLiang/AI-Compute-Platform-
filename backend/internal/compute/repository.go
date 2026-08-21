@@ -4,94 +4,94 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/jmoiron/sqlx"
 	"strings"
 	"time"
 	"tokenfactory/pkg/crypto"
 	"tokenfactory/pkg/errcode"
-	"github.com/jmoiron/sqlx"
 )
 
 // ===== Models =====
 
 type SupplierQualification struct {
-	ID             int64     `db:"id" json:"id"`
-	UserID         int64     `db:"user_id" json:"user_id"`
-	QualType       string    `db:"qual_type" json:"qual_type"`
-	CertName       string    `db:"cert_name" json:"cert_name"`
-	CertNumber     string    `db:"cert_number" json:"cert_number"`
-	CertURL        string    `db:"cert_url" json:"cert_url"`
+	ID             int64      `db:"id" json:"id"`
+	UserID         int64      `db:"user_id" json:"user_id"`
+	QualType       string     `db:"qual_type" json:"qual_type"`
+	CertName       string     `db:"cert_name" json:"cert_name"`
+	CertNumber     string     `db:"cert_number" json:"cert_number"`
+	CertURL        string     `db:"cert_url" json:"cert_url"`
 	ExpiresAt      *time.Time `db:"expires_at" json:"expires_at"`
-	Status         string    `db:"status" json:"status"`
-	RejectedReason string    `db:"rejected_reason" json:"rejected_reason,omitempty"`
-	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	Status         string     `db:"status" json:"status"`
+	RejectedReason string     `db:"rejected_reason" json:"rejected_reason,omitempty"`
+	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
 }
 
 // Product 商品。C-01 起支持 4 种租赁范围类型, 见 ProductType* 常量。
 // gpu_model / card_count / delivery_mode 在 002 迁移后允许为 NULL(colocation 无设备),
 // 读取时统一 COALESCE 成零值以保持既有 API 兼容, 写入时零值转 NULL。
 type Product struct {
-	ID              int64     `db:"id" json:"id"`
-	SupplierID      int64     `db:"supplier_id" json:"supplier_id"`
-	ProductType     string    `db:"product_type" json:"product_type"`
-	GpuModel        string    `db:"gpu_model" json:"gpu_model"`
-	CardCount       int       `db:"card_count" json:"card_count"`
-	MachineCount      *int    `db:"machine_count" json:"machine_count"`
-	TotalPflopsApprox *string `db:"total_pflops_approx" json:"total_pflops_approx"`
-	PowerCapacityKw   *int    `db:"power_capacity_kw" json:"power_capacity_kw"`
-	RackCount         *int    `db:"rack_count" json:"rack_count"`
-	CpuSpec         string    `db:"cpu_spec" json:"cpu_spec"`
-	MemorySpec      string    `db:"memory_spec" json:"memory_spec"`
-	StorageSpec     string    `db:"storage_spec" json:"storage_spec"`
-	BandwidthSpec   string    `db:"bandwidth_spec" json:"bandwidth_spec"`
-	DeliveryMode    string    `db:"delivery_mode" json:"delivery_mode"`
-	PricingMode     string    `db:"pricing_mode" json:"pricing_mode"`
-	UnitPrice       int64     `db:"unit_price" json:"unit_price"`       // fen
-	PriceNegotiable bool      `db:"price_negotiable" json:"price_negotiable"`
-	AvailableHours  string    `db:"available_hours" json:"available_hours"`
-	Stock           int       `db:"stock" json:"stock"`
-	MinOrder        int       `db:"min_order" json:"min_order"`
-	MinDuration     int       `db:"min_duration" json:"min_duration"`
-	Region          string    `db:"region" json:"region"`
-	Status          string    `db:"status" json:"status"`
-	SelfOperated    bool      `db:"self_operated" json:"self_operated"`
-	ComplianceAgreed bool     `db:"compliance_agreed" json:"compliance_agreed"`
-	CreatedAt       time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time `db:"updated_at" json:"updated_at"`
+	ID                int64     `db:"id" json:"id"`
+	SupplierID        int64     `db:"supplier_id" json:"supplier_id"`
+	ProductType       string    `db:"product_type" json:"product_type"`
+	GpuModel          string    `db:"gpu_model" json:"gpu_model"`
+	CardCount         int       `db:"card_count" json:"card_count"`
+	MachineCount      *int      `db:"machine_count" json:"machine_count"`
+	TotalPflopsApprox *string   `db:"total_pflops_approx" json:"total_pflops_approx"`
+	PowerCapacityKw   *int      `db:"power_capacity_kw" json:"power_capacity_kw"`
+	RackCount         *int      `db:"rack_count" json:"rack_count"`
+	CpuSpec           string    `db:"cpu_spec" json:"cpu_spec"`
+	MemorySpec        string    `db:"memory_spec" json:"memory_spec"`
+	StorageSpec       string    `db:"storage_spec" json:"storage_spec"`
+	BandwidthSpec     string    `db:"bandwidth_spec" json:"bandwidth_spec"`
+	DeliveryMode      string    `db:"delivery_mode" json:"delivery_mode"`
+	PricingMode       string    `db:"pricing_mode" json:"pricing_mode"`
+	UnitPrice         int64     `db:"unit_price" json:"unit_price"` // fen
+	PriceNegotiable   bool      `db:"price_negotiable" json:"price_negotiable"`
+	AvailableHours    string    `db:"available_hours" json:"available_hours"`
+	Stock             int       `db:"stock" json:"stock"`
+	MinOrder          int       `db:"min_order" json:"min_order"`
+	MinDuration       int       `db:"min_duration" json:"min_duration"`
+	Region            string    `db:"region" json:"region"`
+	Status            string    `db:"status" json:"status"`
+	SelfOperated      bool      `db:"self_operated" json:"self_operated"`
+	ComplianceAgreed  bool      `db:"compliance_agreed" json:"compliance_agreed"`
+	CreatedAt         time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type Order struct {
-	ID              int64      `db:"id" json:"id"`
-	OrderNo         string     `db:"order_no" json:"order_no"`
-	BuyerID         int64      `db:"buyer_id" json:"buyer_id"`
-	ProductID       int64      `db:"product_id" json:"product_id"`
-	Quantity        int        `db:"quantity" json:"quantity"`
-	Duration        int        `db:"duration" json:"duration"`
-	UnitPrice       int64      `db:"unit_price" json:"unit_price"`
-	TotalAmount     int64      `db:"total_amount" json:"total_amount"`
-	PlatformFee     int64      `db:"platform_fee" json:"platform_fee"`
-	Status          string     `db:"status" json:"status"`
-	PaymentExpires  *time.Time `db:"payment_expires_at" json:"payment_expires_at"`
-	LeaseStart      *time.Time `db:"lease_start_at" json:"lease_start_at"`
-	LeaseEnd        *time.Time `db:"lease_end_at" json:"lease_end_at"`
-	ComplianceAgreed bool      `db:"compliance_agreed" json:"compliance_agreed"`
-	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+	ID               int64      `db:"id" json:"id"`
+	OrderNo          string     `db:"order_no" json:"order_no"`
+	BuyerID          int64      `db:"buyer_id" json:"buyer_id"`
+	ProductID        int64      `db:"product_id" json:"product_id"`
+	Quantity         int        `db:"quantity" json:"quantity"`
+	Duration         int        `db:"duration" json:"duration"`
+	UnitPrice        int64      `db:"unit_price" json:"unit_price"`
+	TotalAmount      int64      `db:"total_amount" json:"total_amount"`
+	PlatformFee      int64      `db:"platform_fee" json:"platform_fee"`
+	Status           string     `db:"status" json:"status"`
+	PaymentExpires   *time.Time `db:"payment_expires_at" json:"payment_expires_at"`
+	LeaseStart       *time.Time `db:"lease_start_at" json:"lease_start_at"`
+	LeaseEnd         *time.Time `db:"lease_end_at" json:"lease_end_at"`
+	ComplianceAgreed bool       `db:"compliance_agreed" json:"compliance_agreed"`
+	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // OrderDelivery 交付记录。C-06 起承载访问凭证。
 // 加密字段一律 json:"-", 绝不随接口出站。
 type OrderDelivery struct {
-	ID                int64      `db:"id" json:"id"`
-	OrderID           int64      `db:"order_id" json:"order_id"`
-	CredentialEncrypted string   `db:"credential_encrypted" json:"-"`
-	AccessKey         string     `db:"access_key" json:"access_key"`
-	AccessValueEncrypted string  `db:"access_value_encrypted" json:"-"`
-	AccessStatus      string     `db:"access_status" json:"access_status"`
-	AccessExpiresAt   *time.Time `db:"access_expires_at" json:"access_expires_at"`
-	RevokedAt         *time.Time `db:"revoked_at" json:"revoked_at"`
-	ConfirmedByBuyer  bool       `db:"confirmed_by_buyer" json:"confirmed_by_buyer"`
-	BuyerConfirmedAt  *time.Time `db:"buyer_confirmed_at" json:"buyer_confirmed_at"`
-	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
+	ID                   int64      `db:"id" json:"id"`
+	OrderID              int64      `db:"order_id" json:"order_id"`
+	CredentialEncrypted  string     `db:"credential_encrypted" json:"-"`
+	AccessKey            string     `db:"access_key" json:"access_key"`
+	AccessValueEncrypted string     `db:"access_value_encrypted" json:"-"`
+	AccessStatus         string     `db:"access_status" json:"access_status"`
+	AccessExpiresAt      *time.Time `db:"access_expires_at" json:"access_expires_at"`
+	RevokedAt            *time.Time `db:"revoked_at" json:"revoked_at"`
+	ConfirmedByBuyer     bool       `db:"confirmed_by_buyer" json:"confirmed_by_buyer"`
+	BuyerConfirmedAt     *time.Time `db:"buyer_confirmed_at" json:"buyer_confirmed_at"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
 }
 
 // ResourceSnapshot 资源盘点快照(C-05)。sync_type: active=平台主动盘点 passive=机房主动上报。
@@ -149,13 +149,17 @@ const creditColumns = `supplier_id, fulfill_rate, sla_rate, violation_count, tot
 
 // nullString 把空串写成 NULL(colocation 无 gpu_model / delivery_mode)。
 func nullString(s string) interface{} {
-	if s == "" { return nil }
+	if s == "" {
+		return nil
+	}
 	return s
 }
 
 // nullInt 把非正数写成 NULL(colocation 无 card_count, 非 center 无 machine_count)。
 func nullInt(i int) interface{} {
-	if i <= 0 { return nil }
+	if i <= 0 {
+		return nil
+	}
 	return i
 }
 
@@ -175,7 +179,9 @@ func (r *Repository) CreateQualification(q *SupplierQualification) (int64, error
 		"INSERT INTO supplier_qualifications (user_id, qual_type, cert_name, cert_number, cert_url, expires_at, status) VALUES (?,?,?,?,?,?,?)",
 		q.UserID, q.QualType, q.CertName, q.CertNumber, q.CertURL, q.ExpiresAt, "pending",
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.LastInsertId()
 }
 
@@ -215,15 +221,21 @@ func (r *Repository) CreateProduct(p *Product) (int64, error) {
 		nullString(p.DeliveryMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock,
 		p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed,
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.LastInsertId()
 }
 
 func (r *Repository) GetProductByID(id int64) (*Product, error) {
 	var p Product
 	err := r.db.Get(&p, "SELECT "+productColumns+" FROM products WHERE id = ?", id)
-	if err == sql.ErrNoRows { return nil, fmt.Errorf("product not found") }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("product not found")
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
@@ -235,9 +247,13 @@ func (r *Repository) UpdateProductStatus(id int64, status string) error {
 func (r *Repository) DecrProductStock(tx *sqlx.Tx, id int64, qty int) error {
 	// 双重保险: qty 必须为正, 否则 stock = stock - (负数) 会凭空增加库存并通过 stock >= qty 校验。
 	// 上层 ValidateOrderParams 已拦截, 这里在数据层再兜一次底。
-	if qty <= 0 { return fmt.Errorf("invalid quantity") }
+	if qty <= 0 {
+		return fmt.Errorf("invalid quantity")
+	}
 	res, err := tx.Exec("UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?", qty, id, qty)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return fmt.Errorf("insufficient stock")
@@ -248,7 +264,9 @@ func (r *Repository) DecrProductStock(tx *sqlx.Tx, id int64, qty int) error {
 }
 
 func (r *Repository) IncrProductStock(tx *sqlx.Tx, id int64, qty int) error {
-	if qty <= 0 { return fmt.Errorf("invalid quantity") }
+	if qty <= 0 {
+		return fmt.Errorf("invalid quantity")
+	}
 	_, err := tx.Exec("UPDATE products SET stock = stock + ?, status='active' WHERE id = ?", qty, id)
 	return err
 }
@@ -258,15 +276,23 @@ func (r *Repository) IncrProductStock(tx *sqlx.Tx, id int64, qty int) error {
 func (r *Repository) LockProductForUpdate(tx *sqlx.Tx, id int64) (*Product, error) {
 	var p Product
 	err := tx.Get(&p, "SELECT "+productColumns+" FROM products WHERE id = ? FOR UPDATE", id)
-	if err == sql.ErrNoRows { return nil, fmt.Errorf("product not found") }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("product not found")
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
 // SetProductStockTx 在事务内把库存改为绝对值(盘点用)。负库存直接拒绝。
 func (r *Repository) SetProductStockTx(tx *sqlx.Tx, id int64, stock int) error {
-	if stock < 0 { return fmt.Errorf("stock cannot be negative") }
-	if _, err := tx.Exec("UPDATE products SET stock = ? WHERE id = ?", stock, id); err != nil { return err }
+	if stock < 0 {
+		return fmt.Errorf("stock cannot be negative")
+	}
+	if _, err := tx.Exec("UPDATE products SET stock = ? WHERE id = ?", stock, id); err != nil {
+		return err
+	}
 	var err error
 	if stock == 0 {
 		_, err = tx.Exec("UPDATE products SET status='sold_out' WHERE id=? AND status='active'", id)
@@ -277,20 +303,56 @@ func (r *Repository) SetProductStockTx(tx *sqlx.Tx, id int64, stock int) error {
 }
 
 type ProductFilter struct {
-	ProductType string
-	GpuModel    string
-	Region      string
-	PricingMode string
-	PriceMin    int64
-	PriceMax    int64
-	Page        int
-	PageSize    int
-	Sort        string
+	Query          string
+	ProductType    string
+	GpuModel       string
+	Region         string
+	DeliveryMode   string
+	PricingMode    string
+	AvailableHours string
+	PriceMin       int64
+	PriceMax       int64
+	CardCountMin   int
+	Page           int
+	PageSize       int
+	Sort           string
 }
 
-func (r *Repository) ListProducts(f ProductFilter) ([]Product, int64, error) {
+const (
+	maxProductPage     = 1000000
+	maxProductPageSize = 100
+)
+
+func (f *ProductFilter) Normalize() {
+	f.Query = strings.TrimSpace(f.Query)
+	f.ProductType = strings.TrimSpace(f.ProductType)
+	f.GpuModel = strings.TrimSpace(f.GpuModel)
+	f.Region = strings.TrimSpace(f.Region)
+	f.DeliveryMode = strings.TrimSpace(f.DeliveryMode)
+	f.PricingMode = strings.TrimSpace(f.PricingMode)
+	f.AvailableHours = strings.TrimSpace(f.AvailableHours)
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.Page > maxProductPage {
+		f.Page = maxProductPage
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = 20
+	}
+	if f.PageSize > maxProductPageSize {
+		f.PageSize = maxProductPageSize
+	}
+}
+
+func (f ProductFilter) buildWhere() (string, []interface{}) {
 	where := "WHERE status='active'"
 	args := []interface{}{}
+	if f.Query != "" {
+		pattern := "%" + f.Query + "%"
+		where += " AND (gpu_model LIKE ? OR memory_spec LIKE ? OR region LIKE ? OR bandwidth_spec LIKE ? OR available_hours LIKE ?)"
+		args = append(args, pattern, pattern, pattern, pattern, pattern)
+	}
 	if f.ProductType != "" {
 		where += " AND product_type=?"
 		args = append(args, f.ProductType)
@@ -303,33 +365,57 @@ func (r *Repository) ListProducts(f ProductFilter) ([]Product, int64, error) {
 		where += " AND region=?"
 		args = append(args, f.Region)
 	}
+	if f.DeliveryMode != "" {
+		where += " AND delivery_mode=?"
+		args = append(args, f.DeliveryMode)
+	}
 	if f.PricingMode != "" {
 		where += " AND pricing_mode=?"
 		args = append(args, f.PricingMode)
 	}
+	if f.AvailableHours != "" {
+		where += " AND available_hours LIKE ?"
+		args = append(args, "%"+f.AvailableHours+"%")
+	}
 	if f.PriceMin > 0 {
-		where += " AND unit_price >= ?"
+		where += " AND price_negotiable=0 AND unit_price >= ?"
 		args = append(args, f.PriceMin)
 	}
 	if f.PriceMax > 0 {
-		where += " AND unit_price <= ?"
+		where += " AND price_negotiable=0 AND unit_price <= ?"
 		args = append(args, f.PriceMax)
 	}
+	if f.CardCountMin > 0 {
+		where += " AND card_count >= ?"
+		args = append(args, f.CardCountMin)
+	}
+	return where, args
+}
+
+func (f ProductFilter) orderBy() string {
+	switch f.Sort {
+	case "price_asc":
+		return "ORDER BY price_negotiable ASC, unit_price ASC"
+	case "price_desc":
+		return "ORDER BY price_negotiable ASC, unit_price DESC"
+	case "stock_desc":
+		return "ORDER BY stock DESC"
+	default:
+		return "ORDER BY created_at DESC"
+	}
+}
+
+func (r *Repository) ListProducts(f ProductFilter) ([]Product, int64, error) {
+	f.Normalize()
+	where, args := f.buildWhere()
 
 	var total int64
-	r.db.Get(&total, "SELECT COUNT(*) FROM products "+where, args...)
-
-	order := "ORDER BY created_at DESC"
-	switch f.Sort {
-	case "price_asc": order = "ORDER BY unit_price ASC"
-	case "price_desc": order = "ORDER BY unit_price DESC"
+	if err := r.db.Get(&total, "SELECT COUNT(*) FROM products "+where, args...); err != nil {
+		return nil, 0, err
 	}
-
-	if f.Page <= 0 { f.Page = 1 }
-	if f.PageSize <= 0 { f.PageSize = 20 }
 	offset := (f.Page - 1) * f.PageSize
 
-	query := fmt.Sprintf("SELECT %s FROM products %s %s LIMIT ? OFFSET ?", productColumns, where, order)
+	query := fmt.Sprintf("SELECT %s FROM products %s %s LIMIT ? OFFSET ?", productColumns, where, f.orderBy())
 	args = append(args, f.PageSize, offset)
 	var list []Product
 	err := r.db.Select(&list, query, args...)
@@ -361,15 +447,21 @@ func (r *Repository) CreateOrderTx(tx *sqlx.Tx, o *Order) error {
 func (r *Repository) GetOrderByNo(orderNo string) (*Order, error) {
 	var o Order
 	err := r.db.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE order_no = ?", orderNo)
-	if err == sql.ErrNoRows { return nil, nil }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
 	return &o, err
 }
 
 func (r *Repository) GetOrderByID(id int64) (*Order, error) {
 	var o Order
 	err := r.db.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE id = ?", id)
-	if err == sql.ErrNoRows { return nil, fmt.Errorf("order not found") }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("order not found")
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &o, nil
 }
 
@@ -388,11 +480,11 @@ func (r *Repository) UpdateOrderStatus(orderNo string, status string) error {
 }
 
 type OrderListFilter struct {
-	BuyerID  int64
+	BuyerID    int64
 	SupplierID int64
-	Status   string
-	Page     int
-	PageSize int
+	Status     string
+	Page       int
+	PageSize   int
 }
 
 func (r *Repository) ListBuyerOrders(buyerID int64, status string, page, pageSize int) ([]Order, int64, error) {
@@ -410,8 +502,12 @@ func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, p
 	var total int64
 	r.db.Get(&total, "SELECT COUNT(*) FROM orders o JOIN products p ON o.product_id=p.id "+where, args...)
 
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	query := fmt.Sprintf("SELECT o.* FROM orders o JOIN products p ON o.product_id=p.id %s ORDER BY o.created_at DESC LIMIT ? OFFSET ?", where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []Order
@@ -429,8 +525,12 @@ func (r *Repository) listOrders(field string, id int64, status string, page, pag
 	var total int64
 	r.db.Get(&total, "SELECT COUNT(*) FROM orders "+where, args...)
 
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	query := fmt.Sprintf("SELECT %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?", orderColumns, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []Order
@@ -464,8 +564,12 @@ func (r *Repository) SaveDeliveryWithAccess(d *OrderDelivery) error {
 func (r *Repository) GetDeliveryByOrder(orderID int64) (*OrderDelivery, error) {
 	var d OrderDelivery
 	err := r.db.Get(&d, "SELECT "+deliveryColumns+" FROM order_deliveries WHERE order_id = ?", orderID)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &d, nil
 }
 
@@ -494,7 +598,9 @@ func (r *Repository) RevokeExpiredAccess() (int64, error) {
 		`UPDATE order_deliveries SET access_status='revoked', revoked_at=NOW()
 		WHERE access_status IN ('generated','delivered') AND access_expires_at IS NOT NULL AND access_expires_at < NOW()`,
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.RowsAffected()
 }
 
@@ -505,15 +611,21 @@ func (r *Repository) CreateSnapshotTx(tx *sqlx.Tx, s *ResourceSnapshot) (int64, 
 		VALUES (?,?,?,?,?,?,?,?,?)`,
 		s.ProductID, s.SupplierID, s.SyncType, s.StockBefore, s.StockAfter, s.Diff, s.Reason, s.OperatorID, s.Anomaly,
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.LastInsertId()
 }
 
 func (r *Repository) ListSnapshotsByProduct(productID int64, page, pageSize int) ([]ResourceSnapshot, int64, error) {
 	var total int64
 	r.db.Get(&total, "SELECT COUNT(*) FROM resource_snapshots WHERE product_id=?", productID)
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	var list []ResourceSnapshot
 	err := r.db.Select(&list, "SELECT "+snapshotColumns+" FROM resource_snapshots WHERE product_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
 		productID, pageSize, (page-1)*pageSize)
@@ -523,8 +635,12 @@ func (r *Repository) ListSnapshotsByProduct(productID int64, page, pageSize int)
 func (r *Repository) ListSnapshotsBySupplier(supplierID int64, page, pageSize int) ([]ResourceSnapshot, int64, error) {
 	var total int64
 	r.db.Get(&total, "SELECT COUNT(*) FROM resource_snapshots WHERE supplier_id=?", supplierID)
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	var list []ResourceSnapshot
 	err := r.db.Select(&list, "SELECT "+snapshotColumns+" FROM resource_snapshots WHERE supplier_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
 		supplierID, pageSize, (page-1)*pageSize)
@@ -570,8 +686,12 @@ func (r *Repository) ListAllOrders(status string, page, pageSize int) ([]Order, 
 	}
 	var total int64
 	r.db.Get(&total, "SELECT COUNT(*) FROM orders "+where, args...)
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	query := fmt.Sprintf("SELECT %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?", orderColumns, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []Order
@@ -589,8 +709,12 @@ func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Produ
 	}
 	var total int64
 	r.db.Get(&total, "SELECT COUNT(*) FROM products "+where, args...)
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	query := fmt.Sprintf("SELECT %s FROM products %s ORDER BY created_at DESC LIMIT ? OFFSET ?", productColumns, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []Product
@@ -602,26 +726,43 @@ func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Produ
 // 分三类: 已知的英文哨兵串按语义映射; 加密密钥未配置属服务端配置缺失 -> 500;
 // 其余为参数/权限校验产生的中文提示 -> 40001 / 40300, 直接把原因回给前端展示。
 func ErrToCode(err error) int {
-	if err == nil { return errcode.Success }
+	if err == nil {
+		return errcode.Success
+	}
 	if errors.Is(err, crypto.ErrKeyNotConfigured) || errors.Is(err, crypto.ErrInvalidKeySize) {
 		return errcode.InternalError
 	}
 	msg := err.Error()
 	switch msg {
-	case "insufficient stock": return errcode.Conflict
-	case "product not found": return errcode.NotFound
-	case "order not found": return errcode.NotFound
-	case "delivery not found": return errcode.NotFound
-	case "product not available": return errcode.Conflict
-	case "order not active": return errcode.Conflict
-	case "invalid status transition": return errcode.ParamInvalid
-	case "invalid quantity": return errcode.ParamInvalid
-	case "stock cannot be negative": return errcode.ParamInvalid
+	case "insufficient stock":
+		return errcode.Conflict
+	case "product not found":
+		return errcode.NotFound
+	case "order not found":
+		return errcode.NotFound
+	case "delivery not found":
+		return errcode.NotFound
+	case "product not available":
+		return errcode.Conflict
+	case "order not active":
+		return errcode.Conflict
+	case "invalid status transition":
+		return errcode.ParamInvalid
+	case "invalid quantity":
+		return errcode.ParamInvalid
+	case "stock cannot be negative":
+		return errcode.ParamInvalid
 	}
 	// 归属/权限类提示统一 40300, 便于前端区分"没权限"与"参数错"。
-	if strings.HasPrefix(msg, "无权") { return errcode.Forbidden }
-	if errors.Is(err, crypto.ErrInvalidCiphertext) { return errcode.InternalError }
-	if containsCJK(msg) { return errcode.ParamInvalid }
+	if strings.HasPrefix(msg, "无权") {
+		return errcode.Forbidden
+	}
+	if errors.Is(err, crypto.ErrInvalidCiphertext) {
+		return errcode.InternalError
+	}
+	if containsCJK(msg) {
+		return errcode.ParamInvalid
+	}
 	return errcode.InternalError
 }
 
@@ -629,7 +770,9 @@ func ErrToCode(err error) int {
 // 以此区分"可直接展示的业务校验错误"与"内部错误"。
 func containsCJK(s string) bool {
 	for _, r := range s {
-		if r >= 0x4E00 && r <= 0x9FFF { return true }
+		if r >= 0x4E00 && r <= 0x9FFF {
+			return true
+		}
 	}
 	return false
 }
