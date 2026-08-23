@@ -107,6 +107,27 @@ components:
         lease_end_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
 
+    BuyerOrder:
+      allOf:
+        - { $ref: '#/components/schemas/Order' }
+        - type: object
+          properties:
+            gpu_model: { type: string, description: "商品 GPU 型号；不适用时为空串" }
+            product_type: { type: string, enum: [card_rental, outright, center, colocation] }
+            pricing_mode: { type: string, enum: [hourly, daily, weekly, monthly, perpetual] }
+            self_operated: { type: boolean }
+            supplier_name: { type: string, description: "自营商品为平台自营；非自营取已认证企业名称，无资料时为空串" }
+
+    BuyerOrderPage:
+      type: object
+      properties:
+        list:
+          type: array
+          items: { $ref: '#/components/schemas/BuyerOrder' }
+        total: { type: integer }
+        page: { type: integer }
+        page_size: { type: integer }
+
     Delivery:
       type: object
       properties:
@@ -439,9 +460,21 @@ paths:
       tags: [算力撮合 Compute]
       summary: 我的订单（买家）
       parameters:
-        - { name: status, in: query, schema: { type: string } }
-        - { name: page, in: query, schema: { type: integer } }
-        - { name: page_size, in: query, schema: { type: integer } }
+        - { name: status, in: query, schema: { type: string, enum: [pending_payment, paid, provisioning, active, completed, cancelled, refunding, refunded, frozen] } }
+        - { name: order_no, in: query, schema: { type: string }, description: "订单号包含搜索，可带开头的 #" }
+        - { name: page, in: query, schema: { type: integer, minimum: 1, maximum: 1000000 }, description: "默认 1" }
+        - { name: page_size, in: query, schema: { type: integer, minimum: 1, maximum: 100 }, description: "默认 20，最大 100" }
+      responses:
+        '200':
+          description: "业务结果；仍需检查响应 code 是否为 0"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/BuyerOrderPage' }
 
   /orders/{id}:
     get:
@@ -471,6 +504,11 @@ paths:
     post:
       tags: [算力撮合 Compute]
       summary: 确认签收（买家）
+      description: "仅订单本人可确认 provisioning 且已生成访问凭证的订单。请传订单号，不传请求体。"
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: "订单号 order_no" }
+      responses:
+        '200': { description: "成功 code=0；不可签收/重复签收 code=40900；非本人 code=40300" }
 
   /orders/{id}/renew:
     post:

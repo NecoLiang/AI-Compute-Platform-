@@ -751,46 +751,6 @@ func (s *Service) ProvisioningOrder(orderNo string) error {
 	return s.repo.UpdateOrderStatus(orderNo, "provisioning")
 }
 
-// Active: buyer confirmed delivery
-func (s *Service) ActivateOrder(orderNo string) error {
-	now := time.Now()
-	o, err := s.repo.GetOrderByNo(orderNo)
-	if err != nil {
-		return err
-	}
-	if o == nil {
-		return fmt.Errorf("order not found")
-	}
-
-	tx, err := s.db.Beginx()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "active"); err != nil {
-		return err
-	}
-
-	// 永久使用权(买断)不设租期结束时间。
-	p, _ := s.repo.GetProductByID(o.ProductID)
-	if p != nil && p.PricingMode == PricingPerpetual {
-		if _, err := tx.Exec("UPDATE orders SET lease_start_at=?, lease_end_at=NULL WHERE order_no=?", now, orderNo); err != nil {
-			return err
-		}
-	} else {
-		// duration 是计费周期数, 必须按 pricing_mode 换算, 不能一律当小时。
-		mode := ""
-		if p != nil {
-			mode = p.PricingMode
-		}
-		end := LeaseEndAt(now, mode, o.Duration)
-		if _, err := tx.Exec("UPDATE orders SET lease_start_at=?, lease_end_at=? WHERE order_no=?", now, end, orderNo); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
 func (s *Service) CompleteOrder(orderNo string) error {
 	return s.repo.UpdateOrderStatus(orderNo, "completed")
 }
@@ -812,8 +772,8 @@ func (s *Service) FreezeOrder(orderNo string) error {
 	return s.revokeAccessByOrderNo(orderNo)
 }
 
-func (s *Service) ListBuyerOrders(buyerID int64, status string, page, pageSize int) ([]Order, int64, error) {
-	return s.repo.ListBuyerOrders(buyerID, status, page, pageSize)
+func (s *Service) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, error) {
+	return s.repo.ListBuyerOrders(f)
 }
 
 func (s *Service) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]Order, int64, error) {
@@ -971,9 +931,29 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 	}, nil
 }
 
-// ConfirmDelivery 买家确认签收: 访问凭证转 delivered, 订单转 active。
-// ConfirmDelivery 买家确认签收。必须校验订单归属:
-// 否则任意登录买家都能签收他人已付费订单并借此拿到访问凭证(越权)。
+const (
+	errOrderNotConfirmable    = "订单当前状态不可确认签收"
+	errDeliveryNotConfirmable = "订单尚未生成可签收的交付凭证"
+)
+
+func validateDeliveryConfirmation(o *Order, d *OrderDelivery, buyerID int64) error {
+	if o == nil {
+		return fmt.Errorf("order not found")
+	}
+	if o.BuyerID != buyerID {
+		return fmt.Errorf("无权操作该订单: 订单不属于当前买家")
+	}
+	if o.Status != "provisioning" {
+		return fmt.Errorf(errOrderNotConfirmable)
+	}
+	if d == nil || d.AccessStatus != AccessStatusGenerated || d.ConfirmedByBuyer {
+		return fmt.Errorf(errDeliveryNotConfirmable)
+	}
+	return nil
+}
+
+// ConfirmDelivery 仅允许订单本人签收已生成凭证的 provisioning 订单。
+// 两次状态更新在同一事务内并带条件，防止并发退款/改单后又被覆盖为 active。
 func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 	o, err := s.repo.GetOrderByNo(orderNo)
 	if err != nil {
@@ -982,13 +962,57 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 	if o == nil {
 		return fmt.Errorf("order not found")
 	}
-	if o.BuyerID != buyerID {
-		return fmt.Errorf("无权操作该订单: 订单不属于当前买家")
-	}
-	if err := s.repo.ConfirmDelivery(o.ID); err != nil {
+	d, err := s.repo.GetDeliveryByOrder(o.ID)
+	if err != nil {
 		return err
 	}
-	return s.ActivateOrder(orderNo)
+	if err := validateDeliveryConfirmation(o, d, buyerID); err != nil {
+		return err
+	}
+	p, err := s.repo.GetProductByID(o.ProductID)
+	if err != nil || p == nil {
+		return fmt.Errorf("product not found")
+	}
+
+	now := time.Now()
+	var leaseEnd interface{}
+	if p.PricingMode != PricingPerpetual {
+		leaseEnd = LeaseEndAt(now, p.PricingMode, o.Duration)
+	}
+
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(`UPDATE order_deliveries d
+		JOIN orders o ON o.id=d.order_id
+		SET d.confirmed_by_buyer=1, d.buyer_confirmed_at=?, d.access_status='delivered'
+		WHERE d.order_id=? AND d.access_status='generated' AND d.confirmed_by_buyer=0
+		AND o.buyer_id=? AND o.status='provisioning'`, now, o.ID, buyerID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf(errDeliveryNotConfirmable)
+	}
+
+	result, err = tx.Exec(`UPDATE orders SET status='active', lease_start_at=?, lease_end_at=?
+		WHERE id=? AND buyer_id=? AND status='provisioning'`, now, leaseEnd, o.ID, buyerID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf(errOrderNotConfirmable)
+	}
+	return tx.Commit()
 }
 
 func (s *Service) GetDelivery(orderID int64) (*OrderDelivery, error) {

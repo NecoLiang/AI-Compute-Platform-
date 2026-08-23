@@ -110,9 +110,36 @@ curl -X POST http://localhost:8080/api/v1/orders \
 ## GET /orders · 我的订单 ✅ buyer
 
 ```
-curl "http://localhost:8080/api/v1/orders?status=active&page=1&page_size=20" \
+curl "http://localhost:8080/api/v1/orders?status=active&order_no=20260711&page=1&page_size=20" \
   -H "Authorization: Bearer <token>"
 ```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:--:|------|
+| status | string | 否 | 订单状态精确筛选 |
+| order_no | string | 否 | 订单号包含搜索；可带开头的 `#` |
+| page | int | 否 | 默认 1，最大 1000000 |
+| page_size | int | 否 | 默认 20，最大 100 |
+
+列表保留完整订单字段，并追加商品/供给方摘要，金额单位仍为分：
+
+```json
+{"code":0,"message":"success","data":{
+  "list":[{
+    "id":1,"order_no":"ORD20260711001","buyer_id":42,"product_id":9,
+    "quantity":8,"duration":1,"unit_price":2520000,"total_amount":20160000,
+    "platform_fee":1008000,"status":"active",
+    "payment_expires_at":null,"lease_start_at":"2026-07-11T02:00:00Z",
+    "lease_end_at":"2026-08-11T02:00:00Z","compliance_agreed":true,
+    "created_at":"2026-07-11T01:30:00Z","updated_at":"2026-07-11T02:00:00Z",
+    "gpu_model":"H100","product_type":"card_rental","pricing_mode":"monthly","self_operated":false,
+    "supplier_name":"中联数据"
+  }],
+  "total":1,"page":1,"page_size":20
+},"request_id":"req_xxx"}
+```
+
+`supplier_name`：自营商品固定返回“平台自营”；非自营仅返回已认证企业名称，没有可用资料时为空串。
 
 ---
 
@@ -123,11 +150,21 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
   -H "Authorization: Bearer <token>"
 ```
 
-**响应包含**：订单信息 + 交付凭证（如有）+ 存证时间线（如有）
+**当前响应包含**：`order`、`credit` 与脱敏后的 `delivery`（如有）；商品/供给方摘要请使用订单列表响应。
 
 ---
 
 ## POST /orders/:id/confirm · 确认签收 ✅ buyer
+
+路径参数必须传 `order_no`，无需请求体。仅订单本人可以确认 `provisioning` 且访问凭证状态为 `generated` 的订单；成功后订单转为 `active`，凭证转为 `delivered`。
+
+```json
+{"code":0,"message":"success","request_id":"req_xxx"}
+```
+
+- 非订单本人：`code=40300`
+- 状态不允许、尚未生成凭证或重复签收：`code=40900`
+- 订单不存在：`code=40400`
 
 ## POST /orders/:id/renew · 续费 ✅ buyer
 ```json

@@ -78,6 +78,17 @@ type Order struct {
 	UpdatedAt        time.Time  `db:"updated_at" json:"updated_at"`
 }
 
+// BuyerOrder keeps the existing order payload and adds the product/provider
+// fields needed by the buyer order table in one query.
+type BuyerOrder struct {
+	Order
+	GPUModel     string `db:"gpu_model" json:"gpu_model"`
+	ProductType  string `db:"product_type" json:"product_type"`
+	PricingMode  string `db:"pricing_mode" json:"pricing_mode"`
+	SelfOperated bool   `db:"self_operated" json:"self_operated"`
+	SupplierName string `db:"supplier_name" json:"supplier_name"`
+}
+
 // OrderDelivery 交付记录。C-06 起承载访问凭证。
 // 加密字段一律 json:"-", 绝不随接口出站。
 type OrderDelivery struct {
@@ -136,6 +147,14 @@ const productColumns = `id, supplier_id, product_type,
 const orderColumns = `id, order_no, buyer_id, product_id, quantity, duration, unit_price,
 	total_amount, platform_fee, status, payment_expires_at, lease_start_at, lease_end_at,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, created_at, updated_at`
+
+const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.quantity, o.duration, o.unit_price,
+	o.total_amount, o.platform_fee, o.status, o.payment_expires_at, o.lease_start_at, o.lease_end_at,
+	COALESCE(o.compliance_agreed,0) AS compliance_agreed, o.created_at, o.updated_at,
+	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
+	COALESCE(p.pricing_mode,'') AS pricing_mode,
+	COALESCE(p.self_operated,0) AS self_operated,
+	CASE WHEN COALESCE(p.self_operated,0)=1 THEN '平台自营' ELSE COALESCE(e.name,'') END AS supplier_name`
 
 const deliveryColumns = `id, order_id, COALESCE(credential_encrypted,'') AS credential_encrypted,
 	COALESCE(access_key,'') AS access_key, COALESCE(access_value_encrypted,'') AS access_value_encrypted,
@@ -483,12 +502,66 @@ type OrderListFilter struct {
 	BuyerID    int64
 	SupplierID int64
 	Status     string
+	OrderNo    string
 	Page       int
 	PageSize   int
 }
 
-func (r *Repository) ListBuyerOrders(buyerID int64, status string, page, pageSize int) ([]Order, int64, error) {
-	return r.listOrders("buyer_id", buyerID, status, page, pageSize)
+const (
+	maxOrderPage     = 1000000
+	maxOrderPageSize = 100
+)
+
+func (f *OrderListFilter) Normalize() {
+	f.Status = strings.TrimSpace(f.Status)
+	f.OrderNo = strings.TrimPrefix(strings.TrimSpace(f.OrderNo), "#")
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.Page > maxOrderPage {
+		f.Page = maxOrderPage
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = 20
+	}
+	if f.PageSize > maxOrderPageSize {
+		f.PageSize = maxOrderPageSize
+	}
+}
+
+func (f OrderListFilter) buyerWhere() (string, []interface{}) {
+	where := "WHERE o.buyer_id=?"
+	args := []interface{}{f.BuyerID}
+	if f.Status != "" {
+		where += " AND o.status=?"
+		args = append(args, f.Status)
+	}
+	if f.OrderNo != "" {
+		where += " AND o.order_no LIKE ?"
+		args = append(args, "%"+f.OrderNo+"%")
+	}
+	return where, args
+}
+
+func (r *Repository) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, error) {
+	f.Normalize()
+	where, args := f.buyerWhere()
+
+	var total int64
+	if err := r.db.Get(&total, "SELECT COUNT(*) FROM orders o "+where, args...); err != nil {
+		return nil, 0, err
+	}
+
+	query := fmt.Sprintf(`SELECT %s FROM orders o
+		LEFT JOIN products p ON p.id=o.product_id
+		LEFT JOIN enterprises e ON e.user_id=p.supplier_id AND e.status='verified'
+		%s ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, buyerOrderColumns, where)
+	args = append(args, f.PageSize, (f.Page-1)*f.PageSize)
+	list := make([]BuyerOrder, 0)
+	if err := r.db.Select(&list, query, args...); err != nil {
+		return nil, 0, err
+	}
+	return list, total, nil
 }
 
 func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]Order, int64, error) {
@@ -509,29 +582,6 @@ func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, p
 		pageSize = 20
 	}
 	query := fmt.Sprintf("SELECT o.* FROM orders o JOIN products p ON o.product_id=p.id %s ORDER BY o.created_at DESC LIMIT ? OFFSET ?", where)
-	args = append(args, pageSize, (page-1)*pageSize)
-	var list []Order
-	err := r.db.Select(&list, query, args...)
-	return list, total, err
-}
-
-func (r *Repository) listOrders(field string, id int64, status string, page, pageSize int) ([]Order, int64, error) {
-	where := fmt.Sprintf("WHERE %s=?", field)
-	args := []interface{}{id}
-	if status != "" {
-		where += " AND status=?"
-		args = append(args, status)
-	}
-	var total int64
-	r.db.Get(&total, "SELECT COUNT(*) FROM orders "+where, args...)
-
-	if page <= 0 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = 20
-	}
-	query := fmt.Sprintf("SELECT %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?", orderColumns, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []Order
 	err := r.db.Select(&list, query, args...)
@@ -571,16 +621,6 @@ func (r *Repository) GetDeliveryByOrder(orderID int64) (*OrderDelivery, error) {
 		return nil, err
 	}
 	return &d, nil
-}
-
-func (r *Repository) ConfirmDelivery(orderID int64) error {
-	// 买家签收: 已生成的访问凭证转为 delivered; 已吊销的不复活。
-	_, err := r.db.Exec(
-		`UPDATE order_deliveries SET confirmed_by_buyer=1, buyer_confirmed_at=NOW(),
-		access_status=IF(access_status='generated','delivered',access_status) WHERE order_id=?`,
-		orderID,
-	)
-	return err
 }
 
 // RevokeAccessByOrder 吊销访问凭证(退款/取消/到期)。幂等: 重复调用不改变已吊销记录。
@@ -745,6 +785,8 @@ func ErrToCode(err error) int {
 	case "product not available":
 		return errcode.Conflict
 	case "order not active":
+		return errcode.Conflict
+	case errOrderNotConfirmable, errDeliveryNotConfirmable:
 		return errcode.Conflict
 	case "invalid status transition":
 		return errcode.ParamInvalid

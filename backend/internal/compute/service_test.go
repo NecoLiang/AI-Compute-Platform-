@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"tokenfactory/pkg/errcode"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -597,4 +598,56 @@ func TestProductFilterBuildWhereAndSort(t *testing.T) {
 	assert.Contains(t, args, "%夜间%")
 	assert.Equal(t, "ORDER BY stock DESC", f.orderBy())
 	assert.Equal(t, "ORDER BY price_negotiable ASC, unit_price ASC", ProductFilter{Sort: "price_asc"}.orderBy())
+}
+
+func TestOrderListFilterNormalizeAndWhere(t *testing.T) {
+	f := OrderListFilter{
+		BuyerID: 42, Status: " active ", OrderNo: " #ORD20260711 ",
+		Page: -1, PageSize: 1000,
+	}
+	f.Normalize()
+
+	assert.Equal(t, "active", f.Status)
+	assert.Equal(t, "ORD20260711", f.OrderNo)
+	assert.Equal(t, 1, f.Page)
+	assert.Equal(t, maxOrderPageSize, f.PageSize)
+
+	where, args := f.buyerWhere()
+	assert.Equal(t, "WHERE o.buyer_id=? AND o.status=? AND o.order_no LIKE ?", where)
+	assert.Equal(t, []interface{}{int64(42), "active", "%ORD20260711%"}, args)
+	assert.Contains(t, buyerOrderColumns, "COALESCE(p.product_type,'') AS product_type")
+}
+
+func TestValidateDeliveryConfirmation(t *testing.T) {
+	validOrder := func() *Order {
+		return &Order{ID: 7, BuyerID: 42, Status: "provisioning"}
+	}
+	validDelivery := func() *OrderDelivery {
+		return &OrderDelivery{OrderID: 7, AccessStatus: AccessStatusGenerated}
+	}
+
+	assert.NoError(t, validateDeliveryConfirmation(validOrder(), validDelivery(), 42))
+
+	tests := []struct {
+		name      string
+		order     *Order
+		delivery  *OrderDelivery
+		buyerID   int64
+		wantError string
+		wantCode  int
+	}{
+		{"订单不存在", nil, validDelivery(), 42, "order not found", errcode.NotFound},
+		{"非订单买家", validOrder(), validDelivery(), 99, "无权操作", errcode.Forbidden},
+		{"未支付订单不可签收", &Order{BuyerID: 42, Status: "pending_payment"}, validDelivery(), 42, errOrderNotConfirmable, errcode.Conflict},
+		{"缺少交付记录", validOrder(), nil, 42, errDeliveryNotConfirmable, errcode.Conflict},
+		{"凭证未生成", validOrder(), &OrderDelivery{AccessStatus: AccessStatusNone}, 42, errDeliveryNotConfirmable, errcode.Conflict},
+		{"不可重复签收", validOrder(), &OrderDelivery{AccessStatus: AccessStatusGenerated, ConfirmedByBuyer: true}, 42, errDeliveryNotConfirmable, errcode.Conflict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDeliveryConfirmation(tc.order, tc.delivery, tc.buyerID)
+			assert.ErrorContains(t, err, tc.wantError)
+			assert.Equal(t, tc.wantCode, ErrToCode(err))
+		})
+	}
 }

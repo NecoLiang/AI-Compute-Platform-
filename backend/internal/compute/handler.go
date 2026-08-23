@@ -290,10 +290,27 @@ func (h *Handler) GetOrder(c *gin.Context) {
 }
 
 func (h *Handler) ListBuyerOrders(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	list, total, _ := h.svc.ListBuyerOrders(c.GetInt64("user_id"), c.Query("status"), page, pageSize)
-	response.SuccessPage(c, list, total, page, pageSize)
+	page, err := positiveIntQuery(c, "page", 1)
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	pageSize, err := positiveIntQuery(c, "page_size", 20)
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	f := OrderListFilter{
+		BuyerID: c.GetInt64("user_id"), Status: c.Query("status"), OrderNo: c.Query("order_no"),
+		Page: page, PageSize: pageSize,
+	}
+	f.Normalize()
+	list, total, err := h.svc.ListBuyerOrders(f)
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
+	response.SuccessPage(c, list, total, f.Page, f.PageSize)
 }
 
 func (h *Handler) ListSupplierOrders(c *gin.Context) {
