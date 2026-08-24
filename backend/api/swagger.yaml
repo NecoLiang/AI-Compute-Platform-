@@ -29,6 +29,7 @@ tags:
   - name: 认证 Auth
   - name: 用户 User
   - name: 算力撮合 Compute
+  - name: 开发 Dev
   - name: 支付分账 Payment
   - name: 居间金融 Intermediary
   - name: 运营管理 Admin
@@ -127,6 +128,79 @@ components:
         total: { type: integer }
         page: { type: integer }
         page_size: { type: integer }
+
+    BuyerOrderDetail:
+      type: object
+      required: [order, product, supplier, delivery, actions]
+      properties:
+        order:
+          type: object
+          properties:
+            order_no: { type: string, example: "ORD20260713143000123abc" }
+            status: { type: string, enum: [pending_payment, paid, provisioning, active, completed, cancelled, refunding, refunded, frozen] }
+            quantity: { type: integer }
+            duration: { type: integer, description: "计费周期数，单位由 product.pricing_mode 决定" }
+            unit_price: { type: integer, description: "单价（分）" }
+            total_amount: { type: integer, description: "总金额（分）" }
+            platform_fee: { type: integer, description: "平台佣金（分）" }
+            payment_expires_at: { type: string, format: date-time, nullable: true }
+            lease_start_at: { type: string, format: date-time, nullable: true }
+            lease_end_at: { type: string, format: date-time, nullable: true }
+            compliance_agreed: { type: boolean }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+        product:
+          type: object
+          description: "当前关联商品资料；现有数据模型没有不可变的下单快照"
+          properties:
+            id: { type: integer }
+            product_type: { type: string, enum: [card_rental, outright, center, colocation] }
+            gpu_model: { type: string }
+            card_count: { type: integer }
+            machine_count: { type: integer, nullable: true }
+            total_pflops_approx: { type: string, nullable: true }
+            power_capacity_kw: { type: integer, nullable: true }
+            rack_count: { type: integer, nullable: true }
+            cpu_spec: { type: string }
+            memory_spec: { type: string }
+            storage_spec: { type: string }
+            bandwidth_spec: { type: string }
+            delivery_mode: { type: string }
+            pricing_mode: { type: string, enum: [hourly, daily, weekly, monthly, perpetual] }
+            region: { type: string }
+            self_operated: { type: boolean }
+        supplier:
+          type: object
+          properties:
+            name: { type: string }
+            self_operated: { type: boolean }
+            credit:
+              type: object
+              nullable: true
+              properties:
+                fulfill_rate: { type: number }
+                sla_rate: { type: number }
+                violation_count: { type: integer }
+                total_orders: { type: integer }
+                updated_at: { type: string, format: date-time }
+        delivery:
+          type: object
+          nullable: true
+          description: "仅返回状态摘要；访问凭证继续使用独立接口"
+          properties:
+            access_status: { type: string, enum: [none, generated, delivered, revoked] }
+            access_expires_at: { type: string, format: date-time, nullable: true }
+            revoked_at: { type: string, format: date-time, nullable: true }
+            confirmed_by_buyer: { type: boolean }
+            buyer_confirmed_at: { type: string, format: date-time, nullable: true }
+            created_at: { type: string, format: date-time }
+        actions:
+          type: object
+          properties:
+            can_confirm: { type: boolean }
+            can_renew: { type: boolean }
+            can_refund: { type: boolean }
+            can_view_credential: { type: boolean }
 
     Delivery:
       type: object
@@ -476,12 +550,32 @@ paths:
                     properties:
                       data: { $ref: '#/components/schemas/BuyerOrderPage' }
 
-  /orders/{id}:
+  /orders/{order_no}:
     get:
       tags: [算力撮合 Compute]
-      summary: 订单详情
+      summary: 买家订单详情
+      description: "仅返回当前 JWT 用户自己的订单；不存在或非本人均为 code=40400。商品/供给方是当前关联资料，不是下单快照。"
       parameters:
-        - { name: id, in: path, required: true, schema: { type: string }, description: "订单号或ID" }
+        - { name: order_no, in: path, required: true, schema: { type: string, pattern: '^(ORD|REN)[A-Za-z0-9-]{6,29}$', maxLength: 32 }, description: "订单号，不接受自增 ID" }
+      responses:
+        '200':
+          description: "业务结果；仍需检查响应 code 是否为 0"
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/BuyerOrderDetail' }
+
+  /dev/fixtures/buyer-orders:
+    post:
+      tags: [开发 Dev]
+      summary: 为当前登录用户生成买家订单夹具
+      description: "仅在 server.mode != release 时注册；无请求体，幂等写入 4 条开发订单。生产环境没有此路由。"
+      responses:
+        '200': { description: "成功 code=0，data 包含 orders 与 count" }
 
   /orders/{id}/deliver:
     post:

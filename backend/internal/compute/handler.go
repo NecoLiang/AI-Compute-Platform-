@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"tokenfactory/pkg/errcode"
@@ -47,6 +48,10 @@ func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
 	r.POST("/orders/:id/refund", h.RequestRefund)
 	r.GET("/orders/:id/access-credential", h.GetAccessCredential)
 	r.POST("/orders/:id/access-credential/reveal", h.RevealAccessCredential)
+}
+
+func (h *Handler) RegisterDevRoutes(r *gin.RouterGroup) {
+	r.POST("/fixtures/buyer-orders", h.SeedBuyerOrders)
 }
 
 func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
@@ -256,37 +261,36 @@ func (h *Handler) PlaceOrder(c *gin.Context) {
 }
 
 func (h *Handler) GetOrder(c *gin.Context) {
-	idOrNo := c.Param("id")
-	o, err := h.svc.GetOrder(idOrNo)
-	if err != nil || o == nil {
-		// try by numeric ID
-		id, _ := strconv.ParseInt(idOrNo, 10, 64)
-		o, err = h.svc.GetOrderByID(id)
-	}
-	if err != nil || o == nil {
-		response.Error(c, errcode.NotFound, "订单不存在")
+	orderNo := c.Param("id")
+	if !validOrderNo(orderNo) {
+		response.Error(c, errcode.ParamInvalid, "订单编号无效")
 		return
 	}
-
-	// 归属校验: 只有买家本人 / 商品所属供给方 / 运营可看单, 否则遍历 id 就能拖走全站订单。
-	if allowed, err := h.svc.CanAccessOrder(c.GetInt64("user_id"), o, hasAdminRole(c)); err != nil || !allowed {
-		response.Error(c, errcode.Forbidden, "无权查看该订单")
-		return
-	}
-
-	delivery, _ := h.svc.GetDelivery(o.ID)
-	credit, _ := h.svc.GetCreditScore(o.BuyerID)
-	resp := gin.H{"order": o, "credit": credit}
-	// delivery 里的密文字段带 json:"-" 不会出站; access_value 需要主动脱敏后另给。
-	if delivery != nil {
-		resp["delivery"] = gin.H{
-			"order_id": delivery.OrderID, "access_key": delivery.AccessKey,
-			"access_status": delivery.AccessStatus, "access_expires_at": delivery.AccessExpiresAt,
-			"revoked_at": delivery.RevokedAt, "confirmed_by_buyer": delivery.ConfirmedByBuyer,
-			"buyer_confirmed_at": delivery.BuyerConfirmedAt,
+	detail, err := h.svc.GetBuyerOrderDetail(c.GetInt64("user_id"), orderNo)
+	if err != nil {
+		if ErrToCode(err) == errcode.NotFound {
+			response.Error(c, errcode.NotFound, "订单不存在")
+			return
 		}
+		response.Error(c, errcode.InternalError, err.Error())
+		return
 	}
-	response.Success(c, resp)
+	response.Success(c, detail)
+}
+
+var orderNoPattern = regexp.MustCompile(`^(?:ORD|REN)[A-Za-z0-9-]{6,29}$`)
+
+func validOrderNo(orderNo string) bool {
+	return orderNoPattern.MatchString(orderNo)
+}
+
+func (h *Handler) SeedBuyerOrders(c *gin.Context) {
+	orders, err := h.svc.SeedBuyerOrders(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
+	response.Success(c, gin.H{"orders": orders, "count": len(orders)})
 }
 
 func (h *Handler) ListBuyerOrders(c *gin.Context) {

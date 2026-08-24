@@ -143,14 +143,49 @@ curl "http://localhost:8080/api/v1/orders?status=active&order_no=20260711&page=1
 
 ---
 
-## GET /orders/:id · 订单详情 ✅
+## GET /orders/:order_no · 买家订单详情 ✅
 
 ```
 curl http://localhost:8080/api/v1/orders/ORD20260713001 \
   -H "Authorization: Bearer <token>"
 ```
 
-**当前响应包含**：`order`、`credit` 与脱敏后的 `delivery`（如有）；商品/供给方摘要请使用订单列表响应。
+仅查询当前 JWT 用户自己的订单；订单不存在或不属于当前用户均返回 `code=40400`。路径只接受 `ORD` / `REN` 开头、总长不超过 32 的订单号，不接受数据库自增 ID。
+
+```json
+{"code":0,"message":"success","data":{
+  "order":{"order_no":"ORD20260713001","status":"active","quantity":8,"duration":1,
+    "unit_price":2520000,"total_amount":20160000,"platform_fee":1008000,
+    "payment_expires_at":null,"lease_start_at":"2026-07-11T02:00:00Z",
+    "lease_end_at":"2026-08-11T02:00:00Z","compliance_agreed":true,
+    "created_at":"2026-07-11T01:30:00Z","updated_at":"2026-07-11T02:00:00Z"},
+  "product":{"id":1,"product_type":"card_rental","gpu_model":"NVIDIA H100","card_count":8,
+    "machine_count":null,"total_pflops_approx":null,"power_capacity_kw":null,"rack_count":null,
+    "cpu_spec":"2x Intel Xeon","memory_spec":"1TB","storage_spec":"8TB NVMe",
+    "bandwidth_spec":"25Gbps","delivery_mode":"bare_metal","pricing_mode":"monthly",
+    "region":"华北","self_operated":false},
+  "supplier":{"name":"中联数据","self_operated":false,"credit":null},
+  "delivery":{"access_status":"delivered","access_expires_at":"2026-08-11T02:00:00Z",
+    "revoked_at":null,"confirmed_by_buyer":true,"buyer_confirmed_at":"2026-07-11T02:00:00Z",
+    "created_at":"2026-07-11T01:55:00Z"},
+  "actions":{"can_confirm":false,"can_renew":true,"can_refund":true,"can_view_credential":true}
+},"request_id":"req_xxx"}
+```
+
+`delivery` 和 `supplier.credit` 没有记录时为 `null`。详情不返回 `buyer_id`、`supplier_id`、密文、`access_key` 或凭证明文；凭证仍通过独立的 access-credential 接口查看。当前数据库没有订单事件表和商品快照，因此此接口不伪造区块链时间线，`product` / `supplier` 是当前关联资料。
+
+## POST /dev/fixtures/buyer-orders · 为当前用户生成本地订单（仅 debug）
+
+无需请求体。接口仅在 `server.mode != release` 时注册，使用 JWT 的 `user_id` 幂等写入 4 条开发订单；生产环境没有该路由。
+
+```json
+{"code":0,"message":"success","data":{"orders":[
+  {"order_no":"ORDDEV000000000801","status":"pending_payment"},
+  {"order_no":"ORDDEV000000000802","status":"paid"},
+  {"order_no":"ORDDEV000000000803","status":"active"},
+  {"order_no":"ORDDEV000000000804","status":"completed"}
+],"count":4},"request_id":"req_xxx"}
+```
 
 ---
 
@@ -179,7 +214,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 ```json
 {"ip_address":"10.0.1.128","ssh_port":22,"username":"root","credential_note":"密码已私信"}
 ```
-> ⚠️ 当前明文存储，TODO: AES-256加密
+交付信息与访问凭证均使用 AES-256-GCM 加密存储；未配置 `security.credential_key` 时明确失败，不降级为明文。
 
 ---
 

@@ -141,7 +141,7 @@ Query: ?gpu_model=H100&region=北京&pricing_mode=hourly&price_min=20&price_max=
 |------|------|------|:--:|------|
 | POST | `/orders` | 下单 | ✅ | buyer |
 | GET | `/orders` | 我的订单（买家） | ✅ | buyer |
-| GET | `/orders/:id` | 订单详情 | ✅ | 买卖双方 |
+| GET | `/orders/:order_no` | 买家订单详情 | ✅ | buyer |
 | POST | `/orders/:id/deliver` | 回填交付凭证（供给方） | ✅ | supplier |
 | POST | `/orders/:id/confirm` | 确认签收（买家） | ✅ | buyer |
 | POST | `/orders/:id/renew` | 续费 | ✅ | buyer |
@@ -150,11 +150,11 @@ Query: ?gpu_model=H100&region=北京&pricing_mode=hourly&price_min=20&price_max=
 
 **POST /orders**
 ```json
-{ "product_id": 1, "quantity": 8, "duration": 720, "compliance_agreed": true }
+{ "product_id": 1, "quantity": 8, "duration": 1, "compliance_agreed": true }
 // Response
 { "code": 0, "data": {
-  "order_no": "ORD20260713001", "total_amount": 201600.00,
-  "platform_fee": 10080.00, "status": "pending_payment",
+  "order_no": "ORD20260713001", "total_amount": 20160000,
+  "platform_fee": 1008000, "status": "pending_payment",
   "payment_expires_at": "2026-07-13T15:00:00Z"
 }}
 ```
@@ -164,26 +164,22 @@ Query: ?gpu_model=H100&region=北京&pricing_mode=hourly&price_min=20&price_max=
 { "ip_address": "10.0.1.128", "ssh_port": 22, "username": "root", "credential_note": "密码已通过站内信发送" }
 ```
 
-**GET /orders/:id (买家视角)**
+**GET /orders/:order_no（买家视角）**
 ```json
 { "code": 0, "data": {
-  "order_no": "ORD20260713001", "status": "active",
-  "product": { "gpu_model": "H100", "card_count": 8 },
-  "supplier": { "name": "中联数据", "credit_score": 98, "credit_on_chain": true },
-  "quantity": 8, "duration": 720, "total_amount": 201600.00,
-  "delivery": { "ip_address": "***.***.***.128", "ssh_port": 22, "confirmed_at": "2026-07-13T15:02:00Z" },
-  "blockchain_timeline": [
-    { "event": "order_created", "tx_id": "0x7a3b...", "timestamp": "..." },
-    { "event": "payment_paid", "tx_id": "0x8f2e...", "timestamp": "..." },
-    { "event": "delivery_confirmed", "tx_id": "0x3d1c...", "timestamp": "..." }
-  ],
-  "timeline": [
-    { "status": "pending_payment", "at": "2026-07-13T14:30:00Z" },
-    { "status": "paid", "at": "2026-07-13T14:30:48Z" },
-    { "status": "active", "at": "2026-07-13T15:02:00Z" }
-  ]
+  "order": { "order_no": "ORD20260713001", "status": "active", "quantity": 8, "duration": 1,
+    "unit_price": 2520000, "total_amount": 20160000, "platform_fee": 1008000 },
+  "product": { "id": 1, "product_type": "card_rental", "gpu_model": "H100",
+    "card_count": 8, "pricing_mode": "monthly", "region": "北京", "self_operated": false },
+  "supplier": { "name": "中联数据", "self_operated": false, "credit": null },
+  "delivery": { "access_status": "delivered", "confirmed_by_buyer": true,
+    "buyer_confirmed_at": "2026-07-13T15:02:00Z" },
+  "actions": { "can_confirm": false, "can_renew": true, "can_refund": true,
+    "can_view_credential": true }
 }}
 ```
+
+该接口仅按 JWT 当前用户查询订单，不接受数据库自增 ID，也不返回访问凭证明文。现有数据模型没有订单事件表或不可变商品快照，因此区块链时间线暂不属于本接口，`product` / `supplier` 为当前关联资料。
 
 ---
 

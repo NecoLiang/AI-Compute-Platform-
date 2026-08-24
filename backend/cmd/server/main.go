@@ -126,6 +126,11 @@ func main() {
 	compute.NewHandler(computeSvc).RegisterBuyerRoutes(buyer)
 	equipment.NewHandler(equipmentSvc).RegisterBuyerRoutes(buyer)
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
+	if cfg.Server.Mode != "release" {
+		dev := r.Group("/api/v1/dev")
+		dev.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
+		compute.NewHandler(computeSvc).RegisterDevRoutes(dev)
+	}
 
 	// Supplier API
 	supplier := r.Group("/api/v1")

@@ -160,6 +160,84 @@ type Service struct {
 	credentialKey []byte
 }
 
+type BuyerOrderDetail struct {
+	Order    BuyerOrderDetailOrder    `json:"order"`
+	Product  BuyerOrderDetailProduct  `json:"product"`
+	Supplier BuyerOrderDetailSupplier `json:"supplier"`
+	Delivery *BuyerOrderDeliveryView  `json:"delivery"`
+	Actions  BuyerOrderActions        `json:"actions"`
+}
+
+type BuyerOrderDetailOrder struct {
+	OrderNo          string     `json:"order_no"`
+	Status           string     `json:"status"`
+	Quantity         int        `json:"quantity"`
+	Duration         int        `json:"duration"`
+	UnitPrice        int64      `json:"unit_price"`
+	TotalAmount      int64      `json:"total_amount"`
+	PlatformFee      int64      `json:"platform_fee"`
+	PaymentExpiresAt *time.Time `json:"payment_expires_at"`
+	LeaseStartAt     *time.Time `json:"lease_start_at"`
+	LeaseEndAt       *time.Time `json:"lease_end_at"`
+	ComplianceAgreed bool       `json:"compliance_agreed"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
+type BuyerOrderDetailProduct struct {
+	ID                int64   `json:"id"`
+	ProductType       string  `json:"product_type"`
+	GPUModel          string  `json:"gpu_model"`
+	CardCount         int     `json:"card_count"`
+	MachineCount      *int    `json:"machine_count"`
+	TotalPflopsApprox *string `json:"total_pflops_approx"`
+	PowerCapacityKW   *int    `json:"power_capacity_kw"`
+	RackCount         *int    `json:"rack_count"`
+	CPUSpec           string  `json:"cpu_spec"`
+	MemorySpec        string  `json:"memory_spec"`
+	StorageSpec       string  `json:"storage_spec"`
+	BandwidthSpec     string  `json:"bandwidth_spec"`
+	DeliveryMode      string  `json:"delivery_mode"`
+	PricingMode       string  `json:"pricing_mode"`
+	Region            string  `json:"region"`
+	SelfOperated      bool    `json:"self_operated"`
+}
+
+type BuyerOrderDetailSupplier struct {
+	Name         string          `json:"name"`
+	SelfOperated bool            `json:"self_operated"`
+	Credit       *SupplierCredit `json:"credit"`
+}
+
+type SupplierCredit struct {
+	FulfillRate    float64   `json:"fulfill_rate"`
+	SLARate        float64   `json:"sla_rate"`
+	ViolationCount int       `json:"violation_count"`
+	TotalOrders    int       `json:"total_orders"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type BuyerOrderDeliveryView struct {
+	AccessStatus     string     `json:"access_status"`
+	AccessExpiresAt  *time.Time `json:"access_expires_at"`
+	RevokedAt        *time.Time `json:"revoked_at"`
+	ConfirmedByBuyer bool       `json:"confirmed_by_buyer"`
+	BuyerConfirmedAt *time.Time `json:"buyer_confirmed_at"`
+	CreatedAt        time.Time  `json:"created_at"`
+}
+
+type BuyerOrderActions struct {
+	CanConfirm        bool `json:"can_confirm"`
+	CanRenew          bool `json:"can_renew"`
+	CanRefund         bool `json:"can_refund"`
+	CanViewCredential bool `json:"can_view_credential"`
+}
+
+type SeededBuyerOrder struct {
+	OrderNo string `json:"order_no"`
+	Status  string `json:"status"`
+}
+
 // NewService 兼容既有调用 NewService(repo, db)。
 // 可选第三参传 config.Security.CredentialKey (64 位 hex), 用于交付访问凭证加解密;
 // 不传或传空串时凭证功能返回明确的"密钥未配置"错误, 不做任何明文降级。
@@ -774,6 +852,138 @@ func (s *Service) FreezeOrder(orderNo string) error {
 
 func (s *Service) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, error) {
 	return s.repo.ListBuyerOrders(f)
+}
+
+func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrderDetail, error) {
+	buyerOrder, err := s.repo.GetBuyerOrderByNo(buyerID, orderNo)
+	if err != nil {
+		return nil, err
+	}
+	if buyerOrder == nil {
+		return nil, fmt.Errorf("order not found")
+	}
+
+	product, err := s.repo.GetProductByID(buyerOrder.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	delivery, err := s.repo.GetDeliveryByOrder(buyerOrder.ID)
+	if err != nil {
+		return nil, err
+	}
+	credit, err := s.repo.FindCreditScore(product.SupplierID)
+	if err != nil {
+		return nil, err
+	}
+
+	order := buyerOrder.Order
+	detail := &BuyerOrderDetail{
+		Order: BuyerOrderDetailOrder{
+			OrderNo: order.OrderNo, Status: order.Status, Quantity: order.Quantity, Duration: order.Duration,
+			UnitPrice: order.UnitPrice, TotalAmount: order.TotalAmount, PlatformFee: order.PlatformFee,
+			PaymentExpiresAt: order.PaymentExpires, LeaseStartAt: order.LeaseStart, LeaseEndAt: order.LeaseEnd,
+			ComplianceAgreed: order.ComplianceAgreed, CreatedAt: order.CreatedAt, UpdatedAt: order.UpdatedAt,
+		},
+		Product: BuyerOrderDetailProduct{
+			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel,
+			CardCount: product.CardCount, MachineCount: product.MachineCount, TotalPflopsApprox: product.TotalPflopsApprox,
+			PowerCapacityKW: product.PowerCapacityKw, RackCount: product.RackCount, CPUSpec: product.CpuSpec,
+			MemorySpec: product.MemorySpec, StorageSpec: product.StorageSpec, BandwidthSpec: product.BandwidthSpec,
+			DeliveryMode: product.DeliveryMode, PricingMode: product.PricingMode, Region: product.Region,
+			SelfOperated: product.SelfOperated,
+		},
+		Supplier: BuyerOrderDetailSupplier{
+			Name: buyerOrder.SupplierName, SelfOperated: product.SelfOperated,
+		},
+		Actions: buyerOrderActions(&order, product, delivery),
+	}
+	if credit != nil {
+		detail.Supplier.Credit = &SupplierCredit{
+			FulfillRate: credit.FulfillRate, SLARate: credit.SlaRate, ViolationCount: credit.ViolationCount,
+			TotalOrders: credit.TotalOrders, UpdatedAt: credit.UpdatedAt,
+		}
+	}
+	if delivery != nil {
+		detail.Delivery = &BuyerOrderDeliveryView{
+			AccessStatus: delivery.AccessStatus, AccessExpiresAt: delivery.AccessExpiresAt, RevokedAt: delivery.RevokedAt,
+			ConfirmedByBuyer: delivery.ConfirmedByBuyer, BuyerConfirmedAt: delivery.BuyerConfirmedAt,
+			CreatedAt: delivery.CreatedAt,
+		}
+	}
+	return detail, nil
+}
+
+func buyerOrderActions(order *Order, product *Product, delivery *OrderDelivery) BuyerOrderActions {
+	if order == nil || product == nil {
+		return BuyerOrderActions{}
+	}
+	return BuyerOrderActions{
+		CanConfirm: order.Status == "provisioning" && delivery != nil &&
+			delivery.AccessStatus == AccessStatusGenerated && !delivery.ConfirmedByBuyer,
+		CanRenew:  order.Status == "active" && product.PricingMode != PricingPerpetual,
+		CanRefund: order.Status == "active" || order.Status == "paid" || order.Status == "provisioning",
+		CanViewCredential: delivery != nil && delivery.AccessValueEncrypted != "" &&
+			(delivery.AccessStatus == AccessStatusGenerated || delivery.AccessStatus == AccessStatusDelivered),
+	}
+}
+
+func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
+	var products []Product
+	if err := s.db.Select(&products, "SELECT "+productColumns+" FROM products WHERE status='active' AND unit_price>0 ORDER BY id LIMIT 4"); err != nil {
+		return nil, err
+	}
+	if len(products) == 0 {
+		return nil, fmt.Errorf("no active products available for buyer fixtures")
+	}
+
+	statuses := []string{"pending_payment", "paid", "active", "completed"}
+	now := time.Now().UTC().Truncate(time.Second)
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	seeded := make([]SeededBuyerOrder, 0, len(statuses))
+	for i, status := range statuses {
+		product := products[i%len(products)]
+		duration := 1
+		if product.PricingMode == PricingHourly {
+			duration = 24
+		}
+		orderNo := fmt.Sprintf("ORDDEV%010d%02d", buyerID, i+1)
+		createdAt := now.Add(-time.Duration(len(statuses)-i) * 24 * time.Hour)
+		var paymentExpiresAt, leaseStartAt, leaseEndAt *time.Time
+		if status == "pending_payment" {
+			expires := now.Add(15 * time.Minute)
+			paymentExpiresAt = &expires
+		}
+		if status == "active" || status == "completed" {
+			start := createdAt.Add(time.Hour)
+			end := LeaseEndAt(start, product.PricingMode, duration)
+			leaseStartAt = &start
+			if !end.IsZero() {
+				leaseEndAt = &end
+			}
+		}
+		total := product.UnitPrice * int64(duration)
+		platformFee := total * s.feeRate / 10000
+		_, err := tx.Exec(`INSERT INTO orders
+			(order_no,buyer_id,product_id,quantity,duration,unit_price,total_amount,platform_fee,status,
+			 payment_expires_at,lease_start_at,lease_end_at,compliance_agreed,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+			ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id),product_id=VALUES(product_id),quantity=VALUES(quantity),
+			duration=VALUES(duration),unit_price=VALUES(unit_price),total_amount=VALUES(total_amount),
+			platform_fee=VALUES(platform_fee),status=VALUES(status),payment_expires_at=VALUES(payment_expires_at),
+			lease_start_at=VALUES(lease_start_at),lease_end_at=VALUES(lease_end_at),compliance_agreed=1,updated_at=VALUES(updated_at)`,
+			orderNo, buyerID, product.ID, 1, duration, product.UnitPrice, total, platformFee, status,
+			paymentExpiresAt, leaseStartAt, leaseEndAt, createdAt, now)
+		if err != nil {
+			return nil, err
+		}
+		seeded = append(seeded, SeededBuyerOrder{OrderNo: orderNo, Status: status})
+	}
+	return seeded, tx.Commit()
 }
 
 func (s *Service) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]Order, int64, error) {

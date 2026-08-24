@@ -472,6 +472,18 @@ func (r *Repository) GetOrderByNo(orderNo string) (*Order, error) {
 	return &o, err
 }
 
+func (r *Repository) GetBuyerOrderByNo(buyerID int64, orderNo string) (*BuyerOrder, error) {
+	var o BuyerOrder
+	err := r.db.Get(&o, fmt.Sprintf(`SELECT %s FROM orders o
+		LEFT JOIN products p ON p.id=o.product_id
+		LEFT JOIN enterprises e ON e.user_id=p.supplier_id AND e.status='verified'
+		WHERE o.buyer_id=? AND o.order_no=?`, buyerOrderColumns), buyerID, orderNo)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &o, err
+}
+
 func (r *Repository) GetOrderByID(id int64) (*Order, error) {
 	var o Order
 	err := r.db.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE id = ?", id)
@@ -712,6 +724,15 @@ func (r *Repository) GetCreditScore(supplierID int64) (*CreditScore, error) {
 	err := r.db.Get(&c, "SELECT "+creditColumns+" FROM credit_scores WHERE supplier_id = ?", supplierID)
 	if err == sql.ErrNoRows {
 		return &CreditScore{SupplierID: supplierID, FulfillRate: 100, SlaRate: 100}, nil
+	}
+	return &c, err
+}
+
+func (r *Repository) FindCreditScore(supplierID int64) (*CreditScore, error) {
+	var c CreditScore
+	err := r.db.Get(&c, "SELECT "+creditColumns+" FROM credit_scores WHERE supplier_id = ?", supplierID)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
 	return &c, err
 }

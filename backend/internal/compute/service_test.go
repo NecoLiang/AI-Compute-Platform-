@@ -651,3 +651,22 @@ func TestValidateDeliveryConfirmation(t *testing.T) {
 		})
 	}
 }
+
+func TestBuyerOrderDetailRules(t *testing.T) {
+	product := &Product{PricingMode: PricingHourly}
+	generated := &OrderDelivery{AccessStatus: AccessStatusGenerated, AccessValueEncrypted: "encrypted"}
+	actions := buyerOrderActions(&Order{Status: "provisioning"}, product, generated)
+	assert.True(t, actions.CanConfirm)
+	assert.True(t, actions.CanRefund)
+	assert.True(t, actions.CanViewCredential)
+	assert.False(t, actions.CanRenew)
+
+	active := buyerOrderActions(&Order{Status: "active"}, product, nil)
+	assert.True(t, active.CanRenew)
+	assert.True(t, active.CanRefund)
+	assert.False(t, active.CanViewCredential)
+
+	assert.True(t, validOrderNo("ORD20260823120000a1b2c3"))
+	assert.False(t, validOrderNo("42"))
+	assert.False(t, validOrderNo("ORD"+strings.Repeat("a", 30)))
+}
