@@ -28,6 +28,8 @@ services:
       - ./migrations/004_fix_user_role_enum.up.sql:/docker-entrypoint-initdb.d/004.sql:ro
       - ./migrations/005_clarify_order_duration_semantics.up.sql:/docker-entrypoint-initdb.d/005.sql:ro
       - ./migrations/006_remove_default_admin_seed.up.sql:/docker-entrypoint-initdb.d/006.sql:ro
+      - ./migrations/007_blockchain_worker_bookkeeping.up.sql:/docker-entrypoint-initdb.d/007.sql:ro
+      - ./migrations/008_invoice_management.up.sql:/docker-entrypoint-initdb.d/008.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

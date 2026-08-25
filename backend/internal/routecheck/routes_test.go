@@ -14,6 +14,7 @@ import (
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
+	"tokenfactory/internal/invoice"
 	"tokenfactory/internal/payment"
 	"tokenfactory/internal/user"
 
@@ -33,6 +34,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	paymentH := payment.NewHandler(nil)
 	intermediaryH := intermediary.NewHandler(nil)
 	equipmentH := equipment.NewHandler(nil)
+	invoiceH := invoice.NewHandler(nil)
 	collateralH := intermediary.NewCollateralHandler(nil)
 	adminH := admin.NewHandler(nil)
 	userH := user.NewHandler(nil)
@@ -55,6 +57,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 
 	buyer := r.Group("/api/v1")
 	computeH.RegisterBuyerRoutes(buyer)
+	invoiceH.RegisterBuyerRoutes(buyer)
 	equipmentH.RegisterBuyerRoutes(buyer)
 	paymentH.RegisterBuyerRoutes(buyer)
 
@@ -68,6 +71,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 
 	adminRoute := r.Group("/api/v1")
 	computeH.RegisterAdminRoutes(adminRoute)
+	invoiceH.RegisterAdminRoutes(adminRoute)
 	paymentH.RegisterAdminRoutes(adminRoute)
 	intermediaryH.RegisterAdminRoutes(adminRoute)
 	equipmentH.RegisterAdminRoutes(adminRoute)

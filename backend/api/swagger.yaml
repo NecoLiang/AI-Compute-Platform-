@@ -622,6 +622,69 @@ paths:
       tags: [算力撮合 Compute]
       summary: 申请退款
 
+  /invoices/title:
+    get:
+      tags: [发票 Invoice]
+      summary: 读取开票信息（买家）
+      responses:
+        '200': { description: "未设置时 data 为 null" }
+    put:
+      tags: [发票 Invoice]
+      summary: 保存开票信息（买家, upsert）
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [company_name, tax_no, bank_name, bank_account]
+              properties:
+                company_name: { type: string }
+                tax_no: { type: string, description: "15/18/20 位大写字母数字" }
+                bank_name: { type: string }
+                bank_account: { type: string }
+                address: { type: string, nullable: true }
+                phone: { type: string, nullable: true }
+
+  /invoices/billable-orders:
+    get:
+      tags: [发票 Invoice]
+      summary: 可开票订单（买家）
+      description: "已付款(paid/provisioning/active/completed)且未被 pending/issued 发票占用的订单。"
+
+  /invoices/apply:
+    post:
+      tags: [发票 Invoice]
+      summary: 申请开票（买家）
+      description: "服务端事务内重算金额并校验订单归属与可开票状态；单张发票最多合并 50 个订单。"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_nos]
+              properties:
+                order_nos:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200': { description: "成功返回 invoice_no/amount_fen/status；不可开票/缺抬头 code=40001" }
+
+  /invoices:
+    get:
+      tags: [发票 Invoice]
+      summary: 发票列表（买家）
+      parameters:
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /invoices/{invoice_no}/download:
+    get:
+      tags: [发票 Invoice]
+      summary: 下载发票 PDF（买家）
+      description: "归属校验, 仅 issued 有文件; 成功返回 application/pdf 二进制, 失败为 JSON 错误。"
+      parameters:
+        - { name: invoice_no, in: path, required: true, schema: { type: string } }
+
   /supplier/qualifications:
     get:
       tags: [算力撮合 Compute]
@@ -793,6 +856,38 @@ paths:
     patch:
       tags: [运营管理 Admin]
       summary: 订单干预
+
+  /admin/invoices:
+    get:
+      tags: [运营管理 Admin]
+      summary: 发票审核列表
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, issued, rejected, red_flushed] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /admin/invoices/{id}/issue:
+    post:
+      tags: [运营管理 Admin]
+      summary: 完成开票
+      description: "multipart 上传 PDF(≤5MB, 校验 %PDF- 魔数) + 可选 tax_invoice_no; CAS pending→issued。"
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
+  /admin/invoices/{id}/reject:
+    post:
+      tags: [运营管理 Admin]
+      summary: 驳回发票申请
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
 
   /admin/risk/alerts:
     get:

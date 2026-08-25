@@ -14,6 +14,7 @@ import (
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
+	"tokenfactory/internal/invoice"
 	"tokenfactory/internal/payment"
 	"tokenfactory/internal/sms"
 	"tokenfactory/internal/user"
@@ -88,6 +89,8 @@ func main() {
 	intermediarySvc := intermediary.NewService(intermediaryRepo)
 	equipmentRepo := equipment.NewRepository(sqlDB)
 	equipmentSvc := equipment.NewService(equipmentRepo)
+	invoiceRepo := invoice.NewRepository(sqlDB)
+	invoiceSvc := invoice.NewService(invoiceRepo, sqlDB)
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
 	adminRepo := admin.NewRepository(sqlDB)
@@ -143,6 +146,7 @@ func main() {
 	buyer := r.Group("/api/v1")
 	buyer.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
 	compute.NewHandler(computeSvc).RegisterBuyerRoutes(buyer)
+	invoice.NewHandler(invoiceSvc).RegisterBuyerRoutes(buyer)
 	equipment.NewHandler(equipmentSvc).RegisterBuyerRoutes(buyer)
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
 	if cfg.Server.Mode != "release" {
@@ -167,6 +171,7 @@ func main() {
 	adminRoute := r.Group("/api/v1")
 	adminRoute.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb), mw.RBAC("operator", "admin"))
 	compute.NewHandler(computeSvc).RegisterAdminRoutes(adminRoute)
+	invoice.NewHandler(invoiceSvc).RegisterAdminRoutes(adminRoute)
 	payment.NewHandler(paymentSvc).RegisterAdminRoutes(adminRoute)
 	intermediary.NewHandler(intermediarySvc).RegisterAdminRoutes(adminRoute)
 	equipment.NewHandler(equipmentSvc).RegisterAdminRoutes(adminRoute)
