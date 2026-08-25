@@ -3,7 +3,11 @@ server:
   mode: debug
 
 database:
-  dsn: "root:password@tcp(127.0.0.1:3306)/tokenfactory?parseTime=true&charset=utf8mb4"
+  # loc 必须显式指定且与 MySQL 会话时区一致(本项目为 +08:00)。
+  # 缺省时 go-sql-driver 按 UTC 写入 time.Time, 而 MySQL 按 +08:00 解读,
+  # 会造成 8 小时偏移 —— 写入的"10 分钟后过期"会变成"8 小时前已过期",
+  # 导致订单一创建就被关单任务取消、访问凭证一签发就被吊销。
+  dsn: "root:password@tcp(127.0.0.1:3306)/tokenfactory?parseTime=true&charset=utf8mb4&loc=Asia%2FShanghai"
 
 redis:
   addr: "127.0.0.1:6379"

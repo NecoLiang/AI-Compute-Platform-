@@ -163,23 +163,39 @@ func main() {
 		Handler: r,
 	}
 
-	// C-06: 定时吊销已过期的访问凭证。
-	// 「订单到期 → 凭证自动失效」需要有人真的去执行，只定义方法不接线等于凭证永不过期。
+	// 定时任务。只定义方法不接线等于没做, 因此这里统一装配:
+	//   C-06      吊销过期访问凭证        —— 否则凭证永不过期
+	//   REQ-A-023 关闭超时未支付订单并释放余量 —— 否则余量被永久锁死
+	//   REQ-A-043 租期到期置完成并释放余量     —— 否则卡永远不回到可售池
 	stopJobs := make(chan struct{})
+	runJobs := func() {
+		if n, err := computeSvc.RevokeExpiredAccess(); err != nil {
+			slog.Error("吊销过期访问凭证失败", "error", err)
+		} else if n > 0 {
+			slog.Info("已吊销过期访问凭证", "count", n)
+		}
+		if n, err := computeSvc.CloseExpiredUnpaidOrders(); err != nil {
+			slog.Error("关闭超时未支付订单失败", "error", err)
+		} else if n > 0 {
+			slog.Info("已关闭超时未支付订单并释放余量", "count", n)
+		}
+		if n, err := computeSvc.CompleteExpiredLeases(); err != nil {
+			slog.Error("处理到期租约失败", "error", err)
+		} else if n > 0 {
+			slog.Info("已完成到期租约并释放余量", "count", n)
+		}
+	}
 	go func() {
-		ticker := time.NewTicker(15 * time.Minute)
+		// 支付超时为 15 分钟, 用 5 分钟粒度扫描, 保证超时后最迟 5 分钟内释放余量。
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
+		runJobs() // 启动即跑一次: 进程重启期间到期的订单不至于要等一个周期
 		for {
 			select {
 			case <-stopJobs:
 				return
 			case <-ticker.C:
-				n, err := computeSvc.RevokeExpiredAccess()
-				if err != nil {
-					slog.Error("吊销过期访问凭证失败", "error", err)
-				} else if n > 0 {
-					slog.Info("已吊销过期访问凭证", "count", n)
-				}
+				runJobs()
 			}
 		}
 	}()

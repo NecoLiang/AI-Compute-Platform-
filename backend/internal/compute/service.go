@@ -829,15 +829,16 @@ func (s *Service) ProvisioningOrder(orderNo string) error {
 	return s.repo.UpdateOrderStatus(orderNo, "provisioning")
 }
 
+// CompleteOrder 订单完成并归还余量 (REQ-A-043)。
 func (s *Service) CompleteOrder(orderNo string) error {
-	return s.repo.UpdateOrderStatus(orderNo, "completed")
+	_, err := s.releaseStock(orderNo, stockHoldingStatuses, "completed")
+	return err
 }
 
-// CancelOrder 取消订单并吊销访问凭证 (C-06)。
+// CancelOrder 取消订单并吊销访问凭证 (C-06), 同时归还余量 (REQ-A-012)。
 func (s *Service) CancelOrder(orderNo string) error {
-	if err := s.repo.UpdateOrderStatus(orderNo, "cancelled"); err != nil {
-		return err
-	}
+	// 仅从「未消耗资源」的状态取消才归还库存。
+	if _, err := s.releaseStock(orderNo, stockHoldingStatuses, "cancelled"); err != nil { return err }
 	return s.revokeAccessByOrderNo(orderNo)
 }
 
@@ -1532,12 +1533,89 @@ func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
 	return s.repo.UpdateOrderStatus(orderNo, "refunding")
 }
 
-// CompleteRefund 退款完成: 同时吊销访问凭证 (C-06)。
+// CompleteRefund 退款完成: 归还余量 + 吊销访问凭证 (C-06, REQ-A-012)。
 func (s *Service) CompleteRefund(orderNo string) error {
-	if err := s.repo.UpdateOrderStatus(orderNo, "refunded"); err != nil {
-		return err
-	}
+	if _, err := s.releaseStock(orderNo, []string{"refunding"}, "refunded"); err != nil { return err }
 	return s.revokeAccessByOrderNo(orderNo)
+}
+
+// ===== 余量归还与到期处理 (REQ-A-012 / REQ-A-023 / REQ-A-043) =====
+
+// stockHoldingStatuses 仍然占用着商品余量的订单状态。
+// 下单时扣减余量, 只要订单还处于这些状态, 这份余量就归它占用;
+// 一旦流转到 cancelled/refunded/completed, 余量必须归还。
+var stockHoldingStatuses = []string{"pending_payment", "paid", "provisioning", "active"}
+
+// releaseStock 守卫式流转订单状态并归还商品余量, 二者在同一事务内完成。
+//
+// 返回 released 表示本次是否真的归还了余量。若订单已处于目标状态(或不在 from 列表中),
+// 返回 false 且不做任何改动 —— 幂等, 重复调用不会把余量越加越多。
+//
+// 为什么必须同事务 + 条件 UPDATE: 关单定时任务、买家退款、运营改单三条路径可能同时命中
+// 同一笔订单。若先查状态再决定是否归还, 三者会各自读到「仍占用」并各归还一次, 余量凭空变多。
+func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, error) {
+	tx, err := s.db.Beginx()
+	if err != nil { return false, err }
+	defer tx.Rollback()
+
+	moved, err := s.repo.TransitionOrderStatusTx(tx, orderNo, from, to)
+	if err != nil { return false, err }
+	if !moved {
+		// 未发生流转: 可能已被其他路径处理, 或订单不存在/状态不允许。不归还, 直接提交空事务。
+		return false, tx.Commit()
+	}
+
+	o, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
+	if err != nil { return false, err }
+	if o == nil { return false, fmt.Errorf("order not found: %s", orderNo) }
+
+	if err := s.repo.IncrProductStock(tx, o.ProductID, o.Quantity); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// CloseExpiredUnpaidOrders 关闭超时未支付的订单并释放余量 (REQ-A-023 / T-015)。
+// 不做这件事的后果: 下单不付款的余量被永久锁死, 商品一路扣到 sold_out 且无法恢复。
+// 返回本次关闭的订单数。
+func (s *Service) CloseExpiredUnpaidOrders() (int, error) {
+	nos, err := s.repo.ListExpiredUnpaidOrderNos(500)
+	if err != nil { return 0, err }
+	n := 0
+	var firstErr error
+	for _, no := range nos {
+		released, err := s.releaseStock(no, []string{"pending_payment"}, "cancelled")
+		if err != nil {
+			// 单笔失败不能中断整批, 否则一笔坏数据会让后面所有订单永远关不掉。
+			if firstErr == nil { firstErr = err }
+			continue
+		}
+		if released { n++ }
+	}
+	return n, firstErr
+}
+
+// CompleteExpiredLeases 将租期已到的订单置为已完成并释放余量 (REQ-A-043)。
+// 买断(perpetual)订单 lease_end_at 为 NULL, 已在 SQL 层排除, 不会被误关。
+// 返回本次完成的订单数。
+func (s *Service) CompleteExpiredLeases() (int, error) {
+	nos, err := s.repo.ListExpiredLeaseOrderNos(500)
+	if err != nil { return 0, err }
+	n := 0
+	var firstErr error
+	for _, no := range nos {
+		released, err := s.releaseStock(no, []string{"active"}, "completed")
+		if err != nil {
+			if firstErr == nil { firstErr = err }
+			continue
+		}
+		if released {
+			n++
+			// 租期结束, 访问凭证同步失效 (C-06)。
+			if err := s.revokeAccessByOrderNo(no); err != nil && firstErr == nil { firstErr = err }
+		}
+	}
+	return n, firstErr
 }
 
 // ===== Credit Score (T-023) =====
@@ -1560,13 +1638,18 @@ func (s *Service) ListAllProducts(status string, page, pageSize int) ([]Product,
 	return s.repo.ListAllProducts(status, page, pageSize)
 }
 
-// AdminUpdateOrderStatus 运营改单。改为 cancelled/refunded 时同步吊销访问凭证。
+// AdminUpdateOrderStatus 运营改单。改为 cancelled/refunded 时同步归还余量并吊销访问凭证。
+// 归还走 releaseStock 的守卫式流转: 若订单已是终态, 不会重复归还。
 func (s *Service) AdminUpdateOrderStatus(orderNo string, status string) error {
-	if err := s.repo.UpdateOrderStatus(orderNo, status); err != nil {
-		return err
-	}
 	if status == "cancelled" || status == "refunded" {
+		// refunding 也允许直接改判为 refunded, 故来源状态需并入。
+		from := append(append([]string{}, stockHoldingStatuses...), "refunding")
+		if _, err := s.releaseStock(orderNo, from, status); err != nil { return err }
 		return s.revokeAccessByOrderNo(orderNo)
 	}
-	return nil
+	if status == "completed" {
+		if _, err := s.releaseStock(orderNo, stockHoldingStatuses, status); err != nil { return err }
+		return nil
+	}
+	return s.repo.UpdateOrderStatus(orderNo, status)
 }

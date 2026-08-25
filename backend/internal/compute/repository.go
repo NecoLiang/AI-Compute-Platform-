@@ -286,7 +286,12 @@ func (r *Repository) IncrProductStock(tx *sqlx.Tx, id int64, qty int) error {
 	if qty <= 0 {
 		return fmt.Errorf("invalid quantity")
 	}
-	_, err := tx.Exec("UPDATE products SET stock = stock + ?, status='active' WHERE id = ?", qty, id)
+	if _, err := tx.Exec("UPDATE products SET stock = stock + ? WHERE id = ?", qty, id); err != nil {
+		return err
+	}
+	// 只把「售罄」恢复成「在售」。不能无条件置 active:
+	// 运营强制下架(offline)或风控冻结(frozen)的商品, 不该因为一笔退款/关单就自动重新上架。
+	_, err := tx.Exec("UPDATE products SET status='active' WHERE id=? AND status='sold_out' AND stock > 0", id)
 	return err
 }
 
@@ -504,6 +509,54 @@ func (r *Repository) UpdateOrderStatusTx(tx *sqlx.Tx, orderNo string, status str
 		_, err = r.db.Exec("UPDATE orders SET status=? WHERE order_no=?", status, orderNo)
 	}
 	return err
+}
+
+// TransitionOrderStatusTx 守卫式状态流转: 仅当订单当前处于 from 之一时才改为 to,
+// 返回是否真的发生了流转。
+//
+// 这是库存归还幂等性的基石: 归还库存必须与状态流转在同一事务、同一条 UPDATE 的判定下完成。
+// 若用「先查状态再改」的写法, 两个并发请求会同时读到 pending_payment 并各自归还一次库存,
+// 导致库存凭空变多。条件 UPDATE 由 InnoDB 行锁串行化, 只有一个能拿到 RowsAffected=1。
+func (r *Repository) TransitionOrderStatusTx(tx *sqlx.Tx, orderNo string, from []string, to string) (bool, error) {
+	if len(from) == 0 { return false, fmt.Errorf("from status required") }
+	q := "UPDATE orders SET status=? WHERE order_no=? AND status IN (?)"
+	query, args, err := sqlx.In(q, to, orderNo, from)
+	if err != nil { return false, err }
+	res, err := tx.Exec(query, args...)
+	if err != nil { return false, err }
+	n, err := res.RowsAffected()
+	if err != nil { return false, err }
+	return n > 0, nil
+}
+
+// GetOrderForUpdateTx 在事务内读订单(不加额外锁, 供流转成功后取 product_id/quantity 用)。
+func (r *Repository) GetOrderForUpdateTx(tx *sqlx.Tx, orderNo string) (*Order, error) {
+	var o Order
+	err := tx.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE order_no = ?", orderNo)
+	if err == sql.ErrNoRows { return nil, nil }
+	if err != nil { return nil, err }
+	return &o, nil
+}
+
+// ListExpiredUnpaidOrderNos 待支付且已过支付期限的订单号 (REQ-A-023)。
+func (r *Repository) ListExpiredUnpaidOrderNos(limit int) ([]string, error) {
+	var nos []string
+	err := r.db.Select(&nos,
+		`SELECT order_no FROM orders
+		 WHERE status='pending_payment' AND payment_expires_at IS NOT NULL AND payment_expires_at < NOW()
+		 ORDER BY payment_expires_at LIMIT ?`, limit)
+	return nos, err
+}
+
+// ListExpiredLeaseOrderNos 履约中且租期已到的订单号 (REQ-A-043)。
+// lease_end_at IS NULL 的是买断(perpetual)订单, 使用权永久, 永不到期, 必须排除。
+func (r *Repository) ListExpiredLeaseOrderNos(limit int) ([]string, error) {
+	var nos []string
+	err := r.db.Select(&nos,
+		`SELECT order_no FROM orders
+		 WHERE status='active' AND lease_end_at IS NOT NULL AND lease_end_at < NOW()
+		 ORDER BY lease_end_at LIMIT ?`, limit)
+	return nos, err
 }
 
 func (r *Repository) UpdateOrderStatus(orderNo string, status string) error {
