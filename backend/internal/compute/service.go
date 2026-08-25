@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"tokenfactory/internal/blockchain"
 	"tokenfactory/pkg/crypto"
 
 	"github.com/google/uuid"
@@ -158,6 +159,14 @@ type Service struct {
 	// credentialKey 是访问凭证的 AES-256-GCM 密钥。为 nil/空 表示未配置:
 	// 此时任何需要加解密的操作都会返回 crypto.ErrKeyNotConfigured, 绝不降级存明文。
 	credentialKey []byte
+	// attester 区块链存证挂钩 (T-059)。nil 表示存证未装配, 业务照常。
+	attester Attester
+}
+
+// Attester 异步存证接口 (REQ-H-020), 由 blockchain.Service 实现。
+// 只在业务事务提交成功之后调用; 存证失败只记日志, 决不回滚/阻塞业务。
+type Attester interface {
+	Attest(targetType, targetID string, payload any) error
 }
 
 type BuyerOrderDetail struct {
@@ -260,6 +269,83 @@ func (s *Service) SetCredentialKey(hexKey string) error {
 	}
 	s.credentialKey = key
 	return nil
+}
+
+// ===== 区块链存证埋点 (T-059, docs/14) =====
+
+// SetAttester 装配存证挂钩(供 main.go 调用)。
+func (s *Service) SetAttester(a Attester) { s.attester = a }
+
+// attest 业务成功后发存证事件。载荷由 build 惰性构建(从库中回读, 保证与验证时
+// 重算同源同值); 任何一步失败只记日志 —— 存证是旁路, 不能反噬业务 (REQ-H-020)。
+func (s *Service) attest(targetType, targetID string, build func() (any, error)) {
+	if s.attester == nil {
+		return
+	}
+	payload, err := build()
+	if err != nil {
+		slog.Error("构建存证载荷失败", "target", targetType+"/"+targetID, "error", err)
+		return
+	}
+	if err := s.attester.Attest(targetType, targetID, payload); err != nil {
+		slog.Error("记录存证事件失败", "target", targetType+"/"+targetID, "error", err)
+	}
+}
+
+// BuildOrderAttestPayload 从库中重建订单存证载荷 (REQ-H-010)。
+// 发事件与验证重算走同一函数, 且只取下单后不再变更的列 —— 这是 hash 可复现的前提。
+func (s *Service) BuildOrderAttestPayload(orderNo string) (blockchain.OrderPayload, error) {
+	var p blockchain.OrderPayload
+	o, err := s.repo.GetOrderByNo(orderNo)
+	if err != nil {
+		return p, err
+	}
+	if o == nil {
+		return p, fmt.Errorf("order not found: %s", orderNo)
+	}
+	prod, err := s.repo.GetProductByID(o.ProductID)
+	if err != nil || prod == nil {
+		return p, fmt.Errorf("product not found for order %s", orderNo)
+	}
+	return blockchain.OrderPayload{
+		OrderNo:        o.OrderNo,
+		BuyerIDHash:    blockchain.HashID(o.BuyerID),
+		SupplierIDHash: blockchain.HashID(prod.SupplierID),
+		Spec:           fmt.Sprintf("product:%d qty:%d duration:%d unit_price:%d", o.ProductID, o.Quantity, o.Duration, o.UnitPrice),
+		TotalAmountFen: o.TotalAmount,
+		PlacedAt:       blockchain.FormatTime(o.CreatedAt),
+	}, nil
+}
+
+// BuildDeliveryAttestPayload 从库中重建交付确认存证载荷 (REQ-H-011)。
+// 通过 order_hash 与订单存证链式关联; 只在买家已签收后可构建。
+func (s *Service) BuildDeliveryAttestPayload(orderNo string) (blockchain.DeliveryPayload, error) {
+	var p blockchain.DeliveryPayload
+	orderPayload, err := s.BuildOrderAttestPayload(orderNo)
+	if err != nil {
+		return p, err
+	}
+	o, err := s.repo.GetOrderByNo(orderNo)
+	if err != nil || o == nil {
+		return p, fmt.Errorf("order not found: %s", orderNo)
+	}
+	d, err := s.repo.GetDeliveryByOrder(o.ID)
+	if err != nil {
+		return p, err
+	}
+	if d == nil || !d.ConfirmedByBuyer || d.BuyerConfirmedAt == nil {
+		return p, fmt.Errorf("delivery not confirmed for order %s", orderNo)
+	}
+	leaseStart := ""
+	if o.LeaseStart != nil {
+		leaseStart = blockchain.FormatTime(*o.LeaseStart)
+	}
+	return blockchain.DeliveryPayload{
+		OrderNo:      o.OrderNo,
+		OrderHash:    blockchain.ComputeHash(orderPayload),
+		ConfirmedAt:  blockchain.FormatTime(*d.BuyerConfirmedAt),
+		LeaseStartAt: leaseStart,
+	}, nil
 }
 
 // ===== Qualifications (T-009, T-010) =====
@@ -787,7 +873,12 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err
 	}
-	return o, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	// REQ-H-010: 下单成功存证。
+	s.attest("order", orderNo, func() (any, error) { return s.BuildOrderAttestPayload(orderNo) })
+	return o, nil
 }
 
 func (s *Service) GetOrder(orderNo string) (*Order, error) {
@@ -848,7 +939,15 @@ func (s *Service) FreezeOrder(orderNo string) error {
 	if err := s.repo.UpdateOrderStatus(orderNo, "frozen"); err != nil {
 		return err
 	}
-	return s.revokeAccessByOrderNo(orderNo)
+	if err := s.revokeAccessByOrderNo(orderNo); err != nil {
+		return err
+	}
+	// REQ-H-003/H-014: 违规处置强制留痕, 埋点在 service 层, 运营无法绕过。
+	// 风控规则引擎(T-055)落地前, 违规类型/结论未持久化, 载荷记冻结事实本身。
+	s.attest("violation", orderNo, func() (any, error) {
+		return blockchain.ViolationPayload{TargetNo: orderNo, Violation: "order_frozen", Conclusion: "risk_freeze"}, nil
+	})
+	return nil
 }
 
 func (s *Service) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, error) {
@@ -1223,7 +1322,12 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		}
 		return fmt.Errorf(errOrderNotConfirmable)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// REQ-H-011: 买家签收后存证交付确认。买家/机房签名并入待 T-061, 当前平台见证签名。
+	s.attest("delivery", orderNo, func() (any, error) { return s.BuildDeliveryAttestPayload(orderNo) })
+	return nil
 }
 
 func (s *Service) GetDelivery(orderID int64) (*OrderDelivery, error) {
@@ -1650,6 +1754,10 @@ func (s *Service) AdminUpdateOrderStatus(orderNo string, status string) error {
 	if status == "completed" {
 		if _, err := s.releaseStock(orderNo, stockHoldingStatuses, status); err != nil { return err }
 		return nil
+	}
+	// 冻结走 FreezeOrder: 吊销凭证(C-06) + 违规强制留痕(REQ-H-003), 不能只改状态。
+	if status == "frozen" {
+		return s.FreezeOrder(orderNo)
 	}
 	return s.repo.UpdateOrderStatus(orderNo, status)
 }

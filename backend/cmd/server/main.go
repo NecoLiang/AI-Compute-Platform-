@@ -92,8 +92,27 @@ func main() {
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
 	adminRepo := admin.NewRepository(sqlDB)
 	adminSvc := admin.NewService(adminRepo)
+	// 区块链存证 (T-057/T-058/T-059, docs/14)。BSN 未配置时存证照常落库为 pending,
+	// worker 待命, 配置上线后自动补推 —— 不阻塞业务。
 	blockchainRepo := blockchain.NewRepository(sqlDB)
-	blockchainSvc := blockchain.NewService(blockchainRepo, rdb)
+	bsnClient := blockchain.NewBSNClient(blockchain.BSNConfig{
+		GatewayURL:  cfg.Blockchain.GatewayURL,
+		APIKey:      cfg.Blockchain.APIKey,
+		ContractKey: cfg.Blockchain.ContractKey,
+		ExplorerURL: cfg.Blockchain.ExplorerURL,
+	})
+	blockchainSvc, err := blockchain.NewService(blockchainRepo, bsnClient, cfg.Blockchain.SignKeySeed)
+	if err != nil {
+		slog.Error("装配存证服务失败", "error", err)
+		os.Exit(1)
+	}
+	if cfg.Blockchain.SignKeySeed == "" {
+		slog.Warn("blockchain.sign_key_seed 未配置: 存证暂无平台见证签名 (docs/14 §14.4)")
+	}
+	// 验证接口(REQ-H-030)从业务库重建载荷重算 hash, 与发事件共用同一构建函数。
+	blockchainSvc.RegisterSource("order", func(id string) (any, error) { return computeSvc.BuildOrderAttestPayload(id) })
+	blockchainSvc.RegisterSource("delivery", func(id string) (any, error) { return computeSvc.BuildDeliveryAttestPayload(id) })
+	computeSvc.SetAttester(blockchainSvc)
 
 	// Router
 	r := gin.New()
@@ -153,6 +172,7 @@ func main() {
 	equipment.NewHandler(equipmentSvc).RegisterAdminRoutes(adminRoute)
 	intermediary.NewCollateralHandler(collateralSvc).RegisterAdminRoutes(adminRoute)
 	admin.NewHandler(adminSvc).RegisterRoutes(adminRoute)
+	blockchain.NewHandler(blockchainSvc).RegisterAdminRoutes(adminRoute)
 
 	// Payment callback (no auth, signature verification)
 	payment.NewHandler(paymentSvc).RegisterCallbackRoutes(r.Group("/api/v1"))
@@ -200,6 +220,10 @@ func main() {
 		}
 	}()
 
+	// 存证上链 worker (T-058)。
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	go blockchainSvc.RunWorker(workerCtx)
+
 	go func() {
 		slog.Info("server starting", "port", cfg.Server.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -214,6 +238,7 @@ func main() {
 	<-quit
 	slog.Info("shutting down...")
 	close(stopJobs)
+	cancelWorker()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)

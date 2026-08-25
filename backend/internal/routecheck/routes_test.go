@@ -73,6 +73,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	equipmentH.RegisterAdminRoutes(adminRoute)
 	collateralH.RegisterAdminRoutes(adminRoute)
 	adminH.RegisterRoutes(adminRoute)
+	blockchainH.RegisterAdminRoutes(adminRoute)
 
 	paymentH.RegisterCallbackRoutes(r.Group("/api/v1"))
 

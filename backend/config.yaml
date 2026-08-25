@@ -36,3 +36,16 @@ security:
   credential_key: ""
   cap_siteverify_url: ""
   cap_secret: ""
+
+blockchain:
+  # BSN-DDC 文昌链存证 (docs/14)。获取方式见 §14.8:
+  # bsnbase.com 注册 + 企业实名认证 → 创建项目选文昌链 → 开通标准存证合约。
+  # 三项要么全空(未接入: 存证事件落库为 pending, 配置后自动补推), 要么全配。
+  gateway_url: ""
+  api_key: ""       # 生产从环境变量 BLOCKCHAIN_API_KEY 注入, 不要提交真实值
+  contract_key: ""
+  # 区块链浏览器 tx 查询前缀, 供前端"链上自行查验"链接, 以 BSN 开通后提供的为准。
+  explorer_url: ""
+  # 平台见证签名 Ed25519 种子, 64 位 hex (openssl rand -hex 32)。
+  # 生产从 KMS/环境变量注入; 留空表示暂不签名, 存证仍可用。
+  sign_key_seed: ""
