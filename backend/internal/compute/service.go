@@ -161,6 +161,13 @@ type Service struct {
 	credentialKey []byte
 	// attester 区块链存证挂钩 (T-059)。nil 表示存证未装配, 业务照常。
 	attester Attester
+	// notifier 消息中心写入口。nil 表示未启用, 业务照常。
+	notifier Notifier
+}
+
+// Notifier 消息中心写接口, 由 notification 包实现。
+type Notifier interface {
+	Record(userID int64, notifType, title, content, link string) error
 }
 
 // Attester 异步存证接口 (REQ-H-020), 由 blockchain.Service 实现。
@@ -275,6 +282,32 @@ func (s *Service) SetCredentialKey(hexKey string) error {
 
 // SetAttester 装配存证挂钩(供 main.go 调用)。
 func (s *Service) SetAttester(a Attester) { s.attester = a }
+
+// SetNotifier 装配消息中心(供 main.go 调用)。
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+
+// notify 业务事件产生买家通知。与存证同一原则: 旁路失败只记日志, 不反噬业务。
+func (s *Service) notify(userID int64, title, content, link string) {
+	if s.notifier == nil {
+		return
+	}
+	if err := s.notifier.Record(userID, "order", title, content, link); err != nil {
+		slog.Warn("订单通知写入失败", "error", err)
+	}
+}
+
+// notifyOrderEvent 回读订单拿买家后发通知; 必须在主流程提交成功后调用,
+// 避免主事务回滚而通知已落库的假消息。
+func (s *Service) notifyOrderEvent(orderNo, title, content string) {
+	if s.notifier == nil {
+		return
+	}
+	o, err := s.repo.GetOrderByNo(orderNo)
+	if err != nil || o == nil {
+		return
+	}
+	s.notify(o.BuyerID, title, content, "/console/buyer/orders/"+orderNo)
+}
 
 // attest 业务成功后发存证事件。载荷由 build 惰性构建(从库中回读, 保证与验证时
 // 重算同源同值); 任何一步失败只记日志 —— 存证是旁路, 不能反噬业务 (REQ-H-020)。
@@ -929,8 +962,17 @@ func (s *Service) CompleteOrder(orderNo string) error {
 // CancelOrder 取消订单并吊销访问凭证 (C-06), 同时归还余量 (REQ-A-012)。
 func (s *Service) CancelOrder(orderNo string) error {
 	// 仅从「未消耗资源」的状态取消才归还库存。
-	if _, err := s.releaseStock(orderNo, stockHoldingStatuses, "cancelled"); err != nil { return err }
-	return s.revokeAccessByOrderNo(orderNo)
+	released, err := s.releaseStock(orderNo, stockHoldingStatuses, "cancelled")
+	if err != nil {
+		return err
+	}
+	if err := s.revokeAccessByOrderNo(orderNo); err != nil {
+		return err
+	}
+	if released {
+		s.notifyOrderEvent(orderNo, "订单已取消", fmt.Sprintf("您的订单 %s 已取消, 占用资源已释放。", orderNo))
+	}
+	return nil
 }
 
 // FreezeOrder 冻结订单(风控/违规)。冻结意味着买家不应再访问算力,
@@ -1233,6 +1275,10 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 	if err := s.repo.UpdateOrderStatus(orderNo, "provisioning"); err != nil {
 		return nil, err
 	}
+
+	s.notify(o.BuyerID, "订单已交付",
+		fmt.Sprintf("您的订单 %s 已交付并生成访问凭证, 请前往订单详情确认签收。", orderNo),
+		"/console/buyer/orders/"+orderNo)
 
 	// 回给供给方的也是脱敏值: 明文只在买家 reveal 时下发并留审计。
 	return &AccessCredential{
@@ -1639,8 +1685,17 @@ func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
 
 // CompleteRefund 退款完成: 归还余量 + 吊销访问凭证 (C-06, REQ-A-012)。
 func (s *Service) CompleteRefund(orderNo string) error {
-	if _, err := s.releaseStock(orderNo, []string{"refunding"}, "refunded"); err != nil { return err }
-	return s.revokeAccessByOrderNo(orderNo)
+	released, err := s.releaseStock(orderNo, []string{"refunding"}, "refunded")
+	if err != nil {
+		return err
+	}
+	if err := s.revokeAccessByOrderNo(orderNo); err != nil {
+		return err
+	}
+	if released {
+		s.notifyOrderEvent(orderNo, "退款已完成", fmt.Sprintf("您的订单 %s 退款已完成, 占用资源已释放。", orderNo))
+	}
+	return nil
 }
 
 // ===== 余量归还与到期处理 (REQ-A-012 / REQ-A-023 / REQ-A-043) =====
@@ -1659,19 +1714,27 @@ var stockHoldingStatuses = []string{"pending_payment", "paid", "provisioning", "
 // 同一笔订单。若先查状态再决定是否归还, 三者会各自读到「仍占用」并各归还一次, 余量凭空变多。
 func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, error) {
 	tx, err := s.db.Beginx()
-	if err != nil { return false, err }
+	if err != nil {
+		return false, err
+	}
 	defer tx.Rollback()
 
 	moved, err := s.repo.TransitionOrderStatusTx(tx, orderNo, from, to)
-	if err != nil { return false, err }
+	if err != nil {
+		return false, err
+	}
 	if !moved {
 		// 未发生流转: 可能已被其他路径处理, 或订单不存在/状态不允许。不归还, 直接提交空事务。
 		return false, tx.Commit()
 	}
 
 	o, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
-	if err != nil { return false, err }
-	if o == nil { return false, fmt.Errorf("order not found: %s", orderNo) }
+	if err != nil {
+		return false, err
+	}
+	if o == nil {
+		return false, fmt.Errorf("order not found: %s", orderNo)
+	}
 
 	if err := s.repo.IncrProductStock(tx, o.ProductID, o.Quantity); err != nil {
 		return false, err
@@ -1684,17 +1747,25 @@ func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, 
 // 返回本次关闭的订单数。
 func (s *Service) CloseExpiredUnpaidOrders() (int, error) {
 	nos, err := s.repo.ListExpiredUnpaidOrderNos(500)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	n := 0
 	var firstErr error
 	for _, no := range nos {
 		released, err := s.releaseStock(no, []string{"pending_payment"}, "cancelled")
 		if err != nil {
 			// 单笔失败不能中断整批, 否则一笔坏数据会让后面所有订单永远关不掉。
-			if firstErr == nil { firstErr = err }
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
-		if released { n++ }
+		if released {
+			n++
+			s.notifyOrderEvent(no, "订单已自动取消",
+				fmt.Sprintf("订单 %s 超时未支付, 已自动取消并释放资源。", no))
+		}
 	}
 	return n, firstErr
 }
@@ -1704,19 +1775,25 @@ func (s *Service) CloseExpiredUnpaidOrders() (int, error) {
 // 返回本次完成的订单数。
 func (s *Service) CompleteExpiredLeases() (int, error) {
 	nos, err := s.repo.ListExpiredLeaseOrderNos(500)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	n := 0
 	var firstErr error
 	for _, no := range nos {
 		released, err := s.releaseStock(no, []string{"active"}, "completed")
 		if err != nil {
-			if firstErr == nil { firstErr = err }
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		if released {
 			n++
 			// 租期结束, 访问凭证同步失效 (C-06)。
-			if err := s.revokeAccessByOrderNo(no); err != nil && firstErr == nil { firstErr = err }
+			if err := s.revokeAccessByOrderNo(no); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
 	return n, firstErr
@@ -1748,11 +1825,26 @@ func (s *Service) AdminUpdateOrderStatus(orderNo string, status string) error {
 	if status == "cancelled" || status == "refunded" {
 		// refunding 也允许直接改判为 refunded, 故来源状态需并入。
 		from := append(append([]string{}, stockHoldingStatuses...), "refunding")
-		if _, err := s.releaseStock(orderNo, from, status); err != nil { return err }
-		return s.revokeAccessByOrderNo(orderNo)
+		released, err := s.releaseStock(orderNo, from, status)
+		if err != nil {
+			return err
+		}
+		if err := s.revokeAccessByOrderNo(orderNo); err != nil {
+			return err
+		}
+		if released {
+			if status == "refunded" {
+				s.notifyOrderEvent(orderNo, "退款已完成", fmt.Sprintf("您的订单 %s 退款已完成, 占用资源已释放。", orderNo))
+			} else {
+				s.notifyOrderEvent(orderNo, "订单已取消", fmt.Sprintf("您的订单 %s 已取消, 占用资源已释放。", orderNo))
+			}
+		}
+		return nil
 	}
 	if status == "completed" {
-		if _, err := s.releaseStock(orderNo, stockHoldingStatuses, status); err != nil { return err }
+		if _, err := s.releaseStock(orderNo, stockHoldingStatuses, status); err != nil {
+			return err
+		}
 		return nil
 	}
 	// 冻结走 FreezeOrder: 吊销凭证(C-06) + 违规强制留痕(REQ-H-003), 不能只改状态。

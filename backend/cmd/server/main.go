@@ -15,8 +15,10 @@ import (
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
+	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
 	"tokenfactory/internal/sms"
+	"tokenfactory/internal/ticket"
 	"tokenfactory/internal/user"
 	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/db"
@@ -91,6 +93,14 @@ func main() {
 	equipmentSvc := equipment.NewService(equipmentRepo)
 	invoiceRepo := invoice.NewRepository(sqlDB)
 	invoiceSvc := invoice.NewService(invoiceRepo, sqlDB)
+	ticketRepo := ticket.NewRepository(sqlDB)
+	ticketSvc := ticket.NewService(ticketRepo, sqlDB)
+
+	notificationRepo := notification.NewRepository(sqlDB)
+	notificationSvc := notification.NewService(notificationRepo)
+	computeSvc.SetNotifier(notificationSvc)
+	invoiceSvc.SetNotifier(notificationSvc)
+	ticketSvc.SetNotifier(notificationSvc)
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
 	adminRepo := admin.NewRepository(sqlDB)
@@ -147,6 +157,8 @@ func main() {
 	buyer.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
 	compute.NewHandler(computeSvc).RegisterBuyerRoutes(buyer)
 	invoice.NewHandler(invoiceSvc).RegisterBuyerRoutes(buyer)
+	ticket.NewHandler(ticketSvc).RegisterBuyerRoutes(buyer)
+	notification.NewHandler(notificationSvc).RegisterBuyerRoutes(buyer)
 	equipment.NewHandler(equipmentSvc).RegisterBuyerRoutes(buyer)
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
 	if cfg.Server.Mode != "release" {
@@ -172,6 +184,7 @@ func main() {
 	adminRoute.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb), mw.RBAC("operator", "admin"))
 	compute.NewHandler(computeSvc).RegisterAdminRoutes(adminRoute)
 	invoice.NewHandler(invoiceSvc).RegisterAdminRoutes(adminRoute)
+	ticket.NewHandler(ticketSvc).RegisterAdminRoutes(adminRoute)
 	payment.NewHandler(paymentSvc).RegisterAdminRoutes(adminRoute)
 	intermediary.NewHandler(intermediarySvc).RegisterAdminRoutes(adminRoute)
 	equipment.NewHandler(equipmentSvc).RegisterAdminRoutes(adminRoute)

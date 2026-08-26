@@ -685,6 +685,82 @@ paths:
       parameters:
         - { name: invoice_no, in: path, required: true, schema: { type: string } }
 
+  /tickets:
+    post:
+      tags: [工单 Ticket]
+      summary: 创建工单（买家）
+      description: "关联订单必须为买家本人订单; 首条沟通记录即问题描述。"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_no, type, title, content]
+              properties:
+                order_no: { type: string }
+                type: { type: string, enum: [refund_dispute, resource_fault, unavailable, appeal, other] }
+                title: { type: string, description: "2-128 字" }
+                content: { type: string, description: "至少 5 字" }
+    get:
+      tags: [工单 Ticket]
+      summary: 工单列表（买家）
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, processing, resolved, closed] } }
+        - { name: keyword, in: query, schema: { type: string }, description: "工单号/标题模糊搜索" }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /tickets/{ticket_no}:
+    get:
+      tags: [工单 Ticket]
+      summary: 工单详情（买家, 含沟通记录）
+      parameters:
+        - { name: ticket_no, in: path, required: true, schema: { type: string } }
+
+  /tickets/{ticket_no}/messages:
+    post:
+      tags: [工单 Ticket]
+      summary: 买家追加沟通
+      description: "仅 pending/processing 状态可回复。"
+      parameters:
+        - { name: ticket_no, in: path, required: true, schema: { type: string } }
+
+  /tickets/{ticket_no}/close:
+    post:
+      tags: [工单 Ticket]
+      summary: 买家关闭工单
+      parameters:
+        - { name: ticket_no, in: path, required: true, schema: { type: string } }
+
+  /notifications:
+    get:
+      tags: [消息 Notification]
+      summary: 通知列表（买家）
+      description: "响应含 unread 未读数(不受 type 筛选影响), 供 Tab 角标。"
+      parameters:
+        - { name: type, in: query, schema: { type: string, enum: [system, order, ticket] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /notifications/{id}/read:
+    post:
+      tags: [消息 Notification]
+      summary: 标记已读（买家, CAS 幂等）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
+  /notifications/read-all:
+    post:
+      tags: [消息 Notification]
+      summary: 全部标为已读（买家）
+
+  /notifications/{id}:
+    delete:
+      tags: [消息 Notification]
+      summary: 删除通知（买家, 软删）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
   /supplier/qualifications:
     get:
       tags: [算力撮合 Compute]
@@ -888,6 +964,51 @@ paths:
               required: [reason]
               properties:
                 reason: { type: string }
+
+  /admin/tickets:
+    get:
+      tags: [运营管理 Admin]
+      summary: 工单列表
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, processing, resolved, closed] } }
+        - { name: keyword, in: query, schema: { type: string } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /admin/tickets/{id}:
+    get:
+      tags: [运营管理 Admin]
+      summary: 工单详情（含沟通记录）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
+  /admin/tickets/{id}/claim:
+    post:
+      tags: [运营管理 Admin]
+      summary: 受理工单（pending→processing）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
+  /admin/tickets/{id}/messages:
+    post:
+      tags: [运营管理 Admin]
+      summary: 运营回复（需先受理）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
+  /admin/tickets/{id}/resolve:
+    post:
+      tags: [运营管理 Admin]
+      summary: 完结工单（processing→resolved）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+
+  /admin/tickets/{id}/close:
+    post:
+      tags: [运营管理 Admin]
+      summary: 关闭工单（终态）
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
 
   /admin/risk/alerts:
     get:

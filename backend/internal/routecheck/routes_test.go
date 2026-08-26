@@ -15,7 +15,9 @@ import (
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
+	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
+	"tokenfactory/internal/ticket"
 	"tokenfactory/internal/user"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +37,8 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	intermediaryH := intermediary.NewHandler(nil)
 	equipmentH := equipment.NewHandler(nil)
 	invoiceH := invoice.NewHandler(nil)
+	ticketH := ticket.NewHandler(nil)
+	notificationH := notification.NewHandler(nil)
 	collateralH := intermediary.NewCollateralHandler(nil)
 	adminH := admin.NewHandler(nil)
 	userH := user.NewHandler(nil)
@@ -58,6 +62,8 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	buyer := r.Group("/api/v1")
 	computeH.RegisterBuyerRoutes(buyer)
 	invoiceH.RegisterBuyerRoutes(buyer)
+	ticketH.RegisterBuyerRoutes(buyer)
+	notificationH.RegisterBuyerRoutes(buyer)
 	equipmentH.RegisterBuyerRoutes(buyer)
 	paymentH.RegisterBuyerRoutes(buyer)
 
@@ -72,6 +78,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	adminRoute := r.Group("/api/v1")
 	computeH.RegisterAdminRoutes(adminRoute)
 	invoiceH.RegisterAdminRoutes(adminRoute)
+	ticketH.RegisterAdminRoutes(adminRoute)
 	paymentH.RegisterAdminRoutes(adminRoute)
 	intermediaryH.RegisterAdminRoutes(adminRoute)
 	equipmentH.RegisterAdminRoutes(adminRoute)

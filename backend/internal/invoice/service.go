@@ -2,6 +2,7 @@ package invoice
 
 import (
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -109,13 +110,33 @@ func (r *SaveTitleReq) validate() error {
 
 // ===== Service =====
 
+// Notifier 消息中心写入口, 由 notification 包实现, nil 表示未启用。
+type Notifier interface {
+	Record(userID int64, notifType, title, content, link string) error
+}
+
 type Service struct {
-	repo *Repository
-	db   *sqlx.DB
+	repo     *Repository
+	db       *sqlx.DB
+	notifier Notifier
 }
 
 func NewService(repo *Repository, db *sqlx.DB) *Service {
 	return &Service{repo: repo, db: db}
+}
+
+// SetNotifier 注入消息中心; 通知写入失败只记日志, 不中断发票主流程。
+func (s *Service) SetNotifier(n Notifier) {
+	s.notifier = n
+}
+
+func (s *Service) notify(userID int64, title, content, link string) {
+	if s.notifier == nil {
+		return
+	}
+	if err := s.notifier.Record(userID, "system", title, content, link); err != nil {
+		slog.Warn("发票通知写入失败", "error", err)
+	}
 }
 
 // ---- Title ----
@@ -209,6 +230,9 @@ func (s *Service) Apply(buyerID int64, orderNos []string) (*Invoice, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = s.repo.ReleaseRejectedLinksTx(tx, orderIDs); err != nil {
+		return nil, err
+	}
 	if err = s.repo.LinkOrdersTx(tx, inv.ID, orderIDs); err != nil {
 		return nil, err
 	}
@@ -267,6 +291,11 @@ func (s *Service) Issue(id int64, taxInvoiceNo, filename string, pdf []byte) err
 	if !ok {
 		return fmt.Errorf("invoice not found")
 	}
+	if inv, err := s.repo.GetInvoiceByID(id); err == nil && inv != nil {
+		s.notify(inv.BuyerID, "发票已开具",
+			fmt.Sprintf("您申请的发票 %s 已开具, 可前往发票管理下载。", inv.InvoiceNo),
+			"/console/buyer/invoices")
+	}
 	return nil
 }
 
@@ -281,6 +310,11 @@ func (s *Service) Reject(id int64, reason string) error {
 	}
 	if !ok {
 		return fmt.Errorf("invoice not found")
+	}
+	if inv, err := s.repo.GetInvoiceByID(id); err == nil && inv != nil {
+		s.notify(inv.BuyerID, "发票申请被驳回",
+			fmt.Sprintf("您申请的发票 %s 被驳回: %s", inv.InvoiceNo, reason),
+			"/console/buyer/invoices")
 	}
 	return nil
 }

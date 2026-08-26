@@ -20,6 +20,8 @@ services:
     environment:
       MYSQL_ROOT_PASSWORD: password
       MYSQL_DATABASE: tokenfactory
+      TZ: Asia/Shanghai
+    command: --default-time-zone=+08:00
     volumes:
       - mysql_data:/var/lib/mysql
       - ./migrations/001_initial_schema.up.sql:/docker-entrypoint-initdb.d/001.sql:ro
@@ -30,6 +32,8 @@ services:
       - ./migrations/006_remove_default_admin_seed.up.sql:/docker-entrypoint-initdb.d/006.sql:ro
       - ./migrations/007_blockchain_worker_bookkeeping.up.sql:/docker-entrypoint-initdb.d/007.sql:ro
       - ./migrations/008_invoice_management.up.sql:/docker-entrypoint-initdb.d/008.sql:ro
+      - ./migrations/009_ticket_support.up.sql:/docker-entrypoint-initdb.d/009.sql:ro
+      - ./migrations/010_notifications.up.sql:/docker-entrypoint-initdb.d/010.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

@@ -173,6 +173,23 @@ func (r *Repository) CreateInvoiceTx(tx *sqlx.Tx, inv *Invoice) (int64, error) {
 	return res.LastInsertId()
 }
 
+// ReleaseRejectedLinksTx 清理这些订单在 rejected 发票下的关联行。
+// uq_order 是物理唯一约束, 而「驳回释放订单」是查询口径: 若不先清理,
+// 被驳回订单再次申请开票时会撞 UNIQUE (Error 1062)。
+func (r *Repository) ReleaseRejectedLinksTx(tx *sqlx.Tx, orderIDs []int64) error {
+	if len(orderIDs) == 0 {
+		return nil
+	}
+	query, args, err := sqlx.In(
+		`DELETE io FROM invoice_orders io JOIN invoices i ON i.id = io.invoice_id
+		WHERE io.order_id IN (?) AND i.status = 'rejected'`, orderIDs)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(tx.Rebind(query), args...)
+	return err
+}
+
 func (r *Repository) LinkOrdersTx(tx *sqlx.Tx, invoiceID int64, orderIDs []int64) error {
 	for _, id := range orderIDs {
 		if _, err := tx.Exec("INSERT INTO invoice_orders (invoice_id, order_id) VALUES (?,?)", invoiceID, id); err != nil {
@@ -199,6 +216,15 @@ func (r *Repository) GetInvoiceByNo(buyerID int64, invoiceNo string) (*Invoice, 
 	var inv Invoice
 	err := r.db.Get(&inv,
 		"SELECT "+invoiceColumns+" FROM invoices WHERE buyer_id = ? AND invoice_no = ?", buyerID, invoiceNo)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return &inv, err
+}
+
+func (r *Repository) GetInvoiceByID(id int64) (*Invoice, error) {
+	var inv Invoice
+	err := r.db.Get(&inv, "SELECT "+invoiceColumns+" FROM invoices WHERE id = ?", id)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
