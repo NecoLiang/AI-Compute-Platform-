@@ -20,7 +20,9 @@ sms:
   local_preview: true
 
 security:
-  credential_key: ""
+  # 仅本地开发使用的交付凭证加密密钥(64 位 hex = 32 字节)。
+  # 保护的是本地 fixture 数据; 生产密钥由部署机/KMS 注入, 绝不入库。
+  credential_key: "3b3bb3ea1e960930f32aa0f4ab0943f0e0e82f85b153ad3577a0df0b389897fd"
   cap_siteverify_url: "http://host.docker.internal:3210/local-dev/siteverify"
   cap_test_token: "demo-cap-token"
   cap_secret: "DEMO_REPLACE_ME_CAP_SITE_SECRET_32_CHARS"
