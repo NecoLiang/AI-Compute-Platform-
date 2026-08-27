@@ -1,9 +1,10 @@
 package payment
 
 import (
+	"github.com/gin-gonic/gin"
+	"strconv"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
-	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
@@ -21,6 +22,8 @@ func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
 	r.POST("/payment/supplier/onboard", h.StartOnboard)
 	r.GET("/payment/supplier/onboard/status", h.OnboardStatus)
 	r.GET("/payment/settlements", h.Settlements)
+	r.GET("/supplier/settlements", h.SupplierSettlements)
+	r.GET("/supplier/settlements/summary", h.SupplierSettlementSummary)
 }
 
 func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
@@ -34,9 +37,15 @@ func (h *Handler) RegisterCallbackRoutes(r *gin.RouterGroup) {
 
 func (h *Handler) Pay(c *gin.Context) {
 	var req PayReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	resp, err := h.svc.Pay(req, 0) // total amount fetched from order in full implementation
-	if err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, resp)
 }
 
@@ -47,13 +56,22 @@ func (h *Handler) PaymentStatus(c *gin.Context) {
 
 func (h *Handler) Callback(c *gin.Context) {
 	var req CallbackReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
-	if err := h.svc.HandleCallback(req); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.svc.HandleCallback(req); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) StartOnboard(c *gin.Context) {
-	if err := h.svc.StartOnboard(c.GetInt64("user_id")); err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err := h.svc.StartOnboard(c.GetInt64("user_id")); err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
@@ -66,6 +84,30 @@ func (h *Handler) Settlements(c *gin.Context) {
 	orderNo := c.Query("order_no")
 	settlements, _ := h.svc.GetOrderSettlements(orderNo)
 	response.Success(c, settlements)
+}
+
+// SupplierSettlements 供给方结算流水(按商品归属过滤, payee_id 不可靠)。
+func (h *Handler) SupplierSettlements(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	list, total, err := h.svc.ListSupplierSettlements(c.GetInt64("user_id"), c.Query("status"), page, pageSize)
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	response.SuccessPage(c, list, total, page, pageSize)
+}
+
+// SupplierSettlementSummary 应结/已分账/待结合计。
+func (h *Handler) SupplierSettlementSummary(c *gin.Context) {
+	total, succeeded, pending, err := h.svc.SumSupplierSettlements(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
+	response.Success(c, gin.H{
+		"total_fen": total, "succeeded_fen": succeeded, "pending_fen": pending,
+	})
 }
 
 func (h *Handler) Reconcile(c *gin.Context) {

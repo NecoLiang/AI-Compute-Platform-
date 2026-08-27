@@ -204,15 +204,21 @@ func (r *Repository) CreateQualification(q *SupplierQualification) (int64, error
 	return res.LastInsertId()
 }
 
+// qualificationColumns 显式列 + COALESCE: 可空列(cert_number/cert_url/rejected_reason)
+// 若为 NULL 会让 sqlx 扫描 string 报错, 且 handler 吞错后前端只能看到 data:null。
+const qualificationColumns = `id, user_id, qual_type, cert_name,
+	COALESCE(cert_number,'') AS cert_number, COALESCE(cert_url,'') AS cert_url,
+	expires_at, status, COALESCE(rejected_reason,'') AS rejected_reason, created_at`
+
 func (r *Repository) GetQualificationsByUser(userID int64) ([]SupplierQualification, error) {
 	var list []SupplierQualification
-	err := r.db.Select(&list, "SELECT * FROM supplier_qualifications WHERE user_id = ?", userID)
+	err := r.db.Select(&list, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE user_id = ? ORDER BY created_at DESC", userID)
 	return list, err
 }
 
 func (r *Repository) GetQualificationByID(id int64) (*SupplierQualification, error) {
 	var q SupplierQualification
-	err := r.db.Get(&q, "SELECT * FROM supplier_qualifications WHERE id = ?", id)
+	err := r.db.Get(&q, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE id = ?", id)
 	return &q, err
 }
 
@@ -223,7 +229,7 @@ func (r *Repository) UpdateQualificationStatus(id int64, status, reason string) 
 
 func (r *Repository) GetPendingQualifications() ([]SupplierQualification, error) {
 	var list []SupplierQualification
-	err := r.db.Select(&list, "SELECT * FROM supplier_qualifications WHERE status='pending' ORDER BY created_at")
+	err := r.db.Select(&list, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE status='pending' ORDER BY created_at")
 	return list, err
 }
 
@@ -518,14 +524,22 @@ func (r *Repository) UpdateOrderStatusTx(tx *sqlx.Tx, orderNo string, status str
 // 若用「先查状态再改」的写法, 两个并发请求会同时读到 pending_payment 并各自归还一次库存,
 // 导致库存凭空变多。条件 UPDATE 由 InnoDB 行锁串行化, 只有一个能拿到 RowsAffected=1。
 func (r *Repository) TransitionOrderStatusTx(tx *sqlx.Tx, orderNo string, from []string, to string) (bool, error) {
-	if len(from) == 0 { return false, fmt.Errorf("from status required") }
+	if len(from) == 0 {
+		return false, fmt.Errorf("from status required")
+	}
 	q := "UPDATE orders SET status=? WHERE order_no=? AND status IN (?)"
 	query, args, err := sqlx.In(q, to, orderNo, from)
-	if err != nil { return false, err }
+	if err != nil {
+		return false, err
+	}
 	res, err := tx.Exec(query, args...)
-	if err != nil { return false, err }
+	if err != nil {
+		return false, err
+	}
 	n, err := res.RowsAffected()
-	if err != nil { return false, err }
+	if err != nil {
+		return false, err
+	}
 	return n > 0, nil
 }
 
@@ -533,8 +547,12 @@ func (r *Repository) TransitionOrderStatusTx(tx *sqlx.Tx, orderNo string, from [
 func (r *Repository) GetOrderForUpdateTx(tx *sqlx.Tx, orderNo string) (*Order, error) {
 	var o Order
 	err := tx.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE order_no = ?", orderNo)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &o, nil
 }
 
@@ -629,16 +647,53 @@ func (r *Repository) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, er
 	return list, total, nil
 }
 
-func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]Order, int64, error) {
-	// Join with products
+// SupplierOrder 履约订单 + 产品摘要(订单管理页需要型号与计费模式展示)。
+type SupplierOrder struct {
+	Order
+	GPUModel    string `db:"gpu_model" json:"gpu_model"`
+	ProductType string `db:"product_type" json:"product_type"`
+	PricingMode string `db:"pricing_mode" json:"pricing_mode"`
+}
+
+// ListSupplierOrders 履约订单列表。
+// status 支持逗号分隔多值(Tab 语义组: 待交付=paid,provisioning; 已完成=终态合集),
+// 多值走 IN, 单值与原行为一致; statusCounts 为该供给方全部订单按状态的计数(Tab 角标)。
+func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]SupplierOrder, int64, map[string]int64, error) {
 	where := "WHERE p.supplier_id=?"
 	args := []interface{}{supplierID}
 	if status != "" {
-		where += " AND o.status=?"
-		args = append(args, status)
+		parts := strings.Split(status, ",")
+		if len(parts) > 1 {
+			where += " AND o.status IN (?"
+			for range parts[1:] {
+				where += ",?"
+			}
+			where += ")"
+		} else {
+			where += " AND o.status=?"
+		}
+		for _, s := range parts {
+			args = append(args, strings.TrimSpace(s))
+		}
 	}
 	var total int64
-	r.db.Get(&total, "SELECT COUNT(*) FROM orders o JOIN products p ON o.product_id=p.id "+where, args...)
+	if err := r.db.Get(&total, "SELECT COUNT(*) FROM orders o JOIN products p ON o.product_id=p.id "+where, args...); err != nil {
+		return nil, 0, nil, err
+	}
+
+	counts := map[string]int64{}
+	var countRows []struct {
+		Status string `db:"status"`
+		Count  int64  `db:"count"`
+	}
+	if err := r.db.Select(&countRows,
+		"SELECT o.status AS status, COUNT(*) AS count FROM orders o JOIN products p ON o.product_id=p.id WHERE p.supplier_id=? GROUP BY o.status",
+		supplierID); err != nil {
+		return nil, 0, nil, err
+	}
+	for _, row := range countRows {
+		counts[row.Status] = row.Count
+	}
 
 	if page <= 0 {
 		page = 1
@@ -646,11 +701,13 @@ func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, p
 	if pageSize <= 0 {
 		pageSize = 20
 	}
-	query := fmt.Sprintf("SELECT o.* FROM orders o JOIN products p ON o.product_id=p.id %s ORDER BY o.created_at DESC LIMIT ? OFFSET ?", where)
+	query := fmt.Sprintf(`SELECT o.*, COALESCE(p.gpu_model,'') AS gpu_model,
+		COALESCE(p.product_type,'') AS product_type, COALESCE(p.pricing_mode,'') AS pricing_mode
+		FROM orders o JOIN products p ON o.product_id=p.id %s ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, where)
 	args = append(args, pageSize, (page-1)*pageSize)
-	var list []Order
+	list := make([]SupplierOrder, 0)
 	err := r.db.Select(&list, query, args...)
-	return list, total, err
+	return list, total, counts, err
 }
 
 // Delivery

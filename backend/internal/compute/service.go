@@ -1128,7 +1128,7 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 	return seeded, tx.Commit()
 }
 
-func (s *Service) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]Order, int64, error) {
+func (s *Service) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]SupplierOrder, int64, map[string]int64, error) {
 	return s.repo.ListSupplierOrders(supplierID, status, page, pageSize)
 }
 

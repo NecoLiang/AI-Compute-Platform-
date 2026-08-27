@@ -779,6 +779,21 @@ paths:
       tags: [算力撮合 Compute]
       summary: 供给方订单
 
+  /supplier/settlements:
+    get:
+      tags: [支付分账 Payment]
+      summary: 供给方结算流水
+      description: "按商品归属过滤(settlements.payee_id 不可靠); status: pending/processing/success/failed。"
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, processing, success, failed] } }
+        - { name: page, in: query, schema: { type: integer } }
+        - { name: page_size, in: query, schema: { type: integer } }
+
+  /supplier/settlements/summary:
+    get:
+      tags: [支付分账 Payment]
+      summary: 供给方结算汇总（应结/已分账/待结, 分）
+
   # ==================== 支付 ====================
   /payment/pay:
     post:

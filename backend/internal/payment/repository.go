@@ -2,8 +2,8 @@ package payment
 
 import (
 	"fmt"
-	"time"
 	"github.com/jmoiron/sqlx"
+	"time"
 )
 
 type Payment struct {
@@ -75,6 +75,56 @@ func (r *Repository) CreateSettlement(s *Settlement) error {
 	return err
 }
 
+// ListSupplierSettlements 供给方结算流水: 按商品归属过滤。
+// 注意 settlements.payee_id 目前不可靠(分账创建时写 0), 归属必须经
+// orders -> products 的 supplier_id 判定。
+func (r *Repository) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]Settlement, int64, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	where := "WHERE s.payee_type='supplier' AND p.supplier_id=?"
+	args := []interface{}{supplierID}
+	if status != "" {
+		where += " AND s.status=?"
+		args = append(args, status)
+	}
+	var total int64
+	if err := r.db.Get(&total,
+		"SELECT COUNT(*) FROM settlements s JOIN orders o ON o.order_no=s.order_no JOIN products p ON p.id=o.product_id "+where,
+		args...); err != nil {
+		return nil, 0, err
+	}
+	list := make([]Settlement, 0)
+	err := r.db.Select(&list,
+		`SELECT s.* FROM settlements s
+		JOIN orders o ON o.order_no=s.order_no
+		JOIN products p ON p.id=o.product_id
+		`+where+` ORDER BY s.created_at DESC LIMIT ? OFFSET ?`,
+		append(args, pageSize, (page-1)*pageSize)...)
+	return list, total, err
+}
+
+// SumSupplierSettlements 供给方结算汇总: 应结总额 / 已分账(success) / 待结(pending+processing)。
+func (r *Repository) SumSupplierSettlements(supplierID int64) (total, succeeded, pending int64, err error) {
+	err = r.db.QueryRow(
+		`SELECT
+			COALESCE(SUM(s.amount),0),
+			COALESCE(SUM(CASE WHEN s.status='success' THEN s.amount END),0),
+			COALESCE(SUM(CASE WHEN s.status IN ('pending','processing') THEN s.amount END),0)
+		FROM settlements s
+		JOIN orders o ON o.order_no=s.order_no
+		JOIN products p ON p.id=o.product_id
+		WHERE s.payee_type='supplier' AND p.supplier_id=?`, supplierID).
+		Scan(&total, &succeeded, &pending)
+	return
+}
+
 func (r *Repository) GetSettlementsByOrder(orderNo string) ([]Settlement, error) {
 	var list []Settlement
 	err := r.db.Select(&list, "SELECT * FROM settlements WHERE order_no = ?", orderNo)
@@ -118,7 +168,9 @@ type onboardRow struct {
 func (r *Repository) GetOnboardStatus(userID int64) (string, error) {
 	var row onboardRow
 	err := r.db.Get(&row, "SELECT status FROM yeepay_onboard WHERE user_id=?", userID)
-	if err != nil { return "not_started", nil }
+	if err != nil {
+		return "not_started", nil
+	}
 	return row.Status, nil
 }
 

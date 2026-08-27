@@ -320,8 +320,15 @@ func (h *Handler) ListBuyerOrders(c *gin.Context) {
 func (h *Handler) ListSupplierOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	list, total, _ := h.svc.ListSupplierOrders(c.GetInt64("user_id"), c.Query("status"), page, pageSize)
-	response.SuccessPage(c, list, total, page, pageSize)
+	list, total, counts, err := h.svc.ListSupplierOrders(c.GetInt64("user_id"), c.Query("status"), page, pageSize)
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
+	response.Success(c, gin.H{
+		"list": list, "total": total, "status_counts": counts,
+		"page": page, "page_size": pageSize,
+	})
 }
 
 // Deliver 供给方回填交付信息, 平台随即生成并加密存储访问凭证 (C-06)。
