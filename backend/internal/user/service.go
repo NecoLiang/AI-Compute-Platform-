@@ -67,16 +67,22 @@ func (s *Service) SubmitEnterprise(userID int64, req EnterpriseReq) error {
 func (s *Service) GetKYCStatus(userID int64) (*KYCStatus, error) {
 	status := &KYCStatus{}
 	personal, err := s.repo.GetPersonalKYC(userID)
-	if err == nil {
+	switch {
+	case err == nil:
 		status.Personal = &KYCItem{Status: personal.Status, RealName: personal.RealName}
-	} else {
+	case errors.Is(err, sql.ErrNoRows):
 		status.Personal = &KYCItem{Status: "none"}
+	default:
+		return nil, err
 	}
 	enterprise, err := s.repo.GetEnterprise(userID)
-	if err == nil {
+	switch {
+	case err == nil:
 		status.Enterprise = &KYCItem{Status: enterprise.Status, Name: enterprise.Name}
-	} else {
+	case errors.Is(err, sql.ErrNoRows):
 		status.Enterprise = &KYCItem{Status: "none"}
+	default:
+		return nil, err
 	}
 	return status, nil
 }

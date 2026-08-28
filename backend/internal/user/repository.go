@@ -52,7 +52,7 @@ func (r *Repository) CreatePersonalKYC(userID int64, realName, idCard string) er
 
 func (r *Repository) GetPersonalKYC(userID int64) (*PersonalKYC, error) {
 	var kyc PersonalKYC
-	err := r.db.Get(&kyc, "SELECT * FROM user_kyc WHERE user_id = ?", userID)
+	err := r.db.Get(&kyc, "SELECT id, user_id, real_name, id_card, status, created_at FROM user_kyc WHERE user_id = ?", userID)
 	return &kyc, err
 }
 
@@ -67,7 +67,7 @@ func (r *Repository) CreateEnterprise(userID int64, name, uscc, licenseURL, lega
 
 func (r *Repository) GetEnterprise(userID int64) (*Enterprise, error) {
 	var ent Enterprise
-	err := r.db.Get(&ent, "SELECT * FROM enterprises WHERE user_id = ?", userID)
+	err := r.db.Get(&ent, "SELECT id, user_id, name, uscc, license_url, legal_person, status, created_at FROM enterprises WHERE user_id = ?", userID)
 	return &ent, err
 }
 

@@ -35,7 +35,9 @@ func setupKYCTestDB(t *testing.T) *Service {
 		real_name VARCHAR(64) NOT NULL,
 		id_card VARCHAR(32) NOT NULL,
 		status ENUM('pending','verified','rejected') NOT NULL DEFAULT 'pending',
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		rejected_reason VARCHAR(256),
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	)`)
 	db.MustExec(`CREATE TABLE enterprises (
 		id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -45,7 +47,9 @@ func setupKYCTestDB(t *testing.T) *Service {
 		license_url VARCHAR(512) NOT NULL,
 		legal_person VARCHAR(64) NOT NULL,
 		status ENUM('pending','verified','rejected') NOT NULL DEFAULT 'pending',
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		rejected_reason VARCHAR(256),
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	)`)
 
 	t.Cleanup(func() {

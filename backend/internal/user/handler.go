@@ -1,9 +1,9 @@
 package user
 
 import (
+	"github.com/gin-gonic/gin"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
-	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
@@ -38,7 +38,7 @@ func (h *Handler) SubmitPersonalKYC(c *gin.Context) {
 		return
 	}
 	if err := h.svc.SubmitPersonalKYC(c.GetInt64("user_id"), req); err != nil {
-		response.Error(c, ErrToCode(err), err.Error())
+		respondKYCError(c, err)
 		return
 	}
 	response.Success(c, nil)
@@ -51,7 +51,7 @@ func (h *Handler) SubmitEnterprise(c *gin.Context) {
 		return
 	}
 	if err := h.svc.SubmitEnterprise(c.GetInt64("user_id"), req); err != nil {
-		response.Error(c, ErrToCode(err), err.Error())
+		respondKYCError(c, err)
 		return
 	}
 	response.Success(c, nil)
@@ -60,10 +60,20 @@ func (h *Handler) SubmitEnterprise(c *gin.Context) {
 func (h *Handler) GetKYCStatus(c *gin.Context) {
 	status, err := h.svc.GetKYCStatus(c.GetInt64("user_id"))
 	if err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+		respondKYCError(c, err)
 		return
 	}
 	response.Success(c, status)
+}
+
+func respondKYCError(c *gin.Context, err error) {
+	code := ErrToCode(err)
+	if code == errcode.InternalError {
+		_ = c.Error(err)
+		response.Error(c, code, "认证服务暂不可用")
+		return
+	}
+	response.Error(c, code, err.Error())
 }
 
 func (h *Handler) ApplyRole(c *gin.Context) {
