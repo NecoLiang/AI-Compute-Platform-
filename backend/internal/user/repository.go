@@ -3,6 +3,7 @@ package user
 import (
 	"database/sql"
 	"time"
+
 	"github.com/jmoiron/sqlx"
 )
 
@@ -16,14 +17,14 @@ type PersonalKYC struct {
 }
 
 type Enterprise struct {
-	ID             int64     `db:"id" json:"id"`
-	UserID         int64     `db:"user_id" json:"user_id"`
-	Name           string    `db:"name" json:"name"`
-	USCC           string    `db:"uscc" json:"uscc"`
-	LicenseURL     string    `db:"license_url" json:"license_url"`
-	LegalPerson    string    `db:"legal_person" json:"legal_person"`
-	Status         string    `db:"status" json:"status"` // pending/verified/rejected
-	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	ID          int64     `db:"id" json:"id"`
+	UserID      int64     `db:"user_id" json:"user_id"`
+	Name        string    `db:"name" json:"name"`
+	USCC        string    `db:"uscc" json:"uscc"`
+	LicenseURL  string    `db:"license_url" json:"license_url"`
+	LegalPerson string    `db:"legal_person" json:"legal_person"`
+	Status      string    `db:"status" json:"status"` // pending/verified/rejected
+	CreatedAt   time.Time `db:"created_at" json:"created_at"`
 }
 
 type UserRole struct {
@@ -43,7 +44,7 @@ func NewRepository(db *sqlx.DB) *Repository {
 // Personal KYC
 func (r *Repository) CreatePersonalKYC(userID int64, realName, idCard string) error {
 	_, err := r.db.Exec(
-		"INSERT INTO user_kyc (user_id, real_name, id_card, status) VALUES (?, ?, ?, 'pending') ON DUPLICATE KEY UPDATE real_name=?, id_card=?, status='pending'",
+		"INSERT INTO user_kyc (user_id, real_name, id_card, status) VALUES (?, ?, ?, 'verified') ON DUPLICATE KEY UPDATE real_name=?, id_card=?, status='verified'",
 		userID, realName, idCard, realName, idCard,
 	)
 	return err
@@ -58,7 +59,7 @@ func (r *Repository) GetPersonalKYC(userID int64) (*PersonalKYC, error) {
 // Enterprise
 func (r *Repository) CreateEnterprise(userID int64, name, uscc, licenseURL, legalPerson string) error {
 	_, err := r.db.Exec(
-		"INSERT INTO enterprises (user_id, name, uscc, license_url, legal_person, status) VALUES (?,?,?,?,?,'pending') ON DUPLICATE KEY UPDATE name=?, uscc=?, license_url=?, legal_person=?, status='pending'",
+		"INSERT INTO enterprises (user_id, name, uscc, license_url, legal_person, status) VALUES (?,?,?,?,?,'verified') ON DUPLICATE KEY UPDATE name=?, uscc=?, license_url=?, legal_person=?, status='verified'",
 		userID, name, uscc, licenseURL, legalPerson, name, uscc, licenseURL, legalPerson,
 	)
 	return err

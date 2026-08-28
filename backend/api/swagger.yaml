@@ -405,7 +405,7 @@ paths:
   /user/kyc/personal:
     post:
       tags: [用户 User]
-      summary: 个人实名认证
+      summary: 个人实名认证（试运行阶段自动通过）
       requestBody:
         content:
           application/json:
@@ -419,7 +419,7 @@ paths:
   /user/kyc/enterprise:
     post:
       tags: [用户 User]
-      summary: 企业认证
+      summary: 企业认证（试运行阶段自动通过）
       requestBody:
         content:
           application/json:
