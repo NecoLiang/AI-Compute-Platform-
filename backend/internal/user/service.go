@@ -1,6 +1,7 @@
 package user
 
 import (
+	"database/sql"
 	"errors"
 	"tokenfactory/pkg/errcode"
 )
@@ -41,19 +42,23 @@ type KYCItem struct {
 }
 
 func (s *Service) SubmitPersonalKYC(userID int64, req PersonalKYCReq) error {
-	existing, _ := s.repo.GetPersonalKYC(userID)
-	if existing != nil && existing.Status == "pending" {
+	existing, err := s.repo.GetPersonalKYC(userID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if existing != nil && (existing.Status == "pending" || existing.Status == "verified") {
 		return ErrAlreadySubmitted
 	}
-	// TODO: 接入实名核验服务商后，在此处调用三要素/人脸核验接口
-	// 所需信息: 阿里云实人认证 AccessKey / 腾讯云慧眼 License
-	// 核验通过 → status='verified', 不通过 → status='rejected' + rejected_reason
+	// ponytail: pilot submissions auto-verify; replace this write with a provider verdict when real KYC is required.
 	return s.repo.CreatePersonalKYC(userID, req.RealName, req.IDCard)
 }
 
 func (s *Service) SubmitEnterprise(userID int64, req EnterpriseReq) error {
-	existing, _ := s.repo.GetEnterprise(userID)
-	if existing != nil && existing.Status == "pending" {
+	existing, err := s.repo.GetEnterprise(userID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if existing != nil && (existing.Status == "pending" || existing.Status == "verified") {
 		return ErrAlreadySubmitted
 	}
 	return s.repo.CreateEnterprise(userID, req.Name, req.USCC, req.LicenseURL, req.LegalPerson)

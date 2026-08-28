@@ -87,6 +87,8 @@ Response: { "code": 0, "data": { "list": [...], "total": 100, "page": 1, "page_s
 { "real_name": "张三", "id_card": "110101199001011234" }
 ```
 
+当前试运行阶段不调用第三方核验服务，提交后状态直接写为 `verified`。
+
 **POST /user/kyc/enterprise**
 ```json
 { "enterprise_name": "某科技有限公司", "uscc": "91110108MA0******", "license_url": "/uploads/xxx.jpg", "legal_person": "张三" }
