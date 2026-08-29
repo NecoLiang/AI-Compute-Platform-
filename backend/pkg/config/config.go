@@ -59,13 +59,19 @@ type SecurityConfig struct {
 	CapTestToken     string
 }
 
-// BlockchainConfig BSN-DDC 文昌链存证接入 (docs/14 §14.8)。
-// gateway_url/api_key/contract_key 三项配齐才会真正上链; 未配齐时存证事件照常落库
-// 为 pending, worker 待命, 配置上线重启后自动补推 —— 不阻塞业务上线。
+// BlockchainConfig BSN 开放联盟链·文昌链存证接入 (docs/14 §14.8)。
+// gateway_url/project_id/account_key 三项配齐才会真正上链; 未配齐时存证事件照常
+// 落库为 pending, worker 待命, 配置上线重启后自动补推 —— 不阻塞业务上线。
+// gateway_url/project_id 来自 BSN 门户「项目管理 → 下载接入参数」。
 type BlockchainConfig struct {
-	GatewayURL  string // BSN 用户网关地址
-	APIKey      string // BSN 开放平台 API Key, 生产从环境变量 BLOCKCHAIN_API_KEY 注入
-	ContractKey string // 标准存证合约标识
+	GatewayURL  string // BSN 项目网关, 如 https://opbningxia.bsngate.com:18602
+	ProjectID   string // BSN 项目 id
+	ProjectKey  string // BSN 项目 key; 项目未启用密钥校验时留空
+	ChainID     string // 链 ID, 默认 wenchangchain
+	AccountKey  string // 链账户 secp256k1 私钥 64 位 hex — 敏感, 从环境变量 BLOCKCHAIN_ACCOUNT_KEY 注入
+	Denom       string // gas 面额, 默认 ugas
+	GasLimit    uint64 // 默认 200000
+	GasPrice    uint64 // 接入参数表 gasprice, 默认 1
 	ExplorerURL string // 区块链浏览器 tx 前缀, 供"链上自行查验"链接
 	SignKeySeed string // 平台见证签名 Ed25519 种子, 64 位 hex; 生产从 KMS/环境变量注入
 }
@@ -114,8 +120,13 @@ func Load(path string) (*Config, error) {
 		},
 		Blockchain: BlockchainConfig{
 			GatewayURL:  v.GetString("blockchain.gateway_url"),
-			APIKey:      v.GetString("blockchain.api_key"),
-			ContractKey: v.GetString("blockchain.contract_key"),
+			ProjectID:   v.GetString("blockchain.project_id"),
+			ProjectKey:  v.GetString("blockchain.project_key"),
+			ChainID:     v.GetString("blockchain.chain_id"),
+			AccountKey:  v.GetString("blockchain.account_key"),
+			Denom:       v.GetString("blockchain.denom"),
+			GasLimit:    v.GetUint64("blockchain.gas_limit"),
+			GasPrice:    v.GetUint64("blockchain.gas_price"),
 			ExplorerURL: v.GetString("blockchain.explorer_url"),
 			SignKeySeed: v.GetString("blockchain.sign_key_seed"),
 		},
@@ -143,13 +154,13 @@ func Load(path string) (*Config, error) {
 	}
 	// BSN 三要素要么全空(未接入), 要么全配 —— 半配置多半是漏了一项, 直接报错好过静默待命。
 	bsnSet := 0
-	for _, s := range []string{cfg.Blockchain.GatewayURL, cfg.Blockchain.APIKey, cfg.Blockchain.ContractKey} {
+	for _, s := range []string{cfg.Blockchain.GatewayURL, cfg.Blockchain.ProjectID, cfg.Blockchain.AccountKey} {
 		if s != "" {
 			bsnSet++
 		}
 	}
 	if bsnSet != 0 && bsnSet != 3 {
-		return nil, fmt.Errorf("blockchain.gateway_url, blockchain.api_key and blockchain.contract_key must be configured together")
+		return nil, fmt.Errorf("blockchain.gateway_url, blockchain.project_id and blockchain.account_key must be configured together")
 	}
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = "8080"

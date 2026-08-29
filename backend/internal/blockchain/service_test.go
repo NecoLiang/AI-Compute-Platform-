@@ -3,12 +3,26 @@ package blockchain
 import (
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+// testAccountKey 测试用 secp256k1 私钥(标量 1), 仅用于单元测试。
+const testAccountKey = "0000000000000000000000000000000000000000000000000000000000000001"
+
+func testCfg(gateway string) BSNConfig {
+	return BSNConfig{GatewayURL: gateway, ProjectID: "pid-test", AccountKey: testAccountKey,
+		ExplorerURL: "https://scan.test/tx/"}
+}
+
+func mustClient(t *testing.T, cfg BSNConfig) *BSNClient {
+	t.Helper()
+	c, err := NewBSNClient(cfg)
+	if err != nil {
+		t.Fatalf("NewBSNClient: %v", err)
+	}
+	return c
+}
 
 // TestComputeHash_Golden 锁定载荷序列化契约: 这个 hash 一旦变化, 说明有人改了
 // 载荷结构体的字段名/顺序/类型 —— 历史存证将无法重算, 必须阻止 (见 service.go 契约注释)。
@@ -48,23 +62,23 @@ func TestHashID_StableAndOpaque(t *testing.T) {
 }
 
 func TestNewService_SignSeed(t *testing.T) {
-	if _, err := NewService(nil, NewBSNClient(BSNConfig{}), "not-hex"); err == nil {
+	empty := mustClient(t, BSNConfig{})
+	if _, err := NewService(nil, empty, "not-hex"); err == nil {
 		t.Error("非法种子应报错")
 	}
-	if _, err := NewService(nil, NewBSNClient(BSNConfig{}), "abcd"); err == nil {
+	if _, err := NewService(nil, empty, "abcd"); err == nil {
 		t.Error("长度不足的种子应报错")
 	}
 	seed := strings.Repeat("ab", 32)
-	s, err := NewService(nil, NewBSNClient(BSNConfig{}), seed)
+	s, err := NewService(nil, empty, seed)
 	if err != nil {
 		t.Fatalf("合法种子报错: %v", err)
 	}
-	// 签名可被对应公钥验证
 	sig := ed25519.Sign(s.signKey, []byte("0xdeadbeef"))
 	if !ed25519.Verify(s.signKey.Public().(ed25519.PublicKey), []byte("0xdeadbeef"), sig) {
 		t.Error("Ed25519 签名验证失败")
 	}
-	s2, err := NewService(nil, NewBSNClient(BSNConfig{}), "")
+	s2, err := NewService(nil, empty, "")
 	if err != nil {
 		t.Fatalf("空种子应允许(暂不签名): %v", err)
 	}
@@ -73,63 +87,91 @@ func TestNewService_SignSeed(t *testing.T) {
 	}
 }
 
-func TestBSNClient_ConfiguredAndTxURL(t *testing.T) {
-	if NewBSNClient(BSNConfig{}).Configured() {
+func TestBSNClient_ConfiguredAndAddress(t *testing.T) {
+	if mustClient(t, BSNConfig{}).Configured() {
 		t.Error("空配置不应视为已接入")
 	}
-	if NewBSNClient(BSNConfig{GatewayURL: "https://x", APIKey: "k"}).Configured() {
-		t.Error("缺 contract_key 不应视为已接入")
+	if mustClient(t, BSNConfig{GatewayURL: "https://x", ProjectID: "p"}).Configured() {
+		t.Error("缺链账户私钥不应视为已接入")
 	}
-	b := NewBSNClient(BSNConfig{GatewayURL: "https://x", APIKey: "k", ContractKey: "c", ExplorerURL: "https://scan.example.com/tx/"})
-	if !b.Configured() {
+	if _, err := NewBSNClient(BSNConfig{AccountKey: "not-hex"}); err == nil {
+		t.Error("非法私钥应报错")
+	}
+
+	c := mustClient(t, testCfg("https://x"))
+	if !c.Configured() {
 		t.Error("三要素齐备应视为已接入")
 	}
-	if got := b.TxURL("0xabc"); got != "https://scan.example.com/tx/0xabc" {
+	// 地址推导金标: secp256k1 标量 1 的压缩公钥 → sha256 → ripemd160 → bech32(iaa)。
+	// 数据段与 BIP-173 标准向量(同公钥的 hash160)一致, 且已被文昌链节点 bech32 解码
+	// 接受(返回 account not found 而非解码错误)。该值变化说明地址推导被改坏。
+	const wantAddr = "iaa1w508d6qejxtdg4y5r3zarvary0c5xw7k0lhtdf"
+	if c.Address() != wantAddr {
+		t.Errorf("链账户地址推导变化:\n got=%s\nwant=%s", c.Address(), wantAddr)
+	}
+	if got := c.TxURL("ABCDEF"); got != "https://scan.test/tx/ABCDEF" {
 		t.Errorf("TxURL 拼接错误: %s", got)
 	}
-	if got := b.TxURL(""); got != "" {
+	if got := c.TxURL(""); got != "" {
 		t.Errorf("空 txID 应返回空串: %s", got)
 	}
 }
 
-func TestBSNClient_UploadHash(t *testing.T) {
-	var gotAuth, gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("x-api-key")
-		var m map[string]string
-		json.NewDecoder(r.Body).Decode(&m)
-		gotBody = m["hash"]
-		if r.URL.Path != "/api/v1/evidence" {
-			w.WriteHeader(404)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]any{"txId": "0xTX1"})
-	}))
-	defer srv.Close()
+// TestBSNClient_UploadThenVerify 用 fake Tendermint 网关做「编码 → 广播 → 按 hash
+// 查回 → 解码比对」的全链路往返: fake 端原样保存 TxRaw, VerifyHash 解码的是我们
+// 自己编码的字节 —— protobuf 编/解码任何一侧出错测试都会失败。
+func TestBSNClient_UploadThenVerify(t *testing.T) {
+	fake := newFakeChain(t)
+	c := mustClient(t, testCfg(fake.URL()))
 
-	b := NewBSNClient(BSNConfig{GatewayURL: srv.URL, APIKey: "key-1", ContractKey: "c1"})
-	txID, err := b.UploadHash(context.Background(), "0xhash1")
+	const hash = "0x1c4cb62ee24faffcf2282f50a270e200a1483e3541dab4bae83b8cd81b70ccc9"
+	txID, err := c.UploadHash(context.Background(), hash)
 	if err != nil {
-		t.Fatalf("UploadHash 失败: %v", err)
+		t.Fatalf("UploadHash: %v", err)
 	}
-	if txID != "0xTX1" || gotAuth != "key-1" || gotBody != "0xhash1" {
-		t.Errorf("请求/响应不符: txID=%s auth=%s hash=%s", txID, gotAuth, gotBody)
+	if txID == "" {
+		t.Fatal("未返回交易 hash")
+	}
+	if fake.lastPath != "/api/pid-test/rpc" {
+		t.Errorf("网关路径错误: %s", fake.lastPath)
+	}
+
+	ok, _, err := c.VerifyHash(context.Background(), txID, hash)
+	if err != nil || !ok {
+		t.Fatalf("回查比对应通过: ok=%v err=%v", ok, err)
+	}
+	ok, _, err = c.VerifyHash(context.Background(), txID, "0xanother")
+	if err != nil || ok {
+		t.Fatalf("digest 不同应比对失败: ok=%v err=%v", ok, err)
 	}
 
 	// 未配置时必须明确报错, 不得假装成功
-	if _, err := NewBSNClient(BSNConfig{}).UploadHash(context.Background(), "0x1"); err != ErrBSNNotConfigured {
+	if _, err := mustClient(t, BSNConfig{}).UploadHash(context.Background(), "0x1"); err != ErrBSNNotConfigured {
 		t.Errorf("未配置应返回 ErrBSNNotConfigured, got %v", err)
 	}
 }
 
-func TestBSNClient_UploadHash_GatewayError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(500)
-		w.Write([]byte("boom"))
-	}))
-	defer srv.Close()
-	b := NewBSNClient(BSNConfig{GatewayURL: srv.URL, APIKey: "k", ContractKey: "c"})
-	if _, err := b.UploadHash(context.Background(), "0x1"); err == nil {
+func TestBSNClient_GatewayError(t *testing.T) {
+	fake := newFakeChain(t)
+	fake.fail.Store(true)
+	c := mustClient(t, testCfg(fake.URL()))
+	if _, err := c.UploadHash(context.Background(), "0x1"); err == nil {
 		t.Error("网关 500 应返回错误")
+	}
+}
+
+func TestProtobufWireRoundtrip(t *testing.T) {
+	msg := append(append(pbString(1, "hello"), pbVarint(3, 42)...), pbBytes(2, []byte{0xff, 0x00})...)
+	if v, ok := pbField(msg, 1); !ok || string(v) != "hello" {
+		t.Errorf("pbField(1) = %q, %v", v, ok)
+	}
+	if v, ok := pbField(msg, 2); !ok || len(v) != 2 {
+		t.Errorf("pbField(2) = %v, %v", v, ok)
+	}
+	if v, ok := pbVarintField(msg, 3); !ok || v != 42 {
+		t.Errorf("pbVarintField(3) = %d, %v", v, ok)
+	}
+	if _, ok := pbField(msg, 9); ok {
+		t.Error("不存在的字段不应命中")
 	}
 }

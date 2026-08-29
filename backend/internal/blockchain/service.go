@@ -195,11 +195,11 @@ func (s *Service) Verify(ctx context.Context, targetType, targetID string) (*Ver
 		res.Note = "BSN 未接入, 仅完成库内 hash 比对, 不声称链上已验证"
 		return res, nil
 	}
-	if att.ChainStatus != "confirmed" {
+	if att.ChainStatus != "confirmed" || att.ChainTxID == nil {
 		res.Note = "存证尚未上链 (status=" + att.ChainStatus + ")"
 		return res, nil
 	}
-	exists, txID, err := s.bsn.VerifyHash(ctx, hashToCheck)
+	exists, txID, err := s.bsn.VerifyHash(ctx, *att.ChainTxID, hashToCheck)
 	if err != nil {
 		res.Note = "链上查询失败: " + err.Error()
 		return res, nil

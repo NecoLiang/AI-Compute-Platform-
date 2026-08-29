@@ -2,6 +2,7 @@ package blockchain
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -51,6 +52,11 @@ func (s *Service) processPendingOnce(ctx context.Context) {
 		}
 		txID, err := s.bsn.UploadHash(ctx, att.DataHash)
 		if err != nil {
+			// 链账户未开户是基础设施级状态: 整批等待, 不消耗单条存证的重试次数。
+			if errors.Is(err, ErrChainAccountMissing) {
+				slog.Warn("存证上链暂缓: 链账户未在链上开户, 待 BSN 门户绑定/充能量值后自动恢复", "error", err)
+				return
+			}
 			slog.Error("存证上链失败", "id", att.ID, "target", att.TargetType+"/"+att.TargetID,
 				"attempt", att.Attempts+1, "max", workerMaxAttempts, "error", err)
 			if rerr := s.repo.RecordFailure(att.ID, err.Error(), workerMaxAttempts); rerr != nil {

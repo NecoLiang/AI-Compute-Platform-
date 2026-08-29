@@ -3,11 +3,8 @@ package blockchain
 import (
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -65,31 +62,12 @@ func setupChainDB(t *testing.T) *sqlx.DB {
 	return db
 }
 
-// fakeBSN 返回可控的 BSN 网关: fail 非零时返回 500, 否则按序发 txId。
-func fakeBSN(t *testing.T, fail *atomic.Bool) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if fail.Load() {
-			w.WriteHeader(500)
-			w.Write([]byte("gateway down"))
-			return
-		}
-		switch r.URL.Path {
-		case "/api/v1/evidence":
-			json.NewEncoder(w).Encode(map[string]any{"txId": "0xTX-ok"})
-		case "/api/v1/evidence/query":
-			json.NewEncoder(w).Encode(map[string]any{"exists": true, "txId": "0xTX-ok"})
-		default:
-			w.WriteHeader(404)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
 func newTestService(t *testing.T, db *sqlx.DB, gatewayURL string) *Service {
 	t.Helper()
-	bsn := NewBSNClient(BSNConfig{GatewayURL: gatewayURL, APIKey: "k", ContractKey: "c", ExplorerURL: "https://scan.test/tx/"})
+	bsn, err := NewBSNClient(testCfg(gatewayURL))
+	if err != nil {
+		t.Fatalf("NewBSNClient: %v", err)
+	}
 	svc, err := NewService(NewRepository(db), bsn, strings.Repeat("cd", 32))
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -99,9 +77,8 @@ func newTestService(t *testing.T, db *sqlx.DB, gatewayURL string) *Service {
 
 func TestAttest_ThenWorkerConfirms(t *testing.T) {
 	db := setupChainDB(t)
-	var fail atomic.Bool
-	srv := fakeBSN(t, &fail)
-	svc := newTestService(t, db, srv.URL)
+	fake := newFakeChain(t)
+	svc := newTestService(t, db, fake.URL())
 
 	payload := ViolationPayload{TargetNo: "ORD1", Violation: "order_frozen", Conclusion: "risk_freeze"}
 	if err := svc.Attest("violation", "ORD1", payload); err != nil {
@@ -124,7 +101,7 @@ func TestAttest_ThenWorkerConfirms(t *testing.T) {
 	svc.processPendingOnce(context.Background())
 
 	att, _ = svc.repo.GetLatestAttestation("violation", "ORD1")
-	if att.ChainStatus != "confirmed" || att.ChainTxID == nil || *att.ChainTxID != "0xTX-ok" {
+	if att.ChainStatus != "confirmed" || att.ChainTxID == nil || *att.ChainTxID == "" {
 		t.Fatalf("上链后应 confirmed 并回写 TX ID (REQ-H-022): %+v", att)
 	}
 	if att.ConfirmedAt == nil {
@@ -134,10 +111,9 @@ func TestAttest_ThenWorkerConfirms(t *testing.T) {
 
 func TestWorker_RetryThenDeadLetterThenRequeue(t *testing.T) {
 	db := setupChainDB(t)
-	var fail atomic.Bool
-	fail.Store(true)
-	srv := fakeBSN(t, &fail)
-	svc := newTestService(t, db, srv.URL)
+	fake := newFakeChain(t)
+	fake.fail.Store(true)
+	svc := newTestService(t, db, fake.URL())
 
 	if err := svc.Attest("order", "ORD2", OrderPayload{OrderNo: "ORD2"}); err != nil {
 		t.Fatalf("Attest: %v", err)
@@ -160,7 +136,7 @@ func TestWorker_RetryThenDeadLetterThenRequeue(t *testing.T) {
 	}
 
 	// 故障恢复 → 补推 (REQ-H-021)。
-	fail.Store(false)
+	fake.fail.Store(false)
 	n, err := svc.RequeueFailed()
 	if err != nil || n != 1 {
 		t.Fatalf("补推重置失败: n=%d err=%v", n, err)
@@ -173,9 +149,8 @@ func TestWorker_RetryThenDeadLetterThenRequeue(t *testing.T) {
 
 func TestVerify_RecomputeAndTamperDetection(t *testing.T) {
 	db := setupChainDB(t)
-	var fail atomic.Bool
-	srv := fakeBSN(t, &fail)
-	svc := newTestService(t, db, srv.URL)
+	fake := newFakeChain(t)
+	svc := newTestService(t, db, fake.URL())
 
 	payload := OrderPayload{OrderNo: "ORD3", BuyerIDHash: HashID(1), SupplierIDHash: HashID(2), Spec: "s", TotalAmountFen: 100, PlacedAt: "2026-08-25T04:00:00Z"}
 	source := payload // 模拟业务库当前数据

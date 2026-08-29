@@ -108,12 +108,24 @@ func main() {
 	// 区块链存证 (T-057/T-058/T-059, docs/14)。BSN 未配置时存证照常落库为 pending,
 	// worker 待命, 配置上线后自动补推 —— 不阻塞业务。
 	blockchainRepo := blockchain.NewRepository(sqlDB)
-	bsnClient := blockchain.NewBSNClient(blockchain.BSNConfig{
+	bsnClient, err := blockchain.NewBSNClient(blockchain.BSNConfig{
 		GatewayURL:  cfg.Blockchain.GatewayURL,
-		APIKey:      cfg.Blockchain.APIKey,
-		ContractKey: cfg.Blockchain.ContractKey,
+		ProjectID:   cfg.Blockchain.ProjectID,
+		ProjectKey:  cfg.Blockchain.ProjectKey,
+		ChainID:     cfg.Blockchain.ChainID,
+		AccountKey:  cfg.Blockchain.AccountKey,
+		Denom:       cfg.Blockchain.Denom,
+		GasLimit:    cfg.Blockchain.GasLimit,
+		GasPrice:    cfg.Blockchain.GasPrice,
 		ExplorerURL: cfg.Blockchain.ExplorerURL,
 	})
+	if err != nil {
+		slog.Error("装配文昌链客户端失败", "error", err)
+		os.Exit(1)
+	}
+	if bsnClient.Configured() {
+		slog.Info("文昌链存证已接入", "链账户", bsnClient.Address())
+	}
 	blockchainSvc, err := blockchain.NewService(blockchainRepo, bsnClient, cfg.Blockchain.SignKeySeed)
 	if err != nil {
 		slog.Error("装配存证服务失败", "error", err)
