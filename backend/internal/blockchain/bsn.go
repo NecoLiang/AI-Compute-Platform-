@@ -316,8 +316,8 @@ func (b *BSNClient) rpc(ctx context.Context, method string, params map[string]an
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if b.cfg.ProjectKey != "" {
-		// BSN 网关约定的项目密钥请求头; 项目未启用密钥校验时无需携带。
-		req.Header.Set("projectKey", b.cfg.ProjectKey)
+		// 项目启用 key 校验后必须携带, 头名为 x-api-key (BSN 手册 7.3.1「网关地址规则」)。
+		req.Header.Set("x-api-key", b.cfg.ProjectKey)
 	}
 	res, err := b.http.Do(req)
 	if err != nil {
