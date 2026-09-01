@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"tokenfactory/internal/admin"
+	"tokenfactory/internal/agentsearch"
 	"tokenfactory/internal/auth"
 	"tokenfactory/internal/blockchain"
 	"tokenfactory/internal/compute"
@@ -17,6 +18,7 @@ import (
 	"tokenfactory/internal/invoice"
 	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
+	"tokenfactory/internal/scheduler"
 	"tokenfactory/internal/ticket"
 	"tokenfactory/internal/user"
 
@@ -43,6 +45,8 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	adminH := admin.NewHandler(nil)
 	userH := user.NewHandler(nil)
 	blockchainH := blockchain.NewHandler(nil)
+	agentSearchH := agentsearch.NewHandler(nil)
+	schedulerH := scheduler.NewHandler(nil)
 	authH := auth.NewHandler(nil, nil)
 
 	r := gin.New()
@@ -54,6 +58,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	equipmentH.RegisterPublicRoutes(public)
 	collateralH.RegisterPublicRoutes(public)
 	blockchainH.RegisterRoutes(public)
+	schedulerH.RegisterNodeRoutes(public)
 
 	protected := r.Group("/api/v1")
 	authH.RegisterProtectedRoutes(protected)
@@ -61,6 +66,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 
 	buyer := r.Group("/api/v1")
 	computeH.RegisterBuyerRoutes(buyer)
+	agentSearchH.RegisterBuyerRoutes(buyer)
 	invoiceH.RegisterBuyerRoutes(buyer)
 	ticketH.RegisterBuyerRoutes(buyer)
 	notificationH.RegisterBuyerRoutes(buyer)
@@ -70,6 +76,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	supplier := r.Group("/api/v1")
 	computeH.RegisterSupplierRoutes(supplier)
 	paymentH.RegisterSupplierRoutes(supplier)
+	schedulerH.RegisterSupplierRoutes(supplier)
 
 	vendor := r.Group("/api/v1")
 	intermediaryH.RegisterVendorRoutes(vendor)
@@ -85,6 +92,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	collateralH.RegisterAdminRoutes(adminRoute)
 	adminH.RegisterRoutes(adminRoute)
 	blockchainH.RegisterAdminRoutes(adminRoute)
+	schedulerH.RegisterAdminRoutes(adminRoute)
 
 	paymentH.RegisterCallbackRoutes(r.Group("/api/v1"))
 

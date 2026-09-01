@@ -867,6 +867,11 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if p.Status != "active" {
 		return nil, fmt.Errorf("product not available")
 	}
+	// 节点探活联动: 供应方节点全部离线的商品拦截下单, 避免收了钱交付不出资源。
+	// unknown(未接入探活)不拦截, 存量商品不受影响。
+	if p.Health == "offline" {
+		return nil, fmt.Errorf("供应方算力节点已全部离线, 该商品暂不可下单")
+	}
 
 	qty, dur, err := ValidateOrderParams(p, req.Quantity, req.Duration)
 	if err != nil {

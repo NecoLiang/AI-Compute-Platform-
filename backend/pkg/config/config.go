@@ -15,6 +15,16 @@ type Config struct {
 	SMS        SMSConfig
 	Security   SecurityConfig
 	Blockchain BlockchainConfig
+	AI         AIConfig
+}
+
+// AIConfig 智能搜索的模型网关(OpenAI 兼容 /chat/completions)。
+// 三项配齐才启用; 未配置时智能搜索接口返回明确错误, 不做规则降级。
+type AIConfig struct {
+	BaseURL        string // 如 https://your-gateway/v1
+	APIKey         string // 生产从环境变量 AI_API_KEY 注入
+	Model          string
+	TimeoutSeconds int
 }
 
 type ServerConfig struct {
@@ -118,6 +128,12 @@ func Load(path string) (*Config, error) {
 			CapSecret:        v.GetString("security.cap_secret"),
 			CapTestToken:     v.GetString("security.cap_test_token"),
 		},
+		AI: AIConfig{
+			BaseURL:        v.GetString("ai.base_url"),
+			APIKey:         v.GetString("ai.api_key"),
+			Model:          v.GetString("ai.model"),
+			TimeoutSeconds: v.GetInt("ai.timeout_seconds"),
+		},
 		Blockchain: BlockchainConfig{
 			GatewayURL:  v.GetString("blockchain.gateway_url"),
 			ProjectID:   v.GetString("blockchain.project_id"),
@@ -161,6 +177,15 @@ func Load(path string) (*Config, error) {
 	}
 	if bsnSet != 0 && bsnSet != 3 {
 		return nil, fmt.Errorf("blockchain.gateway_url, blockchain.project_id and blockchain.account_key must be configured together")
+	}
+	aiSet := 0
+	for _, s := range []string{cfg.AI.BaseURL, cfg.AI.APIKey, cfg.AI.Model} {
+		if s != "" {
+			aiSet++
+		}
+	}
+	if aiSet != 0 && aiSet != 3 {
+		return nil, fmt.Errorf("ai.base_url, ai.api_key and ai.model must be configured together")
 	}
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = "8080"

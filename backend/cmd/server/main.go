@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 	"tokenfactory/internal/admin"
+	"tokenfactory/internal/agentsearch"
 	"tokenfactory/internal/auth"
 	"tokenfactory/internal/blockchain"
 	"tokenfactory/internal/compute"
@@ -17,6 +18,7 @@ import (
 	"tokenfactory/internal/invoice"
 	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
+	"tokenfactory/internal/scheduler"
 	"tokenfactory/internal/sms"
 	"tokenfactory/internal/ticket"
 	"tokenfactory/internal/user"
@@ -101,6 +103,20 @@ func main() {
 	computeSvc.SetNotifier(notificationSvc)
 	invoiceSvc.SetNotifier(notificationSvc)
 	ticketSvc.SetNotifier(notificationSvc)
+	// 智能搜索 (市场页智能选型): LLM 只做需求解析, 商品匹配由平台代码确定性完成。
+	llmClient := agentsearch.NewLLMClient(agentsearch.LLMConfig{
+		BaseURL: cfg.AI.BaseURL, APIKey: cfg.AI.APIKey, Model: cfg.AI.Model, TimeoutSeconds: cfg.AI.TimeoutSeconds,
+	})
+	agentSearchSvc := agentsearch.NewService(llmClient, computeSvc)
+	if !llmClient.Configured() {
+		slog.Warn("智能搜索未接入: 配置 ai.base_url + ai.api_key + ai.model 后启用")
+	}
+
+	// 节点探活与容量调度 (docs/23): 心跳 → 健康聚合 → 商品下单闸门 + 调度建议。
+	schedulerRepo := scheduler.NewRepository(sqlDB)
+	schedulerSvc := scheduler.NewService(schedulerRepo)
+	schedulerSvc.SetNotifier(notificationSvc)
+
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
 	adminRepo := admin.NewRepository(sqlDB)
@@ -157,6 +173,7 @@ func main() {
 	equipment.NewHandler(equipmentSvc).RegisterPublicRoutes(public)
 	intermediary.NewCollateralHandler(collateralSvc).RegisterPublicRoutes(public)
 	blockchain.NewHandler(blockchainSvc).RegisterRoutes(public)
+	scheduler.NewHandler(schedulerSvc).RegisterNodeRoutes(public)
 
 	// Authenticated API
 	protected := r.Group("/api/v1")
@@ -168,6 +185,7 @@ func main() {
 	buyer := r.Group("/api/v1")
 	buyer.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
 	compute.NewHandler(computeSvc).RegisterBuyerRoutes(buyer)
+	agentsearch.NewHandler(agentSearchSvc).RegisterBuyerRoutes(buyer)
 	invoice.NewHandler(invoiceSvc).RegisterBuyerRoutes(buyer)
 	ticket.NewHandler(ticketSvc).RegisterBuyerRoutes(buyer)
 	notification.NewHandler(notificationSvc).RegisterBuyerRoutes(buyer)
@@ -184,6 +202,7 @@ func main() {
 	supplier.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb), mw.RBAC("supplier"))
 	compute.NewHandler(computeSvc).RegisterSupplierRoutes(supplier)
 	payment.NewHandler(paymentSvc).RegisterSupplierRoutes(supplier)
+	scheduler.NewHandler(schedulerSvc).RegisterSupplierRoutes(supplier)
 
 	// Vendor API
 	vendor := r.Group("/api/v1")
@@ -203,6 +222,7 @@ func main() {
 	intermediary.NewCollateralHandler(collateralSvc).RegisterAdminRoutes(adminRoute)
 	admin.NewHandler(adminSvc).RegisterRoutes(adminRoute)
 	blockchain.NewHandler(blockchainSvc).RegisterAdminRoutes(adminRoute)
+	scheduler.NewHandler(schedulerSvc).RegisterAdminRoutes(adminRoute)
 
 	// Payment callback (no auth, signature verification)
 	payment.NewHandler(paymentSvc).RegisterCallbackRoutes(r.Group("/api/v1"))
@@ -250,9 +270,10 @@ func main() {
 		}
 	}()
 
-	// 存证上链 worker (T-058)。
+	// 存证上链 worker (T-058) 与节点探活 sweep (docs/23)。
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	go blockchainSvc.RunWorker(workerCtx)
+	go schedulerSvc.RunLivenessSweep(workerCtx)
 
 	go func() {
 		slog.Info("server starting", "port", cfg.Server.Port)

@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +40,12 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 	root.MustExec("CREATE DATABASE " + stockTestDB + " CHARACTER SET utf8mb4")
 
 	// loc 必须与库的会话时区一致, 否则时间戳会有 8 小时偏移, 测出来的是假结果。
-	db, err := sqlx.Connect("mysql", dsn+stockTestDB+"?parseTime=true&loc=Asia%2FShanghai")
+	// DSN 统一为文件头注释的 "/?" 格式, 与 blockchain/scheduler 集成测试共用一个环境变量。
+	testDSN := strings.Replace(dsn, "/?", "/"+stockTestDB+"?", 1)
+	if !strings.Contains(testDSN, "loc=") {
+		testDSN += "&loc=Asia%2FShanghai"
+	}
+	db, err := sqlx.Connect("mysql", testDSN)
 	if err != nil { t.Fatalf("连接测试库失败: %v", err) }
 
 	db.MustExec(`CREATE TABLE products (

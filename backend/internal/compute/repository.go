@@ -53,7 +53,10 @@ type Product struct {
 	MinDuration       int       `db:"min_duration" json:"min_duration"`
 	Region            string    `db:"region" json:"region"`
 	Status            string    `db:"status" json:"status"`
-	SelfOperated      bool      `db:"self_operated" json:"self_operated"`
+	// Health 节点探活聚合的健康度(unknown/healthy/degraded/offline), 由 scheduler 模块维护。
+	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
+	Health       string `db:"health" json:"health"`
+	SelfOperated bool   `db:"self_operated" json:"self_operated"`
 	ComplianceAgreed  bool      `db:"compliance_agreed" json:"compliance_agreed"`
 	CreatedAt         time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time `db:"updated_at" json:"updated_at"`
@@ -141,7 +144,7 @@ const productColumns = `id, supplier_id, product_type,
 	COALESCE(delivery_mode,'') AS delivery_mode, pricing_mode, unit_price,
 	COALESCE(price_negotiable,0) AS price_negotiable, COALESCE(available_hours,'') AS available_hours,
 	stock, COALESCE(min_order,1) AS min_order, COALESCE(min_duration,1) AS min_duration,
-	COALESCE(region,'') AS region, status, COALESCE(self_operated,0) AS self_operated,
+	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, created_at, updated_at`
 
 const orderColumns = `id, order_no, buyer_id, product_id, quantity, duration, unit_price,

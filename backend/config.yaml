@@ -37,6 +37,14 @@ security:
   cap_siteverify_url: ""
   cap_secret: ""
 
+ai:
+  # 智能搜索的模型网关(OpenAI 兼容 /chat/completions)。三项要么全空(未接入:
+  # 智能搜索接口返回明确错误), 要么全配。生产从环境变量 AI_BASE_URL/AI_API_KEY/AI_MODEL 注入。
+  base_url: ""
+  api_key: ""
+  model: ""
+  timeout_seconds: 30
+
 blockchain:
   # BSN 开放联盟链·文昌链存证 (docs/14)。存证走链原生 irismod.record 模块, 无需合约。
   # gateway_url/project_id 来自 BSN 门户「项目管理 → 下载接入参数」。
