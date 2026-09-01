@@ -117,9 +117,13 @@ func TestSearch_RateLimit(t *testing.T) {
 }
 
 // 用户没明确说卡数时, 用算力推定的 min_cards 兜底做库存匹配。
+// min_cards 给 7.5 这类小数时向上取整(算力宁多勿少)。
 func TestMatchProducts_MinCardsFallback(t *testing.T) {
-	req := parsedRequirement{Relevant: true, GPUModels: []string{"H100"},
-		ComputeEstimate: ComputeEstimate{MinCards: 8}}
+	req := parsedRequirement{Relevant: true, GPUModels: []string{"H100"}}
+	req.RawEstimate.MinCards = 7.5
+	if req.needCards() != 8 {
+		t.Fatalf("min_cards 7.5 应向上取整为 8, got %d", req.needCards())
+	}
 	matches := matchProducts(req, sampleProducts())
 	if len(matches) != 1 {
 		t.Fatalf("只应命中 H100: %+v", matches)

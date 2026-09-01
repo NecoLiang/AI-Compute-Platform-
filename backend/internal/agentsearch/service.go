@@ -12,6 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -67,35 +69,53 @@ card_count 是用户明确指定的卡数(没说就填 0, 由 min_cards 兜底);
 // ComputeEstimate 算力推定: 由任务类型推导显存与卡数, basis 必须带数字依据。
 // 这是智能选型的核心输出 —— 用户看到的不是"给你搜了几个商品", 而是
 // "你的任务需要多大算力、为什么、平台哪些机型满足"。
+// 数值字段全部 float64: 模型会输出 228.8 这类小数, int 声明会解析失败(生产教训)。
 type ComputeEstimate struct {
-	TotalVRAMGB   int    `json:"total_vram_gb"`
-	PerCardVRAMGB int    `json:"per_card_vram_gb"`
-	MinCards      int    `json:"min_cards"`
-	ComputeClass  string `json:"compute_class"`
-	Basis         string `json:"basis"`
+	TotalVRAMGB   float64 `json:"total_vram_gb"`
+	PerCardVRAMGB float64 `json:"per_card_vram_gb"`
+	MinCards      int     `json:"min_cards"`
+	ComputeClass  string  `json:"compute_class"`
+	Basis         string  `json:"basis"`
 }
 
-// parsedRequirement LLM 的需求解析结果。
+// parsedRequirement LLM 的需求解析结果。数值一律 float64 容错解析(见 normalize)。
 type parsedRequirement struct {
-	Relevant        bool            `json:"relevant"`
-	RejectReason    string          `json:"reject_reason"`
-	Purpose         string          `json:"purpose"`
-	ComputeEstimate ComputeEstimate `json:"compute_estimate"`
-	GPUModels       []string        `json:"gpu_models"`
-	CardCount       int             `json:"card_count"`
-	PricingMode     string          `json:"pricing_mode"`
-	DurationHint    int             `json:"duration_hint"`
-	BudgetFenMax    int64           `json:"budget_fen_max"`
-	Region          string          `json:"region"`
-	AnalysisSteps   []AnalysisStep  `json:"analysis_steps"`
+	Relevant     bool   `json:"relevant"`
+	RejectReason string `json:"reject_reason"`
+	Purpose      string `json:"purpose"`
+	RawEstimate  struct {
+		TotalVRAMGB   float64 `json:"total_vram_gb"`
+		PerCardVRAMGB float64 `json:"per_card_vram_gb"`
+		MinCards      float64 `json:"min_cards"`
+		ComputeClass  string  `json:"compute_class"`
+		Basis         string  `json:"basis"`
+	} `json:"compute_estimate"`
+	GPUModels     []string       `json:"gpu_models"`
+	CardCount     float64        `json:"card_count"`
+	PricingMode   string         `json:"pricing_mode"`
+	DurationHint  float64        `json:"duration_hint"`
+	BudgetFenMax  float64        `json:"budget_fen_max"`
+	Region        string         `json:"region"`
+	AnalysisSteps []AnalysisStep `json:"analysis_steps"`
+}
+
+// estimate 把 LLM 的原始推定归一化: 卡数向上取整(算力宁多勿少)。
+func (r parsedRequirement) estimate() ComputeEstimate {
+	return ComputeEstimate{
+		TotalVRAMGB:   r.RawEstimate.TotalVRAMGB,
+		PerCardVRAMGB: r.RawEstimate.PerCardVRAMGB,
+		MinCards:      int(math.Ceil(r.RawEstimate.MinCards)),
+		ComputeClass:  r.RawEstimate.ComputeClass,
+		Basis:         r.RawEstimate.Basis,
+	}
 }
 
 // needCards 匹配用卡数: 用户明确指定优先, 否则用算力推定的最小卡数兜底。
 func (r parsedRequirement) needCards() int {
-	if r.CardCount > 0 {
-		return r.CardCount
+	if c := int(math.Round(r.CardCount)); c > 0 {
+		return c
 	}
-	return r.ComputeEstimate.MinCards
+	return r.estimate().MinCards
 }
 
 type AnalysisStep struct {
@@ -158,26 +178,37 @@ func (s *Service) Search(ctx context.Context, userID int64, query string) (*Sear
 		return nil, fmt.Errorf("读取在售商品失败: %w", err)
 	}
 	models := distinctGPUModels(products)
+	modelList := strings.Join(models, "、")
+	if modelList == "" {
+		// 平台暂无在售商品时算力推定照常输出(这才是核心价值), 型号给通用建议。
+		modelList = "(当前平台暂无在售型号, gpu_models 请输出你建议的主流型号)"
+	}
 
-	system := fmt.Sprintf(systemPromptTmpl, strings.Join(models, "、"))
+	system := fmt.Sprintf(systemPromptTmpl, modelList)
 	content, err := s.llm.ChatJSON(ctx, system, query)
 	if err != nil {
 		return nil, err
 	}
 	var req parsedRequirement
 	if err := json.Unmarshal([]byte(stripCodeFence(content)), &req); err != nil {
+		raw := content
+		if len(raw) > 300 {
+			raw = raw[:300]
+		}
+		slog.Error("需求解析结果不合法", "error", err, "raw", raw)
 		return nil, fmt.Errorf("需求解析结果不合法: %w", err)
 	}
 
+	est := req.estimate()
 	res := &SearchResult{
 		Relevant:        req.Relevant,
 		RejectReason:    req.RejectReason,
 		AnalysisSteps:   req.AnalysisSteps,
-		ComputeEstimate: &req.ComputeEstimate,
+		ComputeEstimate: &est,
 		Requirement: map[string]any{
 			"purpose": req.Purpose, "gpu_models": req.GPUModels, "card_count": req.needCards(),
-			"pricing_mode": req.PricingMode, "duration_hint": req.DurationHint,
-			"budget_fen_max": req.BudgetFenMax, "region": req.Region,
+			"pricing_mode": req.PricingMode, "duration_hint": int(math.Round(req.DurationHint)),
+			"budget_fen_max": int64(math.Round(req.BudgetFenMax)), "region": req.Region,
 		},
 		Matches: []Match{},
 	}
@@ -228,7 +259,7 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 		}
 
 		if req.BudgetFenMax > 0 {
-			qty, dur := need, req.DurationHint
+			qty, dur := need, int(math.Round(req.DurationHint))
 			if qty <= 0 {
 				qty = 1
 			}
@@ -236,7 +267,7 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 				dur = 1
 			}
 			est := p.UnitPrice * int64(qty) * int64(dur)
-			if est <= req.BudgetFenMax {
+			if est <= int64(math.Round(req.BudgetFenMax)) {
 				score += 20
 				reasons = append(reasons, fmt.Sprintf("预估费用 %.2f 元在预算内", float64(est)/100))
 			} else {

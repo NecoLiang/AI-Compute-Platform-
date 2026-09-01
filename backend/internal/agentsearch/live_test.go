@@ -34,7 +34,7 @@ func TestLive_ComputeEstimation(t *testing.T) {
 	}
 	// 72B INT8 推理 ≈ 72×1×1.3 ≈ 94GB, 合理区间宽松校验(防模型波动误报)
 	if ce.TotalVRAMGB < 60 || ce.TotalVRAMGB > 250 {
-		t.Errorf("72B INT8 推理显存推定 %dGB 明显失真", ce.TotalVRAMGB)
+		t.Errorf("72B INT8 推理显存推定 %.1fGB 明显失真", ce.TotalVRAMGB)
 	}
 	t.Logf("算力推定: %+v", *ce)
 	for _, s := range res.AnalysisSteps {
