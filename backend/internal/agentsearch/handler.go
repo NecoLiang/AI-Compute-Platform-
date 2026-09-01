@@ -2,6 +2,7 @@ package agentsearch
 
 import (
 	"errors"
+	"log/slog"
 	"unicode/utf8"
 
 	"tokenfactory/pkg/errcode"
@@ -40,6 +41,8 @@ func (h *Handler) Search(c *gin.Context) {
 		case errors.Is(err, ErrAINotConfigured):
 			response.Error(c, errcode.InternalError, err.Error())
 		default:
+			// 对外话术保持模糊, 但内部必须留全量错误 —— 排障靠它。
+			slog.Error("智能搜索失败", "error", err, "request_id", c.GetString("request_id"))
 			response.Error(c, errcode.InternalError, "智能搜索暂时不可用, 请稍后再试")
 		}
 		return
