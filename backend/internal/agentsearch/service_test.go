@@ -43,10 +43,12 @@ func fakeLLM(t *testing.T, parsed string) *LLMClient {
 
 func TestSearch_EndToEnd(t *testing.T) {
 	parsed := `{"relevant":true,"reject_reason":"","purpose":"7B 模型微调",
+		"compute_estimate":{"total_vram_gb":124,"per_card_vram_gb":80,"min_cards":8,
+		  "compute_class":"训练-中等规模","basis":"7B×16字节×1.1≈124GB, 按80G卡向上取整并按2的幂对齐为8卡"},
 		"gpu_models":["A100-80G"],"card_count":8,"pricing_mode":"monthly","duration_hint":1,
 		"budget_fen_max":20000000,"region":"华北",
 		"analysis_steps":[{"title":"识别任务类型","detail":"7B 模型微调, 需要大显存"},
-		{"title":"推导硬件配置","detail":"建议 8 卡 A100-80G"}]}`
+		{"title":"算力推定","detail":"约需 124GB 显存, 建议 8 卡 A100-80G"}]}`
 	svc := NewService(fakeLLM(t, parsed), fakeLister{sampleProducts()})
 
 	res, err := svc.Search(context.Background(), 1, "我要微调一个7B模型, 预算每月20万")
@@ -55,6 +57,9 @@ func TestSearch_EndToEnd(t *testing.T) {
 	}
 	if !res.Relevant || len(res.AnalysisSteps) != 2 {
 		t.Fatalf("分析过程缺失: %+v", res)
+	}
+	if res.ComputeEstimate == nil || res.ComputeEstimate.MinCards != 8 || res.ComputeEstimate.Basis == "" {
+		t.Fatalf("算力推定缺失: %+v", res.ComputeEstimate)
 	}
 	if len(res.Matches) == 0 || res.Matches[0].Product.ID != 1 {
 		t.Fatalf("应匹配到 A100-80G 商品: %+v", res.Matches)
@@ -108,6 +113,20 @@ func TestSearch_RateLimit(t *testing.T) {
 	// 其他用户不受影响
 	if _, err := svc.Search(context.Background(), 8, "A100"); err != nil {
 		t.Errorf("不同用户不应被连坐: %v", err)
+	}
+}
+
+// 用户没明确说卡数时, 用算力推定的 min_cards 兜底做库存匹配。
+func TestMatchProducts_MinCardsFallback(t *testing.T) {
+	req := parsedRequirement{Relevant: true, GPUModels: []string{"H100"},
+		ComputeEstimate: ComputeEstimate{MinCards: 8}}
+	matches := matchProducts(req, sampleProducts())
+	if len(matches) != 1 {
+		t.Fatalf("只应命中 H100: %+v", matches)
+	}
+	joined := strings.Join(matches[0].Reasons, ";")
+	if !strings.Contains(joined, "不足 8 卡") {
+		t.Errorf("应按推定的 8 卡校验库存: %v", matches[0].Reasons)
 	}
 }
 
