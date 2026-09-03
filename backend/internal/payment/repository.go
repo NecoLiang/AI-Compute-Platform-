@@ -1,6 +1,8 @@
 package payment
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
 	"time"
@@ -168,10 +170,10 @@ type onboardRow struct {
 func (r *Repository) GetOnboardStatus(userID int64) (string, error) {
 	var row onboardRow
 	err := r.db.Get(&row, "SELECT status FROM yeepay_onboard WHERE user_id=?", userID)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "not_started", nil
 	}
-	return row.Status, nil
+	return row.Status, err
 }
 
 // Yeepay onboard table (simple)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -383,6 +384,78 @@ func (s *Service) BuildDeliveryAttestPayload(orderNo string) (blockchain.Deliver
 
 // ===== Qualifications (T-009, T-010) =====
 
+type SupplierOnboardingReq struct {
+	CompanyName             string `json:"company_name"`
+	CreditCode              string `json:"credit_code"`
+	Representative          string `json:"representative"`
+	RepresentativeIDNumber  string `json:"representative_id_number"`
+	BusinessLicenseFileName string `json:"business_license_file_name"`
+	BusinessLicenseType     string `json:"-"`
+	BusinessLicenseData     []byte `json:"-"`
+	ContactMethod           string `json:"contact_method"`
+	BankName                string `json:"bank_name"`
+	AccountName             string `json:"account_name"`
+	AccountNumber           string `json:"account_number"`
+	FacilityAddress         string `json:"facility_address"`
+	HasIDCLicense           bool   `json:"has_idc_license"`
+	PowerDescription        string `json:"power_description"`
+	CoolingDescription      string `json:"cooling_description"`
+}
+
+var supplierIdentityNumberPattern = regexp.MustCompile(`^(?:\d{15}|\d{17}[\dXx])$`)
+var supplierAccountNumberPattern = regexp.MustCompile(`^\d{8,32}$`)
+
+func ValidateSupplierOnboardingReq(req SupplierOnboardingReq) error {
+	required := []struct{ name, value string }{
+		{"企业名称", req.CompanyName}, {"法定代表人", req.Representative},
+		{"营业执照", req.BusinessLicenseFileName}, {"业务联系人", req.ContactMethod},
+		{"开户银行", req.BankName}, {"账户名称", req.AccountName},
+		{"机房地址", req.FacilityAddress}, {"供电说明", req.PowerDescription}, {"散热说明", req.CoolingDescription},
+	}
+	for _, field := range required {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("请填写%s", field.name)
+		}
+	}
+	if len(strings.TrimSpace(req.CreditCode)) != 18 {
+		return fmt.Errorf("统一社会信用代码需为 18 位")
+	}
+	if !supplierIdentityNumberPattern.MatchString(strings.TrimSpace(req.RepresentativeIDNumber)) {
+		return fmt.Errorf("法定代表人证件号格式不正确")
+	}
+	if !supplierAccountNumberPattern.MatchString(strings.TrimSpace(req.AccountNumber)) {
+		return fmt.Errorf("银行账号需为 8–32 位数字")
+	}
+	if !req.HasIDCLicense {
+		return fmt.Errorf("请确认已具备 IDC 经营资质")
+	}
+	if len(req.BusinessLicenseData) == 0 {
+		return fmt.Errorf("请选择营业执照文件")
+	}
+	return nil
+}
+
+func (s *Service) SubmitSupplierApplication(userID int64, req SupplierOnboardingReq) (*SupplierQualification, error) {
+	if err := ValidateSupplierOnboardingReq(req); err != nil {
+		return nil, err
+	}
+	return s.repo.CreateSupplierApplication(userID, req)
+}
+
+func (s *Service) GetSupplierApplications(userID int64) ([]SupplierQualification, error) {
+	list, err := s.repo.GetQualificationsByUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]SupplierQualification, 0, len(list))
+	for _, item := range list {
+		if item.QualType == "supplier_onboarding" {
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) SubmitQualification(userID int64, qualType, certName, certNumber, certURL string, expiresAt *time.Time) (int64, error) {
 	q := &SupplierQualification{
 		UserID:     userID,
@@ -399,16 +472,20 @@ func (s *Service) GetMyQualifications(userID int64) ([]SupplierQualification, er
 	return s.repo.GetQualificationsByUser(userID)
 }
 
-func (s *Service) ApproveQualification(id int64) error {
-	return s.repo.UpdateQualificationStatus(id, "verified", "")
+func (s *Service) ApproveQualification(id, operatorID int64, ip string) error {
+	return s.repo.ReviewQualification(id, "verified", "", operatorID, ip)
 }
 
-func (s *Service) RejectQualification(id int64, reason string) error {
-	return s.repo.UpdateQualificationStatus(id, "rejected", reason)
+func (s *Service) RejectQualification(id, operatorID int64, reason, ip string) error {
+	return s.repo.ReviewQualification(id, "rejected", strings.TrimSpace(reason), operatorID, ip)
 }
 
-func (s *Service) GetPendingQualifications() ([]SupplierQualification, error) {
-	return s.repo.GetPendingQualifications()
+func (s *Service) GetAdminQualifications(status string) ([]SupplierQualification, error) {
+	return s.repo.GetAdminQualifications(status)
+}
+
+func (s *Service) GetQualificationDocument(id int64) (string, string, []byte, error) {
+	return s.repo.GetQualificationDocument(id)
 }
 
 // ===== Products (T-011, T-012, C-01, C-02) =====

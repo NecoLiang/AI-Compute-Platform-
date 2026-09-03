@@ -56,3 +56,26 @@ func TestMeNeverReturnsRawPhoneFromTokenClaims(t *testing.T) {
 	assert.NotContains(t, recorder.Body.String(), "13800138000")
 	assert.Contains(t, recorder.Body.String(), "138****8000")
 }
+
+func TestMeReturnsCurrentDatabaseRolesInsteadOfStaleTokenClaims(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newFakeUserRepository()
+	userID, err := repo.CreateUser("13800138000", "", "")
+	require.NoError(t, err)
+
+	svc := newSMSService(repo, &fakeSMSSender{}, &fakeSMSCodeStore{})
+	svc.userRoleRepo = fixedRoleRepository{roles: []string{"buyer", "supplier"}}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Set("user_id", userID)
+	ctx.Set("roles", []string{"buyer"})
+	NewHandler(svc, nil).Me(ctx)
+
+	assert.Contains(t, recorder.Body.String(), `"roles":["buyer","supplier"]`)
+}
+
+type fixedRoleRepository struct {
+	roles []string
+}
+
+func (r fixedRoleRepository) GetRoles(int64) ([]string, error) { return r.roles, nil }

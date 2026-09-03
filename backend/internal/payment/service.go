@@ -1,6 +1,8 @@
 package payment
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -60,7 +62,10 @@ func (s *Service) HandleCallback(req CallbackReq) error {
 		return err
 	}
 
-	existing, _ := s.repo.GetPaymentByYeepayTx(req.TxID)
+	existing, err := s.repo.GetPaymentByYeepayTx(req.TxID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	if existing != nil && existing.Status == "paid" {
 		return nil // idempotent
 	}
@@ -78,23 +83,28 @@ func (s *Service) CreateSplit(orderNo string, totalAmount int64) error {
 
 	// Platform fee
 	sid1 := uuid.New().String()
-	s.repo.CreateSettlement(&Settlement{SettlementID: sid1, OrderNo: orderNo, PayeeType: "platform", PayeeID: 0, Amount: feeAmount})
+	if err := s.repo.CreateSettlement(&Settlement{SettlementID: sid1, OrderNo: orderNo, PayeeType: "platform", PayeeID: 0, Amount: feeAmount}); err != nil {
+		return err
+	}
 
 	// Supplier
 	sid2 := uuid.New().String()
-	s.repo.CreateSettlement(&Settlement{SettlementID: sid2, OrderNo: orderNo, PayeeType: "supplier", PayeeID: 0, Amount: supplierAmount})
+	if err := s.repo.CreateSettlement(&Settlement{SettlementID: sid2, OrderNo: orderNo, PayeeType: "supplier", PayeeID: 0, Amount: supplierAmount}); err != nil {
+		return err
+	}
 
-	s.yeepay.CreateSplit(orderNo, []SplitItem{
+	if err := s.yeepay.CreateSplit(orderNo, []SplitItem{
 		{PayeeType: "platform", Amount: feeAmount},
 		{PayeeType: "supplier", Amount: supplierAmount},
-	})
+	}); err != nil {
+		return err
+	}
 	return nil
 }
 
 // T-030: Refund
 func (s *Service) Refund(orderNo string) error {
-	s.repo.UpdatePaymentStatus(orderNo, "refunded")
-	return nil
+	return s.repo.UpdatePaymentStatus(orderNo, "refunded")
 }
 
 // T-032: Daily reconciliation

@@ -218,6 +218,13 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 
 ---
 
+## GET /supplier-applications · 我的供给方入驻申请 ✅ authenticated
+## POST /supplier-applications · 提交供给方入驻申请 ✅ authenticated + KYC
+
+POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且不超过 5MB；完整字段和文件内容写入 MySQL。审核通过后，服务端在同一事务中将申请置为 `verified`、授予 `supplier` 角色并写入审计日志。用户不能通过通用角色接口绕过审核。
+
+---
+
 ## GET /supplier/products · 我的商品 ✅ supplier
 ## GET /supplier/orders · 供给方订单 ✅ supplier
 ## GET /supplier/qualifications · 我的资质 ✅ supplier

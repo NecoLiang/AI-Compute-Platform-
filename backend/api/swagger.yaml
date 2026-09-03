@@ -421,16 +421,21 @@ paths:
       tags: [用户 User]
       summary: 企业认证（试运行阶段自动通过）
       requestBody:
+        required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
               type: object
-              required: [enterprise_name, uscc, license_url, legal_person]
+              required: [enterprise_name, uscc, legal_person, legal_person_id_card, bank_name, bank_account_name, bank_account_number, business_license]
               properties:
                 enterprise_name: { type: string, example: "某科技有限公司" }
                 uscc: { type: string }
-                license_url: { type: string }
                 legal_person: { type: string }
+                legal_person_id_card: { type: string }
+                bank_name: { type: string }
+                bank_account_name: { type: string }
+                bank_account_number: { type: string }
+                business_license: { type: string, format: binary, description: "PDF/JPG/PNG，最大 5MB" }
 
   /user/kyc/status:
     get:
@@ -439,19 +444,6 @@ paths:
       responses:
         '200': { description: "OK", content: { application/json: { schema: { allOf: [{ $ref: '#/components/schemas/Response' }, { type: object, properties: { data: { $ref: '#/components/schemas/KYCStatus' } } }] } } } }
 
-  /user/roles:
-    post:
-      tags: [用户 User]
-      summary: 申请角色
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [role]
-              properties:
-                role: { type: string, enum: [supplier, vendor, funder] }
-
   /user/profile:
     get:
       tags: [用户 User]
@@ -459,6 +451,36 @@ paths:
     put:
       tags: [用户 User]
       summary: 更新个人信息
+
+  /supplier-applications:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 我的供给方入驻申请
+    post:
+      tags: [算力撮合 Compute]
+      summary: 提交供给方入驻申请
+      description: "需先完成个人或企业 KYC；审核通过后自动授予 supplier 角色。"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [company_name, credit_code, representative, representative_id_number, business_license, contact_method, bank_name, account_name, account_number, facility_address, has_idc_license, power_description, cooling_description]
+              properties:
+                company_name: { type: string }
+                credit_code: { type: string, minLength: 18, maxLength: 18 }
+                representative: { type: string }
+                representative_id_number: { type: string }
+                business_license: { type: string, format: binary, description: "PDF/JPG/PNG，最大 5MB；文件内容写入 MySQL" }
+                contact_method: { type: string }
+                bank_name: { type: string }
+                account_name: { type: string }
+                account_number: { type: string }
+                facility_address: { type: string }
+                has_idc_license: { type: boolean }
+                power_description: { type: string }
+                cooling_description: { type: string }
 
   # ==================== 算力撮合 ====================
   /products:
@@ -907,6 +929,20 @@ paths:
     get:
       tags: [运营管理 Admin]
       summary: 资质审核列表
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, verified, rejected, expired, all]
+            default: pending
+
+  /admin/audits/qualifications/{id}/document:
+    get:
+      tags: [运营管理 Admin]
+      summary: 下载供给方申请附件
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
 
   /admin/audits/qualifications/{id}/approve:
     post:
@@ -1064,6 +1100,9 @@ paths:
       summary: 冻结用户
 
   /admin/cms/notices:
+    get:
+      tags: [运营管理 Admin]
+      summary: 已发布公告列表
     post:
       tags: [运营管理 Admin]
       summary: 发布公告

@@ -20,7 +20,11 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-func AuthRequired(secret string, rdb *redis.Client) gin.HandlerFunc {
+type UserRoleProvider interface {
+	GetRoles(userID int64) ([]string, error)
+}
+
+func AuthRequired(secret string, rdb *redis.Client, roleProvider UserRoleProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token := extractToken(c)
 		if token == "" {
@@ -51,9 +55,19 @@ func AuthRequired(secret string, rdb *redis.Client) gin.HandlerFunc {
 			return
 		}
 
+		roles := claims.Roles
+		if roleProvider != nil {
+			roles, err = roleProvider.GetRoles(claims.UserID)
+			if err != nil {
+				response.ErrorWithStatus(c, http.StatusServiceUnavailable, errcode.InternalError, "认证服务暂不可用")
+				c.Abort()
+				return
+			}
+		}
+
 		c.Set("user_id", claims.UserID)
 		c.Set("phone", claims.Phone)
-		c.Set("roles", claims.Roles)
+		c.Set("roles", roles)
 		c.Next()
 	}
 }

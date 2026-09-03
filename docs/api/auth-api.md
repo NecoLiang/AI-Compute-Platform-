@@ -113,6 +113,25 @@ curl http://localhost:8080/api/v1/auth/me \
 
 ---
 
+## POST /user/kyc/enterprise · 企业认证
+
+使用 `multipart/form-data` 提交企业名称、统一社会信用代码、法定代表人及证件号、对公账户信息和营业执照文件。营业执照支持 PDF/JPG/PNG，最大 5MB；完整申请资料与文件写入 MySQL。试运行阶段不调用外部核验服务，提交后状态直接写为 `verified`。
+
+```bash
+curl -X POST http://localhost:8080/api/v1/user/kyc/enterprise \
+  -H "Authorization: Bearer <access_token>" \
+  -F 'enterprise_name=某科技有限公司' \
+  -F 'uscc=91110108MA0123456X' \
+  -F 'legal_person=张三' \
+  -F 'legal_person_id_card=110101199001011234' \
+  -F 'bank_name=招商银行北京中关村支行' \
+  -F 'bank_account_name=某科技有限公司' \
+  -F 'bank_account_number=6225888888888888' \
+  -F 'business_license=@./license.pdf'
+```
+
+---
+
 ## 通用错误
 
 | code | 说明 |

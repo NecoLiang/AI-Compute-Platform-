@@ -50,7 +50,11 @@ func (h *Handler) Pay(c *gin.Context) {
 }
 
 func (h *Handler) PaymentStatus(c *gin.Context) {
-	payments, _ := h.svc.GetOrderPayments(c.Param("order_no"))
+	payments, err := h.svc.GetOrderPayments(c.Param("order_no"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "支付状态读取失败")
+		return
+	}
 	response.Success(c, payments)
 }
 
@@ -76,13 +80,21 @@ func (h *Handler) StartOnboard(c *gin.Context) {
 }
 
 func (h *Handler) OnboardStatus(c *gin.Context) {
-	status, _ := h.svc.GetOnboardStatus(c.GetInt64("user_id"))
+	status, err := h.svc.GetOnboardStatus(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "支付进件状态读取失败")
+		return
+	}
 	response.Success(c, gin.H{"status": status})
 }
 
 func (h *Handler) Settlements(c *gin.Context) {
 	orderNo := c.Query("order_no")
-	settlements, _ := h.svc.GetOrderSettlements(orderNo)
+	settlements, err := h.svc.GetOrderSettlements(orderNo)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "结算流水读取失败")
+		return
+	}
 	response.Success(c, settlements)
 }
 
@@ -112,12 +124,20 @@ func (h *Handler) SupplierSettlementSummary(c *gin.Context) {
 
 func (h *Handler) Reconcile(c *gin.Context) {
 	date := c.DefaultQuery("date", "")
-	result, _ := h.svc.Reconcile(date)
+	result, err := h.svc.Reconcile(date)
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, result)
 }
 
 func (h *Handler) ListPayments(c *gin.Context) {
 	date := c.DefaultQuery("date", "")
-	list, _ := h.svc.ListPaymentsByDate(date)
+	list, err := h.svc.ListPaymentsByDate(date)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "支付流水读取失败")
+		return
+	}
 	response.Success(c, list)
 }

@@ -63,6 +63,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	protected := r.Group("/api/v1")
 	authH.RegisterProtectedRoutes(protected)
 	userH.RegisterRoutes(protected)
+	computeH.RegisterAuthenticatedRoutes(protected)
 
 	buyer := r.Group("/api/v1")
 	computeH.RegisterBuyerRoutes(buyer)
@@ -112,6 +113,12 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	}
 	if !seen["POST /api/v1/auth/sms/login"] {
 		t.Error("缺少手机号验证码登录路由")
+	}
+	if !seen["POST /api/v1/supplier-applications"] || !seen["GET /api/v1/supplier-applications"] {
+		t.Error("缺少供给方入驻申请路由")
+	}
+	if seen["POST /api/v1/user/roles"] {
+		t.Error("用户不应绕过审核直接申请业务角色")
 	}
 	sort.Strings(lines)
 	t.Logf("共注册 %d 条路由:", len(lines))

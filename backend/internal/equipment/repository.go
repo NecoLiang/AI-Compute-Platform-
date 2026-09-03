@@ -67,32 +67,52 @@ func (r *Repository) CreateProduct(p *EquipmentProduct) (int64, error) {
 		p.ManufactureYear, p.UsageDesc, p.Quantity, p.UnitPrice, p.PriceNegotiable,
 		p.Region, p.Description, p.Images,
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.LastInsertId()
 }
 
 func (r *Repository) GetProductByID(id int64) (*EquipmentProduct, error) {
 	var p EquipmentProduct
 	err := r.db.Get(&p, "SELECT * FROM equipment_products WHERE id = ?", id)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &p, nil
 }
 
 func (r *Repository) UpdateProductStatus(id int64, status string) error {
 	res, err := r.db.Exec("UPDATE equipment_products SET status=? WHERE id=?", status, id)
-	if err != nil { return err }
-	affected, _ := res.RowsAffected()
-	if affected == 0 { return ErrProductNotFound }
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrProductNotFound
+	}
 	return nil
 }
 
 // UpdateVendorProductStatus 限定 vendor 只能改自己的商品, 防越权。
 func (r *Repository) UpdateVendorProductStatus(id, vendorID int64, status string) error {
 	res, err := r.db.Exec("UPDATE equipment_products SET status=? WHERE id=? AND vendor_id=?", status, id, vendorID)
-	if err != nil { return err }
-	affected, _ := res.RowsAffected()
-	if affected == 0 { return ErrProductNotFound }
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrProductNotFound
+	}
 	return nil
 }
 
@@ -111,9 +131,15 @@ const maxPageSize = 100
 
 // Normalize 收敛分页参数, 防止 page_size 被放大成全表扫描。
 func (f *ProductFilter) Normalize() {
-	if f.Page <= 0 { f.Page = 1 }
-	if f.PageSize <= 0 { f.PageSize = 20 }
-	if f.PageSize > maxPageSize { f.PageSize = maxPageSize }
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.PageSize <= 0 {
+		f.PageSize = 20
+	}
+	if f.PageSize > maxPageSize {
+		f.PageSize = maxPageSize
+	}
 }
 
 func (f *ProductFilter) buildWhere(base string) (string, []interface{}) {
@@ -145,9 +171,12 @@ func (f *ProductFilter) buildWhere(base string) (string, []interface{}) {
 
 func (f *ProductFilter) orderBy() string {
 	switch f.Sort {
-	case "price_asc": return "ORDER BY unit_price ASC"
-	case "price_desc": return "ORDER BY unit_price DESC"
-	default: return "ORDER BY created_at DESC"
+	case "price_asc":
+		return "ORDER BY unit_price ASC"
+	case "price_desc":
+		return "ORDER BY unit_price DESC"
+	default:
+		return "ORDER BY created_at DESC"
 	}
 }
 
@@ -217,7 +246,9 @@ func (r *Repository) CreateInquiry(q *EquipmentInquiry) (int64, error) {
 		VALUES (?,?,?,?,?,?,'new')`,
 		q.EquipmentID, q.BuyerID, q.Quantity, q.ContactName, q.ContactPhone, q.Message,
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.LastInsertId()
 }
 
@@ -271,7 +302,9 @@ var (
 )
 
 func ErrToCode(err error) int {
-	if err == nil { return errcode.Success }
+	if err == nil {
+		return errcode.Success
+	}
 	switch err.Error() {
 	case ErrProductNotFound.Error():
 		return errcode.NotFound

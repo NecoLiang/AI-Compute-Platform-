@@ -187,6 +187,9 @@ func (r *Repository) TransitionTicket(id int64, from, to string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	return affected == 1, nil
 }

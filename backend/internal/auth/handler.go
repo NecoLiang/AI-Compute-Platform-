@@ -186,12 +186,5 @@ func (h *Handler) Me(c *gin.Context) {
 		response.Error(c, errcode.NotFound, "用户不存在")
 		return
 	}
-
-	// Override roles from token claims for speed
-	if roles, ok := c.Get("roles"); ok {
-		if rl, ok := roles.([]string); ok {
-			info.Roles = rl
-		}
-	}
 	response.Success(c, info)
 }

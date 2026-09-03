@@ -41,6 +41,44 @@ func orderableProduct() *Product {
 
 func intPtr(v int) *int { return &v }
 
+func validSupplierOnboardingReq() SupplierOnboardingReq {
+	return SupplierOnboardingReq{
+		CompanyName: "万象算力（上海）测试有限公司", CreditCode: "91310115MA1K4X2A7Q",
+		Representative: "张明远", RepresentativeIDNumber: "110101199001011237",
+		BusinessLicenseFileName: "business-license.pdf", BusinessLicenseType: "application/pdf", BusinessLicenseData: []byte("%PDF-1.4"), ContactMethod: "18800001003",
+		BankName: "招商银行上海张江支行", AccountName: "万象算力（上海）测试有限公司",
+		AccountNumber: "6225888888888888", FacilityAddress: "上海市浦东新区张江路 88 号",
+		HasIDCLicense: true, PowerDescription: "双路市电与 UPS 保障",
+		CoolingDescription: "液冷与风冷混合系统",
+	}
+}
+
+func TestValidateSupplierOnboardingReq(t *testing.T) {
+	valid := validSupplierOnboardingReq()
+	assert.NoError(t, ValidateSupplierOnboardingReq(valid))
+
+	cases := []struct {
+		name   string
+		mutate func(*SupplierOnboardingReq)
+		want   string
+	}{
+		{"缺企业名称", func(r *SupplierOnboardingReq) { r.CompanyName = "" }, "企业名称"},
+		{"信用代码格式错误", func(r *SupplierOnboardingReq) { r.CreditCode = "123" }, "统一社会信用代码"},
+		{"证件号格式错误", func(r *SupplierOnboardingReq) { r.RepresentativeIDNumber = "123" }, "证件号"},
+		{"银行账号格式错误", func(r *SupplierOnboardingReq) { r.AccountNumber = "abc" }, "银行账号"},
+		{"未确认IDC资质", func(r *SupplierOnboardingReq) { r.HasIDCLicense = false }, "IDC"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := validSupplierOnboardingReq()
+			tc.mutate(&req)
+			err := ValidateSupplierOnboardingReq(req)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 // ===== C-01 / C-02 / C-04: 商品类型与计费模式校验矩阵 =====
 
 func TestValidateProductReq_TypeAndPricingMatrix(t *testing.T) {

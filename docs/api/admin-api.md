@@ -7,8 +7,14 @@
 ## 审核中心
 
 ### GET /admin/audits/qualifications · 资质审核列表
+
+默认返回待审核记录；传 `status=all` 返回包含已通过、已驳回在内的完整审核台账。
+
+### GET /admin/audits/qualifications/:id/document · 下载申请附件
 ### POST /admin/audits/qualifications/:id/approve · 通过
 ### POST /admin/audits/qualifications/:id/reject · 驳回
+
+`supplier_onboarding` 类型为供给方入驻申请；通过时服务端会在同一事务中授予申请账户 `supplier` 角色并写入审计日志。
 
 ```
 curl -X POST http://localhost:8080/api/v1/admin/audits/qualifications/1/reject \
@@ -91,6 +97,8 @@ curl "http://localhost:8080/api/v1/admin/audit-logs?page=1&page_size=20" \
 ```
 
 ### PUT /admin/config · 更新配置（合规开关）
+
+配置写入 `system_config`，服务重启后保持，并同步记录审计日志。
 ```
 curl -X PUT http://localhost:8080/api/v1/admin/config \
   -H "Authorization: Bearer <token>" \
@@ -102,7 +110,10 @@ curl -X PUT http://localhost:8080/api/v1/admin/config \
 
 ## 内容管理
 
+### GET /admin/cms/notices · 已发布公告
 ### POST /admin/cms/notices · 发布公告
+
+公告与审计日志在同一事务中写入；发布成功后可由 GET 接口立即回读。
 ```json
 {"content":"<p>系统维护通知</p>"}
 ```

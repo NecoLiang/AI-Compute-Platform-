@@ -1,13 +1,14 @@
 package intermediary
 
 import (
+	"github.com/gin-gonic/gin"
 	"strconv"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
-	"github.com/gin-gonic/gin"
 )
 
 type Handler struct{ svc *Service }
+
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
@@ -29,24 +30,41 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 
 func (h *Handler) CreateLead(c *gin.Context) {
 	var req CreateLeadReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	id, err := h.svc.CreateLead(req)
-	if err != nil { response.Error(c, errcode.InternalError, err.Error()); return }
+	if err != nil {
+		response.Error(c, errcode.InternalError, err.Error())
+		return
+	}
 	response.Success(c, gin.H{"id": id})
 }
 
 func (h *Handler) CreateFinanceLead(c *gin.Context) {
 	var req CreateLeadReq
-	c.ShouldBindJSON(&req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	req.Type = "finance_lease"
-	id, _ := h.svc.CreateLead(req)
+	id, err := h.svc.CreateLead(req)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "融资线索提交失败")
+		return
+	}
 	response.Success(c, gin.H{"id": id})
 }
 
 func (h *Handler) ListLeads(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	list, total, _ := h.svc.ListLeads(c.Query("status"), page, pageSize)
+	list, total, err := h.svc.ListLeads(c.Query("status"), page, pageSize)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "线索读取失败")
+		return
+	}
 	response.SuccessPage(c, list, total, page, pageSize)
 }
 
@@ -55,28 +73,61 @@ func (h *Handler) VendorLeads(c *gin.Context) {
 }
 
 func (h *Handler) AssignLead(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	var req struct{ AssigneeID int64 `json:"assignee_id"` }
-	c.ShouldBindJSON(&req)
-	h.svc.AssignLead(id, req.AssigneeID)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "线索编号不正确")
+		return
+	}
+	var req struct {
+		AssigneeID int64 `json:"assignee_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.AssigneeID <= 0 {
+		response.Error(c, errcode.ParamInvalid, "分配信息不正确")
+		return
+	}
+	if err := h.svc.AssignLead(id, req.AssigneeID); err != nil {
+		response.Error(c, errcode.InternalError, "线索分配失败")
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) QuoteLead(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	h.svc.repo.UpdateLeadStatus(id, "quoted")
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "线索编号不正确")
+		return
+	}
+	if err := h.svc.QuoteLead(id); err != nil {
+		response.Error(c, errcode.InternalError, "报价状态更新失败")
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) CloseDeal(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "线索编号不正确")
+		return
+	}
 	var req CloseDealReq
-	c.ShouldBindJSON(&req)
-	h.svc.CloseDeal(id, req)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, "成交信息不正确")
+		return
+	}
+	if err := h.svc.CloseDeal(id, req); err != nil {
+		response.Error(c, errcode.InternalError, "成交登记失败")
+		return
+	}
 	response.Success(c, nil)
 }
 
 func (h *Handler) Commissions(c *gin.Context) {
-	list, _ := h.svc.GetCommissions(c.GetInt64("user_id"))
+	list, err := h.svc.GetCommissions(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "佣金读取失败")
+		return
+	}
 	response.Success(c, list)
 }

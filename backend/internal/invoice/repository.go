@@ -279,7 +279,10 @@ func (r *Repository) IssueInvoice(id int64, taxInvoiceNo, filename string, pdf [
 	if err != nil {
 		return false, err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	return affected == 1, nil
 }
 
@@ -291,7 +294,10 @@ func (r *Repository) RejectInvoice(id int64, reason string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	return affected == 1, nil
 }
 

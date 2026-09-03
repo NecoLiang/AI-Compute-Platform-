@@ -177,13 +177,14 @@ func main() {
 
 	// Authenticated API
 	protected := r.Group("/api/v1")
-	protected.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
+	protected.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))
 	authHandler.RegisterProtectedRoutes(protected)
 	user.NewHandler(userSvc).RegisterRoutes(protected)
+	compute.NewHandler(computeSvc).RegisterAuthenticatedRoutes(protected)
 
 	// Buyer API
 	buyer := r.Group("/api/v1")
-	buyer.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
+	buyer.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))
 	compute.NewHandler(computeSvc).RegisterBuyerRoutes(buyer)
 	agentsearch.NewHandler(agentSearchSvc).RegisterBuyerRoutes(buyer)
 	invoice.NewHandler(invoiceSvc).RegisterBuyerRoutes(buyer)
@@ -193,26 +194,26 @@ func main() {
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
 	if cfg.Server.Mode != "release" {
 		dev := r.Group("/api/v1/dev")
-		dev.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb))
+		dev.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))
 		compute.NewHandler(computeSvc).RegisterDevRoutes(dev)
 	}
 
 	// Supplier API
 	supplier := r.Group("/api/v1")
-	supplier.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb), mw.RBAC("supplier"))
+	supplier.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo), mw.RBAC("supplier"))
 	compute.NewHandler(computeSvc).RegisterSupplierRoutes(supplier)
 	payment.NewHandler(paymentSvc).RegisterSupplierRoutes(supplier)
 	scheduler.NewHandler(schedulerSvc).RegisterSupplierRoutes(supplier)
 
 	// Vendor API
 	vendor := r.Group("/api/v1")
-	vendor.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb), mw.RBAC("vendor"))
+	vendor.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo), mw.RBAC("vendor"))
 	intermediary.NewHandler(intermediarySvc).RegisterVendorRoutes(vendor)
 	equipment.NewHandler(equipmentSvc).RegisterVendorRoutes(vendor)
 
 	// Admin API
 	adminRoute := r.Group("/api/v1")
-	adminRoute.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb), mw.RBAC("operator", "admin"))
+	adminRoute.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo), mw.RBAC("operator", "admin"))
 	compute.NewHandler(computeSvc).RegisterAdminRoutes(adminRoute)
 	invoice.NewHandler(invoiceSvc).RegisterAdminRoutes(adminRoute)
 	ticket.NewHandler(ticketSvc).RegisterAdminRoutes(adminRoute)

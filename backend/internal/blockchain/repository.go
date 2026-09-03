@@ -39,8 +39,8 @@ func (r *Repository) CreateAttestation(a *Attestation) error {
 	if err != nil {
 		return err
 	}
-	a.ID, _ = res.LastInsertId()
-	return nil
+	a.ID, err = res.LastInsertId()
+	return err
 }
 
 // GetLatestAttestation 取某业务对象最新一条存证。无记录返回 (nil, nil)。

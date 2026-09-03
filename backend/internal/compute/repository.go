@@ -2,6 +2,7 @@ package compute
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
@@ -14,16 +15,18 @@ import (
 // ===== Models =====
 
 type SupplierQualification struct {
-	ID             int64      `db:"id" json:"id"`
-	UserID         int64      `db:"user_id" json:"user_id"`
-	QualType       string     `db:"qual_type" json:"qual_type"`
-	CertName       string     `db:"cert_name" json:"cert_name"`
-	CertNumber     string     `db:"cert_number" json:"cert_number"`
-	CertURL        string     `db:"cert_url" json:"cert_url"`
-	ExpiresAt      *time.Time `db:"expires_at" json:"expires_at"`
-	Status         string     `db:"status" json:"status"`
-	RejectedReason string     `db:"rejected_reason" json:"rejected_reason,omitempty"`
-	CreatedAt      time.Time  `db:"created_at" json:"created_at"`
+	ID             int64                  `db:"id" json:"id"`
+	UserID         int64                  `db:"user_id" json:"user_id"`
+	QualType       string                 `db:"qual_type" json:"qual_type"`
+	CertName       string                 `db:"cert_name" json:"cert_name"`
+	CertNumber     string                 `db:"cert_number" json:"cert_number"`
+	CertURL        string                 `db:"cert_url" json:"cert_url"`
+	MetadataJSON   string                 `db:"metadata_json" json:"-"`
+	Application    *SupplierOnboardingReq `db:"-" json:"application,omitempty"`
+	ExpiresAt      *time.Time             `db:"expires_at" json:"expires_at"`
+	Status         string                 `db:"status" json:"status"`
+	RejectedReason string                 `db:"rejected_reason" json:"rejected_reason,omitempty"`
+	CreatedAt      time.Time              `db:"created_at" json:"created_at"`
 }
 
 // Product 商品。C-01 起支持 4 种租赁范围类型, 见 ProductType* 常量。
@@ -198,8 +201,8 @@ func NewRepository(db *sqlx.DB) *Repository {
 // Qualifications
 func (r *Repository) CreateQualification(q *SupplierQualification) (int64, error) {
 	res, err := r.db.Exec(
-		"INSERT INTO supplier_qualifications (user_id, qual_type, cert_name, cert_number, cert_url, expires_at, status) VALUES (?,?,?,?,?,?,?)",
-		q.UserID, q.QualType, q.CertName, q.CertNumber, q.CertURL, q.ExpiresAt, "pending",
+		"INSERT INTO supplier_qualifications (user_id, qual_type, cert_name, cert_number, cert_url, metadata_json, expires_at, status) VALUES (?,?,?,?,?,?,?,?)",
+		q.UserID, q.QualType, q.CertName, q.CertNumber, q.CertURL, q.MetadataJSON, q.ExpiresAt, "pending",
 	)
 	if err != nil {
 		return 0, err
@@ -211,17 +214,20 @@ func (r *Repository) CreateQualification(q *SupplierQualification) (int64, error
 // 若为 NULL 会让 sqlx 扫描 string 报错, 且 handler 吞错后前端只能看到 data:null。
 const qualificationColumns = `id, user_id, qual_type, cert_name,
 	COALESCE(cert_number,'') AS cert_number, COALESCE(cert_url,'') AS cert_url,
+	COALESCE(metadata_json,'') AS metadata_json,
 	expires_at, status, COALESCE(rejected_reason,'') AS rejected_reason, created_at`
 
 func (r *Repository) GetQualificationsByUser(userID int64) ([]SupplierQualification, error) {
 	var list []SupplierQualification
 	err := r.db.Select(&list, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE user_id = ? ORDER BY created_at DESC", userID)
+	hydrateApplications(list)
 	return list, err
 }
 
 func (r *Repository) GetQualificationByID(id int64) (*SupplierQualification, error) {
 	var q SupplierQualification
 	err := r.db.Get(&q, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE id = ?", id)
+	hydrateApplication(&q)
 	return &q, err
 }
 
@@ -230,10 +236,150 @@ func (r *Repository) UpdateQualificationStatus(id int64, status, reason string) 
 	return err
 }
 
-func (r *Repository) GetPendingQualifications() ([]SupplierQualification, error) {
+func (r *Repository) GetAdminQualifications(status string) ([]SupplierQualification, error) {
 	var list []SupplierQualification
-	err := r.db.Select(&list, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE status='pending' ORDER BY created_at")
+	query := "SELECT " + qualificationColumns + " FROM supplier_qualifications"
+	var args []interface{}
+	if status != "all" {
+		query += " WHERE status=?"
+		args = append(args, status)
+	}
+	if status == "pending" {
+		query += " ORDER BY created_at"
+	} else {
+		query += " ORDER BY created_at DESC"
+	}
+	err := r.db.Select(&list, query, args...)
+	hydrateApplications(list)
 	return list, err
+}
+
+func (r *Repository) CreateSupplierApplication(userID int64, req SupplierOnboardingReq) (*SupplierQualification, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var lockedID int64
+	if err := tx.Get(&lockedID, "SELECT id FROM users WHERE id=? FOR UPDATE", userID); err != nil {
+		return nil, err
+	}
+	var verified bool
+	if err := tx.Get(&verified, `SELECT EXISTS(
+		SELECT 1 FROM user_kyc WHERE user_id=? AND status='verified'
+		UNION ALL SELECT 1 FROM enterprises WHERE user_id=? AND status='verified'
+	)`, userID, userID); err != nil {
+		return nil, err
+	}
+	if !verified {
+		return nil, fmt.Errorf("请先完成实名认证")
+	}
+	var supplierEnabled bool
+	if err := tx.Get(&supplierEnabled, "SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_id=? AND role='supplier')", userID); err != nil {
+		return nil, err
+	}
+	if supplierEnabled {
+		return nil, fmt.Errorf("当前账户已具备供给方身份")
+	}
+	var pending int
+	if err := tx.Get(&pending, "SELECT COUNT(*) FROM supplier_qualifications WHERE user_id=? AND qual_type='supplier_onboarding' AND status IN ('pending','verified')", userID); err != nil {
+		return nil, err
+	}
+	if pending > 0 {
+		return nil, fmt.Errorf("供给方申请已提交")
+	}
+	res, err := tx.Exec(`INSERT INTO supplier_qualifications
+		(user_id, qual_type, cert_name, cert_number, cert_url, metadata_json,
+		 license_file_name, license_content_type, license_blob, status)
+		VALUES (?, 'supplier_onboarding', ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+		userID, req.CompanyName, req.CreditCode, req.BusinessLicenseFileName, string(payload),
+		req.BusinessLicenseFileName, req.BusinessLicenseType, req.BusinessLicenseData)
+	if err != nil {
+		return nil, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &SupplierQualification{ID: id, UserID: userID, QualType: "supplier_onboarding", CertName: req.CompanyName, CertNumber: req.CreditCode, CertURL: req.BusinessLicenseFileName, MetadataJSON: string(payload), Application: &req, Status: "pending", CreatedAt: time.Now()}, nil
+}
+
+func (r *Repository) GetQualificationDocument(id int64) (string, string, []byte, error) {
+	var document struct {
+		Name        string `db:"license_file_name"`
+		ContentType string `db:"license_content_type"`
+		Data        []byte `db:"license_blob"`
+	}
+	err := r.db.Get(&document, `SELECT COALESCE(license_file_name, '') AS license_file_name,
+		COALESCE(license_content_type, '') AS license_content_type, license_blob
+		FROM supplier_qualifications WHERE id=? AND qual_type='supplier_onboarding'`, id)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if document.Name == "" || document.ContentType == "" || len(document.Data) == 0 {
+		return "", "", nil, sql.ErrNoRows
+	}
+	return document.Name, document.ContentType, document.Data, nil
+}
+
+func (r *Repository) ReviewQualification(id int64, status, reason string, operatorID int64, ip string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var q SupplierQualification
+	if err := tx.Get(&q, "SELECT id, user_id, qual_type, status FROM supplier_qualifications WHERE id=? FOR UPDATE", id); err != nil {
+		return err
+	}
+	if q.Status != "pending" {
+		return fmt.Errorf("该申请已处理")
+	}
+	if _, err := tx.Exec("UPDATE supplier_qualifications SET status=?, rejected_reason=? WHERE id=?", status, reason, id); err != nil {
+		return err
+	}
+	if status == "verified" && q.QualType == "supplier_onboarding" {
+		if _, err := tx.Exec("INSERT IGNORE INTO user_roles (user_id, role) VALUES (?, 'supplier')", q.UserID); err != nil {
+			return err
+		}
+	}
+	action := "approve_qualification"
+	after := status
+	if status == "rejected" {
+		action = "reject_qualification"
+		if reason != "" {
+			after += ": " + reason
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO audit_logs
+		(operator_id, action, target_type, target_id, before_value, after_value, ip)
+		VALUES (?, ?, 'supplier_qualification', ?, ?, ?, ?)`, operatorID, action, id, q.Status, after, ip); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func hydrateApplications(list []SupplierQualification) {
+	for i := range list {
+		hydrateApplication(&list[i])
+	}
+}
+
+func hydrateApplication(q *SupplierQualification) {
+	if q.QualType != "supplier_onboarding" || q.MetadataJSON == "" {
+		return
+	}
+	var application SupplierOnboardingReq
+	if json.Unmarshal([]byte(q.MetadataJSON), &application) == nil {
+		q.Application = &application
+	}
 }
 
 // Products
@@ -282,13 +428,16 @@ func (r *Repository) DecrProductStock(tx *sqlx.Tx, id int64, qty int) error {
 	if err != nil {
 		return err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if affected == 0 {
 		return fmt.Errorf("insufficient stock")
 	}
 	// Auto-mark sold_out
-	tx.Exec("UPDATE products SET status='sold_out' WHERE id=? AND stock <= 0", id)
-	return nil
+	_, err = tx.Exec("UPDATE products SET status='sold_out' WHERE id=? AND stock <= 0", id)
+	return err
 }
 
 func (r *Repository) IncrProductStock(tx *sqlx.Tx, id int64, qty int) error {

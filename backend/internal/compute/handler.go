@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
+	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -25,6 +28,11 @@ func NewHandler(svc *Service) *Handler {
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 	r.GET("/products", h.ListProducts)
 	r.GET("/products/:id", h.GetProduct)
+}
+
+func (h *Handler) RegisterAuthenticatedRoutes(r *gin.RouterGroup) {
+	r.GET("/supplier-applications", h.GetSupplierApplications)
+	r.POST("/supplier-applications", h.SubmitSupplierApplication)
 }
 
 func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
@@ -56,6 +64,7 @@ func (h *Handler) RegisterDevRoutes(r *gin.RouterGroup) {
 
 func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/admin/audits/qualifications", h.ListPendingQualifications)
+	r.GET("/admin/audits/qualifications/:id/document", h.GetQualificationDocument)
 	r.POST("/admin/audits/qualifications/:id/approve", h.ApproveQualification)
 	r.POST("/admin/audits/qualifications/:id/reject", h.RejectQualification)
 	r.POST("/admin/audits/products/:id/approve", h.ApproveProduct)
@@ -216,6 +225,68 @@ func (h *Handler) GetMyProductsGrouped(c *gin.Context) {
 
 // ---- Qualifications ----
 
+func (h *Handler) SubmitSupplierApplication(c *gin.Context) {
+	req, err := readSupplierApplication(c)
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	application, err := h.svc.SubmitSupplierApplication(c.GetInt64("user_id"), req)
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, application)
+}
+
+const maxSupplierDocumentBytes = 5 << 20
+
+func readSupplierApplication(c *gin.Context) (SupplierOnboardingReq, error) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSupplierDocumentBytes+(64<<10))
+	fileHeader, err := c.FormFile("business_license")
+	if err != nil {
+		return SupplierOnboardingReq{}, fmt.Errorf("请选择营业执照文件")
+	}
+	if fileHeader.Size <= 0 || fileHeader.Size > maxSupplierDocumentBytes {
+		return SupplierOnboardingReq{}, fmt.Errorf("营业执照文件需小于 5MB")
+	}
+	file, err := fileHeader.Open()
+	if err != nil {
+		return SupplierOnboardingReq{}, fmt.Errorf("营业执照文件读取失败")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxSupplierDocumentBytes+1))
+	if err != nil || len(data) == 0 || len(data) > maxSupplierDocumentBytes {
+		return SupplierOnboardingReq{}, fmt.Errorf("营业执照文件读取失败")
+	}
+	contentType := http.DetectContentType(data)
+	if contentType != "application/pdf" && contentType != "image/jpeg" && contentType != "image/png" {
+		return SupplierOnboardingReq{}, fmt.Errorf("营业执照仅支持 PDF、JPG 或 PNG")
+	}
+	fileName := filepath.Base(strings.TrimSpace(fileHeader.Filename))
+	if fileName == "." || len(fileName) > 255 {
+		return SupplierOnboardingReq{}, fmt.Errorf("营业执照文件名无效")
+	}
+	return SupplierOnboardingReq{
+		CompanyName: strings.TrimSpace(c.PostForm("company_name")), CreditCode: strings.ToUpper(strings.TrimSpace(c.PostForm("credit_code"))),
+		Representative: strings.TrimSpace(c.PostForm("representative")), RepresentativeIDNumber: strings.TrimSpace(c.PostForm("representative_id_number")),
+		BusinessLicenseFileName: fileName, BusinessLicenseType: contentType, BusinessLicenseData: data,
+		ContactMethod: strings.TrimSpace(c.PostForm("contact_method")), BankName: strings.TrimSpace(c.PostForm("bank_name")),
+		AccountName: strings.TrimSpace(c.PostForm("account_name")), AccountNumber: strings.TrimSpace(c.PostForm("account_number")),
+		FacilityAddress: strings.TrimSpace(c.PostForm("facility_address")), HasIDCLicense: c.PostForm("has_idc_license") == "true",
+		PowerDescription: strings.TrimSpace(c.PostForm("power_description")), CoolingDescription: strings.TrimSpace(c.PostForm("cooling_description")),
+	}, nil
+}
+
+func (h *Handler) GetSupplierApplications(c *gin.Context) {
+	list, err := h.svc.GetSupplierApplications(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "供给方申请读取失败")
+		return
+	}
+	response.Success(c, list)
+}
+
 func (h *Handler) SubmitQualification(c *gin.Context) {
 	var req struct {
 		QualType   string `json:"qual_type"`
@@ -236,7 +307,11 @@ func (h *Handler) SubmitQualification(c *gin.Context) {
 }
 
 func (h *Handler) GetMyQualifications(c *gin.Context) {
-	list, _ := h.svc.GetMyQualifications(c.GetInt64("user_id"))
+	list, err := h.svc.GetMyQualifications(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "资质读取失败")
+		return
+	}
 	response.Success(c, list)
 }
 
@@ -479,13 +554,39 @@ func (h *Handler) RequestRefund(c *gin.Context) {
 // ---- Admin ----
 
 func (h *Handler) ListPendingQualifications(c *gin.Context) {
-	list, _ := h.svc.GetPendingQualifications()
+	status := c.DefaultQuery("status", "pending")
+	switch status {
+	case "pending", "verified", "rejected", "expired", "all":
+	default:
+		response.Error(c, errcode.ParamInvalid, "资质状态不正确")
+		return
+	}
+	list, err := h.svc.GetAdminQualifications(status)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "资质审核列表读取失败")
+		return
+	}
 	response.Success(c, list)
+}
+
+func (h *Handler) GetQualificationDocument(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "资质编号不正确")
+		return
+	}
+	name, contentType, data, err := h.svc.GetQualificationDocument(id)
+	if err != nil {
+		response.Error(c, errcode.NotFound, "申请附件不存在")
+		return
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	c.Data(http.StatusOK, contentType, data)
 }
 
 func (h *Handler) ApproveQualification(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err := h.svc.ApproveQualification(id); err != nil {
+	if err := h.svc.ApproveQualification(id, c.GetInt64("user_id"), c.ClientIP()); err != nil {
 		response.Error(c, errcode.InternalError, err.Error())
 		return
 	}
@@ -501,7 +602,7 @@ func (h *Handler) RejectQualification(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	if err := h.svc.RejectQualification(id, req.Reason); err != nil {
+	if err := h.svc.RejectQualification(id, c.GetInt64("user_id"), req.Reason, c.ClientIP()); err != nil {
 		response.Error(c, errcode.InternalError, err.Error())
 		return
 	}
@@ -538,14 +639,22 @@ func (h *Handler) OfflineProduct(c *gin.Context) {
 func (h *Handler) AdminListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	list, total, _ := h.svc.ListAllOrders(c.Query("status"), page, pageSize)
+	list, total, err := h.svc.ListAllOrders(c.Query("status"), page, pageSize)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "订单列表读取失败")
+		return
+	}
 	response.SuccessPage(c, list, total, page, pageSize)
 }
 
 func (h *Handler) AdminListProducts(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	list, total, _ := h.svc.ListAllProducts(c.Query("status"), page, pageSize)
+	list, total, err := h.svc.ListAllProducts(c.Query("status"), page, pageSize)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "商品列表读取失败")
+		return
+	}
 	response.SuccessPage(c, list, total, page, pageSize)
 }
 

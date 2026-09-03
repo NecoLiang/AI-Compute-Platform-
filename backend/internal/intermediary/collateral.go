@@ -213,14 +213,20 @@ func ValidateUpsertCollateral(req UpsertCollateralReq) (*ValidatedCollateral, er
 	}
 
 	start, err := ParseDate("reg_start_date", req.RegStartDate)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	end, err := ParseDate("reg_end_date", req.RegEndDate)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	if err := ValidateRegDateRange(start, end); err != nil {
 		return nil, err
 	}
 	verified, err := ParseDate("verified_at", req.VerifiedAt)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	// 人工录入必须留下依据，否则无法追溯这条数据是谁在哪天从官方系统查到的
 	note := strings.TrimSpace(req.SourceNote)
@@ -253,9 +259,15 @@ const collateralMaxPageSize = 100
 func (q *CollateralQuery) Normalize() {
 	q.LesseeName = strings.TrimSpace(q.LesseeName)
 	q.LesseeUscc = strings.ToUpper(strings.TrimSpace(q.LesseeUscc))
-	if q.Page <= 0 { q.Page = 1 }
-	if q.PageSize <= 0 { q.PageSize = 20 }
-	if q.PageSize > collateralMaxPageSize { q.PageSize = collateralMaxPageSize }
+	if q.Page <= 0 {
+		q.Page = 1
+	}
+	if q.PageSize <= 0 {
+		q.PageSize = 20
+	}
+	if q.PageSize > collateralMaxPageSize {
+		q.PageSize = collateralMaxPageSize
+	}
 }
 
 // Validate 拒绝空条件查询（防止把全部登记数据一次性拖走）。
@@ -301,7 +313,9 @@ func (r *CollateralRepository) Create(v *ValidatedCollateral, createdBy int64) (
 		v.CollateralDesc, v.RegStartDate, v.RegEndDate, v.SourceNote, v.VerifiedAt, createdBy,
 	)
 	if err != nil {
-		if isDupEntry(err) { return 0, ErrRegNoConflict }
+		if isDupEntry(err) {
+			return 0, ErrRegNoConflict
+		}
 		return 0, err
 	}
 	return res.LastInsertId()
@@ -315,10 +329,15 @@ func (r *CollateralRepository) Update(id int64, v *ValidatedCollateral) error {
 		v.CollateralDesc, v.RegStartDate, v.RegEndDate, v.SourceNote, v.VerifiedAt, id,
 	)
 	if err != nil {
-		if isDupEntry(err) { return ErrRegNoConflict }
+		if isDupEntry(err) {
+			return ErrRegNoConflict
+		}
 		return err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if affected == 0 {
 		// 可能是 id 不存在，也可能是提交了完全相同的内容；用一次 SELECT 区分
 		var exists int
@@ -332,8 +351,13 @@ func (r *CollateralRepository) Update(id int64, v *ValidatedCollateral) error {
 // Cancel 作废（软删）: status='cancelled'，绝不物理删除，登记数据需长期留痕。
 func (r *CollateralRepository) Cancel(id int64) error {
 	res, err := r.db.Exec("UPDATE collateral_registrations SET status='cancelled' WHERE id=? AND status<>'cancelled'", id)
-	if err != nil { return err }
-	affected, _ := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if affected == 0 {
 		var exists int
 		if e := r.db.Get(&exists, "SELECT 1 FROM collateral_registrations WHERE id=?", id); e != nil {
@@ -347,8 +371,12 @@ func (r *CollateralRepository) Cancel(id int64) error {
 func (r *CollateralRepository) GetByID(id int64) (*CollateralRegistration, error) {
 	var c CollateralRegistration
 	err := r.db.Get(&c, "SELECT * FROM collateral_registrations WHERE id=?", id)
-	if err == sql.ErrNoRows { return nil, nil }
-	if err != nil { return nil, err }
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return &c, nil
 }
 
@@ -402,16 +430,24 @@ func (s *CollateralService) Create(operatorID int64, req UpsertCollateralReq) (i
 		return 0, collateralInvalid("created_by", "未识别到录入人身份")
 	}
 	v, err := ValidateUpsertCollateral(req)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return s.repo.Create(v, operatorID)
 }
 
 func (s *CollateralService) Update(id int64, req UpsertCollateralReq) error {
 	v, err := ValidateUpsertCollateral(req)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	existing, err := s.repo.GetByID(id)
-	if err != nil { return err }
-	if existing == nil { return ErrCollateralNotFound }
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return ErrCollateralNotFound
+	}
 	if existing.Status == "cancelled" {
 		return collateralInvalid("status", "已作废的登记记录不可修改")
 	}
@@ -420,8 +456,12 @@ func (s *CollateralService) Update(id int64, req UpsertCollateralReq) error {
 
 func (s *CollateralService) Cancel(id int64) error {
 	existing, err := s.repo.GetByID(id)
-	if err != nil { return err }
-	if existing == nil { return ErrCollateralNotFound }
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return ErrCollateralNotFound
+	}
 	return s.repo.Cancel(id)
 }
 
@@ -459,7 +499,10 @@ func (h *CollateralHandler) Query(c *gin.Context) {
 	q.Normalize()
 
 	list, total, err := h.svc.Query(q)
-	if err != nil { response.Error(c, CollateralErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, CollateralErrToCode(err), err.Error())
+		return
+	}
 
 	today := h.svc.Now()
 	result := make([]gin.H, 0, len(list))
@@ -479,26 +522,47 @@ func (h *CollateralHandler) Query(c *gin.Context) {
 
 func (h *CollateralHandler) Create(c *gin.Context) {
 	var req UpsertCollateralReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	id, err := h.svc.Create(c.GetInt64("user_id"), req)
-	if err != nil { response.Error(c, CollateralErrToCode(err), err.Error()); return }
+	if err != nil {
+		response.Error(c, CollateralErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, gin.H{"id": id, "data_source": "manual", "disclaimer": Disclaimer})
 }
 
 func (h *CollateralHandler) Update(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || id <= 0 { response.Error(c, errcode.ParamInvalid, "登记记录ID不合法"); return }
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "登记记录ID不合法")
+		return
+	}
 	var req UpsertCollateralReq
-	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
-	if err := h.svc.Update(id, req); err != nil { response.Error(c, CollateralErrToCode(err), err.Error()); return }
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.svc.Update(id, req); err != nil {
+		response.Error(c, CollateralErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, nil)
 }
 
 // Cancel 作废（软删）: 只置 status='cancelled'，不物理删除。
 func (h *CollateralHandler) Cancel(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || id <= 0 { response.Error(c, errcode.ParamInvalid, "登记记录ID不合法"); return }
-	if err := h.svc.Cancel(id); err != nil { response.Error(c, CollateralErrToCode(err), err.Error()); return }
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "登记记录ID不合法")
+		return
+	}
+	if err := h.svc.Cancel(id); err != nil {
+		response.Error(c, CollateralErrToCode(err), err.Error())
+		return
+	}
 	response.Success(c, gin.H{"status": "cancelled"})
 }
 
@@ -521,12 +585,16 @@ func collateralToJSON(r *CollateralRegistration, today time.Time) gin.H {
 }
 
 func formatDate(t *time.Time) string {
-	if t == nil { return "" }
+	if t == nil {
+		return ""
+	}
 	return t.Format(dateLayout)
 }
 
 func CollateralErrToCode(err error) int {
-	if err == nil { return errcode.Success }
+	if err == nil {
+		return errcode.Success
+	}
 	switch err.Error() {
 	case ErrCollateralNotFound.Error():
 		return errcode.NotFound

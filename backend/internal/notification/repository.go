@@ -108,7 +108,10 @@ func (r *Repository) MarkRead(userID, id int64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	return affected == 1, nil
 }
 
@@ -119,8 +122,7 @@ func (r *Repository) MarkAllRead(userID int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	affected, _ := res.RowsAffected()
-	return affected, nil
+	return res.RowsAffected()
 }
 
 // SoftDelete 软删本人通知(无论已读未读), 返回是否命中。
@@ -131,7 +133,10 @@ func (r *Repository) SoftDelete(userID, id int64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	affected, _ := res.RowsAffected()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
 	return affected == 1, nil
 }
 

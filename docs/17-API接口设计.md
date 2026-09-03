@@ -80,7 +80,6 @@ Response: { "code": 0, "data": { "list": [...], "total": 100, "page": 1, "page_s
 | POST | `/user/kyc/personal` | 个人实名认证 | ✅ |
 | POST | `/user/kyc/enterprise` | 企业认证 | ✅ |
 | GET | `/user/kyc/status` | 认证状态 | ✅ |
-| POST | `/user/roles` | 申请角色（supplier/vendor/funder） | ✅ |
 
 **POST /user/kyc/personal**
 ```json
@@ -88,6 +87,8 @@ Response: { "code": 0, "data": { "list": [...], "total": 100, "page": 1, "page_s
 ```
 
 当前试运行阶段不调用第三方核验服务，提交后状态直接写为 `verified`。
+
+供给方身份不能由用户直接添加。完成 KYC 后通过 `POST /supplier-applications` 提交入驻资料，Admin 审核通过后由服务端授予 `supplier` 角色。
 
 **POST /user/kyc/enterprise**
 ```json
@@ -110,6 +111,8 @@ Response: { "code": 0, "data": { "list": [...], "total": 100, "page": 1, "page_s
 | GET | `/supplier/products` | 我的商品 | ✅ | supplier |
 | GET | `/supplier/qualifications` | 我的资质 | ✅ | supplier |
 | POST | `/supplier/qualifications` | 提交资质 | ✅ | supplier |
+| GET | `/supplier-applications` | 我的供给方入驻申请 | ✅ | 已登录用户 |
+| POST | `/supplier-applications` | 提交供给方入驻申请 | ✅ | 已完成 KYC 的用户 |
 
 **GET /products**
 ```

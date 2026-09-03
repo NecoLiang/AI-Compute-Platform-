@@ -1,8 +1,9 @@
 package intermediary
 
 import (
-	"time"
+	"database/sql"
 	"github.com/jmoiron/sqlx"
+	"time"
 )
 
 type Lead struct {
@@ -20,15 +21,16 @@ type Lead struct {
 }
 
 type Commission struct {
-	ID              int64  `db:"id" json:"id"`
-	LeadID          int64  `db:"lead_id" json:"lead_id"`
-	DealAmount      int64  `db:"deal_amount" json:"deal_amount"`
-	CommissionRate  float64 `db:"commission_rate" json:"commission_rate"`
-	CommissionAmount int64 `db:"commission_amount" json:"commission_amount"`
-	Status          string `db:"status" json:"status"`
+	ID               int64   `db:"id" json:"id"`
+	LeadID           int64   `db:"lead_id" json:"lead_id"`
+	DealAmount       int64   `db:"deal_amount" json:"deal_amount"`
+	CommissionRate   float64 `db:"commission_rate" json:"commission_rate"`
+	CommissionAmount int64   `db:"commission_amount" json:"commission_amount"`
+	Status           string  `db:"status" json:"status"`
 }
 
 type Repository struct{ db *sqlx.DB }
+
 func NewRepository(db *sqlx.DB) *Repository { return &Repository{db: db} }
 
 func (r *Repository) CreateLead(l *Lead) (int64, error) {
@@ -36,7 +38,9 @@ func (r *Repository) CreateLead(l *Lead) (int64, error) {
 		"INSERT INTO leads (type, contact_name, contact_phone, contact_email, description, amount_range, term, status) VALUES (?,?,?,?,?,?,?,?)",
 		l.Type, l.ContactName, l.ContactPhone, l.ContactEmail, l.Description, l.AmountRange, l.Term, "new",
 	)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.LastInsertId()
 }
 
@@ -49,24 +53,31 @@ func (r *Repository) GetLead(id int64) (*Lead, error) {
 func (r *Repository) ListLeads(status string, page, pageSize int) ([]Lead, int64, error) {
 	where := ""
 	args := []interface{}{}
-	if status != "" { where = "WHERE status=?"; args = append(args, status) }
+	if status != "" {
+		where = "WHERE status=?"
+		args = append(args, status)
+	}
 	var total int64
-	r.db.Get(&total, "SELECT COUNT(*) FROM leads "+where, args...)
-	if page <= 0 { page = 1 }
-	if pageSize <= 0 { pageSize = 20 }
+	if err := r.db.Get(&total, "SELECT COUNT(*) FROM leads "+where, args...); err != nil {
+		return nil, 0, err
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
 	var list []Lead
-	r.db.Select(&list, "SELECT * FROM leads "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
-	return list, total, nil
+	err := r.db.Select(&list, "SELECT * FROM leads "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
+	return list, total, err
 }
 
 func (r *Repository) AssignLead(id, assigneeID int64) error {
-	_, err := r.db.Exec("UPDATE leads SET assignee_id=?, status='assigned' WHERE id=?", assigneeID, id)
-	return err
+	return execExisting(r.db, "UPDATE leads SET assignee_id=?, status='assigned' WHERE id=?", assigneeID, id)
 }
 
 func (r *Repository) UpdateLeadStatus(id int64, status string) error {
-	_, err := r.db.Exec("UPDATE leads SET status=? WHERE id=?", status, id)
-	return err
+	return execExisting(r.db, "UPDATE leads SET status=? WHERE id=?", status, id)
 }
 
 func (r *Repository) CreateCommission(c *Commission) error {
@@ -83,7 +94,23 @@ func (r *Repository) ListCommissions(userID int64) ([]Commission, error) {
 	return list, err
 }
 
+func execExisting(db sqlx.Execer, query string, args ...interface{}) error {
+	result, err := db.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 type Service struct{ repo *Repository }
+
 func NewService(repo *Repository) *Service { return &Service{repo: repo} }
 
 type CreateLeadReq struct {
@@ -109,6 +136,7 @@ func (s *Service) ListLeads(status string, page, pageSize int) ([]Lead, int64, e
 }
 
 func (s *Service) AssignLead(id, assigneeID int64) error { return s.repo.AssignLead(id, assigneeID) }
+func (s *Service) QuoteLead(id int64) error              { return s.repo.UpdateLeadStatus(id, "quoted") }
 
 type CloseDealReq struct {
 	DealAmount     int64   `json:"deal_amount"`
@@ -116,12 +144,24 @@ type CloseDealReq struct {
 }
 
 func (s *Service) CloseDeal(leadID int64, req CloseDealReq) error {
-	s.repo.UpdateLeadStatus(leadID, "closed")
+	tx, err := s.repo.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := execExisting(tx, "UPDATE leads SET status='closed' WHERE id=?", leadID); err != nil {
+		return err
+	}
 	commissionFen := int64(float64(req.DealAmount) * req.CommissionRate / 100.0)
-	return s.repo.CreateCommission(&Commission{
-		LeadID: leadID, DealAmount: req.DealAmount,
-		CommissionRate: req.CommissionRate, CommissionAmount: commissionFen,
-	})
+	if _, err := tx.Exec(
+		"INSERT INTO commissions (lead_id, deal_amount, commission_rate, commission_amount, status) VALUES (?,?,?,?,?)",
+		leadID, req.DealAmount, req.CommissionRate, commissionFen, "pending",
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (s *Service) GetCommissions(userID int64) ([]Commission, error) { return s.repo.ListCommissions(userID) }
+func (s *Service) GetCommissions(userID int64) ([]Commission, error) {
+	return s.repo.ListCommissions(userID)
+}

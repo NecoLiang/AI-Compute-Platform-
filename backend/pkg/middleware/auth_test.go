@@ -36,7 +36,7 @@ func TestAuthRequiredFailsClosedWhenRevocationStateIsUnavailable(t *testing.T) {
 
 	reached := false
 	router := gin.New()
-	router.GET("/protected", AuthRequired(secret, rdb), func(c *gin.Context) {
+	router.GET("/protected", AuthRequired(secret, rdb, nil), func(c *gin.Context) {
 		reached = true
 		c.Status(http.StatusNoContent)
 	})

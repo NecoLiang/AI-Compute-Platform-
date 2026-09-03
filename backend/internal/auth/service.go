@@ -218,7 +218,10 @@ func (s *Service) Login(req LoginReq) (*TokenPair, *UserInfo, error) {
 }
 
 func (s *Service) issueTokens(user *User) (*TokenPair, *UserInfo, error) {
-	roles, _ := s.userRoleRepo.GetRoles(user.ID)
+	roles, err := s.userRoleRepo.GetRoles(user.ID)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(roles) == 0 {
 		roles = []string{"buyer"}
 	}
@@ -350,7 +353,10 @@ func (s *Service) GetUser(userID int64) (*UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	roles, _ := s.userRoleRepo.GetRoles(userID)
+	roles, err := s.userRoleRepo.GetRoles(userID)
+	if err != nil {
+		return nil, err
+	}
 	if len(roles) == 0 {
 		roles = []string{"buyer"}
 	}
