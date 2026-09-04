@@ -12,6 +12,7 @@ import (
 	"tokenfactory/internal/agentsearch"
 	"tokenfactory/internal/auth"
 	"tokenfactory/internal/blockchain"
+	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
@@ -47,6 +48,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	blockchainH := blockchain.NewHandler(nil)
 	agentSearchH := agentsearch.NewHandler(nil)
 	schedulerH := scheduler.NewHandler(nil)
+	catalogH := catalog.NewHandler(nil)
 	authH := auth.NewHandler(nil, nil)
 
 	r := gin.New()
@@ -59,6 +61,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	collateralH.RegisterPublicRoutes(public)
 	blockchainH.RegisterRoutes(public)
 	schedulerH.RegisterNodeRoutes(public)
+	catalogH.RegisterPublicRoutes(public)
 
 	protected := r.Group("/api/v1")
 	authH.RegisterProtectedRoutes(protected)
@@ -94,6 +97,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	adminH.RegisterRoutes(adminRoute)
 	blockchainH.RegisterAdminRoutes(adminRoute)
 	schedulerH.RegisterAdminRoutes(adminRoute)
+	catalogH.RegisterAdminRoutes(adminRoute)
 
 	paymentH.RegisterCallbackRoutes(r.Group("/api/v1"))
 

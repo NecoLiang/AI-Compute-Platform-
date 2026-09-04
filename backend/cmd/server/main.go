@@ -12,6 +12,7 @@ import (
 	"tokenfactory/internal/agentsearch"
 	"tokenfactory/internal/auth"
 	"tokenfactory/internal/blockchain"
+	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
@@ -117,6 +118,8 @@ func main() {
 	schedulerSvc := scheduler.NewService(schedulerRepo)
 	schedulerSvc.SetNotifier(notificationSvc)
 
+	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
+
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
 	adminRepo := admin.NewRepository(sqlDB)
@@ -174,6 +177,7 @@ func main() {
 	intermediary.NewCollateralHandler(collateralSvc).RegisterPublicRoutes(public)
 	blockchain.NewHandler(blockchainSvc).RegisterRoutes(public)
 	scheduler.NewHandler(schedulerSvc).RegisterNodeRoutes(public)
+	catalog.NewHandler(catalogSvc).RegisterPublicRoutes(public)
 
 	// Authenticated API
 	protected := r.Group("/api/v1")
@@ -224,6 +228,7 @@ func main() {
 	admin.NewHandler(adminSvc).RegisterRoutes(adminRoute)
 	blockchain.NewHandler(blockchainSvc).RegisterAdminRoutes(adminRoute)
 	scheduler.NewHandler(schedulerSvc).RegisterAdminRoutes(adminRoute)
+	catalog.NewHandler(catalogSvc).RegisterAdminRoutes(adminRoute)
 
 	// Payment callback (no auth, signature verification)
 	payment.NewHandler(paymentSvc).RegisterCallbackRoutes(r.Group("/api/v1"))
