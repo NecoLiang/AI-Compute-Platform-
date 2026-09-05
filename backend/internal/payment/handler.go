@@ -1,8 +1,10 @@
 package payment
 
 import (
+	"errors"
 	"github.com/gin-gonic/gin"
 	"strconv"
+	"tokenfactory/internal/compute"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
 )
@@ -41,18 +43,18 @@ func (h *Handler) Pay(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	resp, err := h.svc.Pay(req, 0) // total amount fetched from order in full implementation
+	resp, err := h.svc.Pay(c.GetInt64("user_id"), req)
 	if err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+		response.Error(c, paymentErrorCode(err), err.Error())
 		return
 	}
 	response.Success(c, resp)
 }
 
 func (h *Handler) PaymentStatus(c *gin.Context) {
-	payments, err := h.svc.GetOrderPayments(c.Param("order_no"))
+	payments, err := h.svc.GetOrderPayments(c.GetInt64("user_id"), c.Param("order_no"))
 	if err != nil {
-		response.Error(c, errcode.InternalError, "支付状态读取失败")
+		response.Error(c, paymentErrorCode(err), err.Error())
 		return
 	}
 	response.Success(c, payments)
@@ -140,4 +142,14 @@ func (h *Handler) ListPayments(c *gin.Context) {
 		return
 	}
 	response.Success(c, list)
+}
+
+func paymentErrorCode(err error) int {
+	if errors.Is(err, ErrPaymentConflict) {
+		return errcode.Conflict
+	}
+	if errors.Is(err, ErrYeepayNotConfigured) || errors.Is(err, ErrYeepayCallbackUnverifiable) {
+		return errcode.InternalError
+	}
+	return compute.ErrToCode(err)
 }

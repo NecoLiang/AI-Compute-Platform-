@@ -32,12 +32,16 @@ services:
       - ./migrations/006_remove_default_admin_seed.up.sql:/docker-entrypoint-initdb.d/006.sql:ro
       - ./migrations/007_blockchain_worker_bookkeeping.up.sql:/docker-entrypoint-initdb.d/007.sql:ro
       - ./migrations/008_invoice_management.up.sql:/docker-entrypoint-initdb.d/008.sql:ro
+      - ./migrations/008_supplier_nodes_and_health.up.sql:/docker-entrypoint-initdb.d/008_supplier_nodes.sql:ro
       - ./migrations/009_ticket_support.up.sql:/docker-entrypoint-initdb.d/009.sql:ro
       - ./migrations/010_notifications.up.sql:/docker-entrypoint-initdb.d/010.sql:ro
       - ./migrations/011_supplier_onboarding.up.sql:/docker-entrypoint-initdb.d/011.sql:ro
       - ./migrations/012_persist_enterprise_kyc_application.up.sql:/docker-entrypoint-initdb.d/012.sql:ro
       - ./migrations/013_supplier_application_document.up.sql:/docker-entrypoint-initdb.d/013.sql:ro
       - ./migrations/014_persist_admin_controls.up.sql:/docker-entrypoint-initdb.d/014.sql:ro
+      - ./migrations/015_product_review_reason.up.sql:/docker-entrypoint-initdb.d/015.sql:ro
+      - ./migrations/016_compute_inquiry_leads.up.sql:/docker-entrypoint-initdb.d/016.sql:ro
+      - ./migrations/017_payment_checkout_url.up.sql:/docker-entrypoint-initdb.d/017.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

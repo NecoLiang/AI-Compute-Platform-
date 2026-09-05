@@ -54,10 +54,10 @@ curl http://localhost:8080/api/v1/products/1
 
 ---
 
-## POST /products · 上架商品 ✅ supplier
+## POST /supplier/products · 提交商品审核 ✅ supplier
 
 ```
-curl -X POST http://localhost:8080/api/v1/products \
+curl -X POST http://localhost:8080/api/v1/supplier/products \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"gpu_model":"NVIDIA H100 SXM 80GB","card_count":64,"cpu_spec":"2× Intel Xeon 8480+","memory_spec":"2TB DDR5","storage_spec":"30TB NVMe","bandwidth_spec":"10Gbps","delivery_mode":"bare_metal","pricing_mode":"hourly","unit_price":3500,"available_hours":"全天 24h","stock":64,"min_order":1,"min_duration":1,"region":"北京","compliance_agreed":true}'
@@ -245,3 +245,18 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 | refunding | 退款中 | — |
 | refunded | 已退款 | — |
 | frozen | 已冻结 | 风控冻结 |
+
+
+## 交易流程修复（2026-09-05）
+
+- 发布、重提：有效 `supplier` 角色，个人或企业认证为 `verified`，至少一项有效供给方资质。缺少准入返回 `40300`；合规承诺必须为 `true`。
+- 下单、续租和面议询价：有效 `buyer` 角色且个人或企业认证为 `verified`。下单明确检查 `compliance_agreed=true`；数量、周期、金额和库存由服务端计算校验。
+- `POST /supplier/products` 返回 `{id}`，初始状态 `pending`。旧文档的 `POST /products` 不是真实发布路由。
+- `POST /admin/audits/products/:id/reject` 必须提供 `{"reason":"具体修改要求"}`（1–256 字），仅 `pending → draft`。供给方 `/supplier/products` 和 `/supplier/products/summary` 返回 `rejected_reason`。
+- `PUT /supplier/products/:id` 使用与发布相同的完整请求体，校验归属且仅允许 `draft`。成功后 `pending`，清空旧原因，重新进入审核队列。修改已上架商品或重复审批返回 `40900`。
+- `POST /admin/audits/products/:id/approve` 仅允许 `pending → active`。市场列表仅展示 `active`。
+- `POST /products/:id/inquiries` 请求 `{contact_name, contact_phone, message}`。姓名 1–64 字，电话 6–20 字符，需求 5–2000 字。仅 `active` 且面议商品接受询价。返回 `{id}` 为 CRM 线索编号，`type=compute`，包含商品、供给方、买家编号和需求，运营通过 `GET /admin/leads` 读取；CRM“由我跟进”复用 `POST /admin/leads/:id/assign`（`assignee_id` 为当前管理员），成功后显示负责人及 `assigned` 状态。
+- `PATCH /admin/orders/:id/status` 支持数字订单 ID 和业务订单号，先解析真实订单再执行状态流转；不存在的订单返回 `40400`，重复取消不重复释放库存。
+- 页面入口：商品列表“修改并重提”、商品详情“申请报价”、订单详情“前往支付”和“确认签收”。支付渠道可用性见 payment-api.md。
+
+数据库增量：`015_product_review_reason`、`016_compute_inquiry_leads`；先迁移再启用对应接口。

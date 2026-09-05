@@ -14,6 +14,7 @@ type Payment struct {
 	Amount     int64      `db:"amount" json:"amount"` // fen
 	Channel    string     `db:"channel" json:"channel"`
 	YeepayTxID string     `db:"yeepay_tx_id" json:"yeepay_tx_id"`
+	PayURL     *string    `db:"pay_url" json:"-"`
 	Status     string     `db:"status" json:"status"`
 	PaidAt     *time.Time `db:"paid_at" json:"paid_at"`
 	CreatedAt  time.Time  `db:"created_at" json:"created_at"`

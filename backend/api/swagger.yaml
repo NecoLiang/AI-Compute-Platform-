@@ -59,6 +59,32 @@ components:
         page: { type: integer }
         page_size: { type: integer }
 
+    ProductSubmission:
+      type: object
+      required: [product_type, pricing_mode, stock, region, compliance_agreed]
+      properties:
+        product_type: { type: string, enum: [card_rental, outright, center, colocation] }
+        gpu_model: { type: string }
+        card_count: { type: integer }
+        machine_count: { type: integer }
+        total_pflops_approx: { type: string }
+        power_capacity_kw: { type: integer }
+        rack_count: { type: integer }
+        cpu_spec: { type: string }
+        memory_spec: { type: string }
+        storage_spec: { type: string }
+        bandwidth_spec: { type: string }
+        delivery_mode: { type: string, enum: [bare_metal, container, vm, rack] }
+        pricing_mode: { type: string, enum: [hourly, daily, weekly, monthly, perpetual] }
+        unit_price: { type: integer, format: int64, minimum: 0, description: 单价（分） }
+        price_negotiable: { type: boolean }
+        available_hours: { type: string }
+        stock: { type: integer, minimum: 1, maximum: 100000 }
+        min_order: { type: integer, minimum: 1 }
+        min_duration: { type: integer, minimum: 1 }
+        region: { type: string }
+        compliance_agreed: { type: boolean, enum: [true] }
+
     Product:
       type: object
       properties:
@@ -98,7 +124,7 @@ components:
         buyer_id: { type: integer }
         product_id: { type: integer }
         quantity: { type: integer }
-        duration: { type: integer, description: "租期(小时)" }
+        duration: { type: integer, description: "计费周期数（根据商品 hourly/daily/weekly/monthly）；perpetual 强制为 1" }
         unit_price: { type: integer, description: "单价(分)" }
         total_amount: { type: integer, description: "总金额(分)" }
         platform_fee: { type: integer, description: "平台佣金(分)" }
@@ -499,31 +525,6 @@ paths:
         - { name: page_size, in: query, schema: { type: integer, default: 20 } }
       responses:
         '200': { description: "商品列表" }
-    post:
-      tags: [算力撮合 Compute]
-      summary: 上架算力商品（供给方）
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [gpu_model, card_count, delivery_mode, pricing_mode, unit_price, stock, region, compliance_agreed]
-              properties:
-                gpu_model: { type: string }
-                card_count: { type: integer }
-                cpu_spec: { type: string }
-                memory_spec: { type: string }
-                storage_spec: { type: string }
-                bandwidth_spec: { type: string }
-                delivery_mode: { type: string }
-                pricing_mode: { type: string }
-                unit_price: { type: integer, description: "单价(分)/卡·时" }
-                available_hours: { type: string }
-                stock: { type: integer }
-                min_order: { type: integer }
-                min_duration: { type: integer }
-                region: { type: string }
-                compliance_agreed: { type: boolean }
 
   /products/{id}:
     get:
@@ -539,6 +540,7 @@ paths:
     post:
       tags: [算力撮合 Compute]
       summary: 下单
+      description: 需要有效 buyer 角色、个人或企业已认证，compliance_agreed 必须为 true。成功创建 pending_payment，保留库存 15 分钟。
       requestBody:
         content:
           application/json:
@@ -548,7 +550,7 @@ paths:
               properties:
                 product_id: { type: integer }
                 quantity: { type: integer }
-                duration: { type: integer, description: "租期(小时)" }
+                duration: { type: integer, description: "计费周期数（根据商品 hourly/daily/weekly/monthly）；perpetual 强制为 1" }
                 compliance_agreed: { type: boolean }
       responses:
         '200': { description: "订单创建成功" }
@@ -792,9 +794,56 @@ paths:
       summary: 提交资质
 
   /supplier/products:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 提交算力商品审核
+      description: 需要有效 supplier 角色、已完成个人或企业认证以及有效供给方资质。创建后为 pending。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductSubmission' }
+      responses:
+        '200': { description: 'code=0 返回 data.id；准入失败 code=40300；参数错误 code=40001' }
     get:
       tags: [算力撮合 Compute]
       summary: 我的商品
+
+  /supplier/products/{id}:
+    put:
+      tags: [算力撮合 Compute]
+      summary: 修改并重新提交被驳回的商品
+      description: 仅商品归属供给方可操作 draft；成功后状态 pending，清空 rejected_reason。其他状态返回 code=40900。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProductSubmission' }
+      responses:
+        '200': { description: '业务结果；code=0 时返回 data.id' }
+
+  /products/{id}/inquiries:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 面议算力商品询价
+      description: 已认证买家可对 active 且 price_negotiable 的商品询价，需求进入 CRM compute 线索。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contact_name, contact_phone, message]
+              properties:
+                contact_name: { type: string, minLength: 1, maxLength: 64 }
+                contact_phone: { type: string, minLength: 6, maxLength: 20 }
+                message: { type: string, minLength: 5, maxLength: 2000 }
+      responses:
+        '200': { description: 'code=0 返回 data.id（询价线索编号）' }
 
   /supplier/orders:
     get:
@@ -821,6 +870,7 @@ paths:
     post:
       tags: [支付分账 Payment]
       summary: 发起支付
+      description: 校验买家归属、认证、订单待支付且未过期。金额取自订单；重复请求复用同一收银台。未接入支付渠道仍返回 code=50000。
       requestBody:
         content:
           application/json:
@@ -835,6 +885,7 @@ paths:
     get:
       tags: [支付分账 Payment]
       summary: 支付状态查询
+      description: 仅订单所属买家可查，未发起支付返回空数组，其他买家返回 code=40300。
       parameters:
         - { name: order_no, in: path, required: true, schema: { type: string } }
 
@@ -842,6 +893,7 @@ paths:
     post:
       tags: [支付分账 Payment]
       summary: 易宝支付回调
+      description: 必须先验签并校验交易号、订单号、成功状态及金额。业务订单与支付记录原子更新；幂等创建真实供给方分账。晚到回调不能恢复已取消订单。当前易宝未接入，默认拒绝全部回调。
       security: []
       requestBody:
         content:
@@ -958,11 +1010,22 @@ paths:
     post:
       tags: [运营管理 Admin]
       summary: 通过商品审核
+      description: 仅 pending 可转为 active，状态冲突返回 code=40900。
 
   /admin/audits/products/{id}/reject:
     post:
       tags: [运营管理 Admin]
       summary: 驳回商品审核
+      description: 仅 pending 可转为 draft，保留驳回原因，状态冲突返回 code=40900。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 256 }
 
   /admin/products:
     get:
@@ -983,6 +1046,9 @@ paths:
     patch:
       tags: [运营管理 Admin]
       summary: 订单干预
+      description: 支持数字订单 ID 或业务订单号。取消订单会释放库存并吊销访问凭证，重复取消不会重复释放库存。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: 数字订单 ID 或业务订单号 }
 
   /admin/invoices:
     get:

@@ -34,6 +34,10 @@ func (h *Handler) CreateLead(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
+	if req.Type == "compute" {
+		response.Error(c, errcode.ParamInvalid, "请从算力商品详情提交询价")
+		return
+	}
 	id, err := h.svc.CreateLead(req)
 	if err != nil {
 		response.Error(c, errcode.InternalError, err.Error())

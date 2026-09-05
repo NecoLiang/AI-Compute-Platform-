@@ -653,9 +653,38 @@ func allowedModesText(productType string) string {
 }
 
 func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, error) {
+	p, err := s.prepareProduct(supplierID, req)
+	if err != nil {
+		return 0, err
+	}
+	return s.repo.CreateProduct(p)
+}
+
+func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) error {
+	p, err := s.prepareProduct(supplierID, req)
+	if err != nil {
+		return err
+	}
+	existing, err := s.repo.GetProductByID(id)
+	if err != nil {
+		return err
+	}
+	if existing.SupplierID != supplierID {
+		return fmt.Errorf("无权修改其他供给方的商品")
+	}
+	return s.repo.ResubmitProduct(id, p)
+}
+
+func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Product, error) {
+	if err := s.repo.RequireTradingAccess(supplierID, "supplier"); err != nil {
+		return nil, err
+	}
+	if !req.ComplianceAgreed {
+		return nil, fmt.Errorf("请先确认算力资源使用规范")
+	}
 	req = NormalizeProductReq(req)
 	if err := ValidateProductReq(req); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	p := &Product{
@@ -696,7 +725,7 @@ func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, 
 		p.RackCount = &v
 	}
 
-	return s.repo.CreateProduct(p)
+	return p, nil
 }
 
 func (s *Service) GetProduct(id int64) (*Product, *CreditScore, error) {
@@ -811,11 +840,15 @@ func (s *Service) GetSupplierProductsGrouped(supplierID int64) ([]ProductTypeGro
 }
 
 func (s *Service) ApproveProduct(id int64) error {
-	return s.repo.UpdateProductStatus(id, "active")
+	return s.repo.ReviewProduct(id, "active", "")
 }
 
-func (s *Service) RejectProduct(id int64) error {
-	return s.repo.UpdateProductStatus(id, "draft")
+func (s *Service) RejectProduct(id int64, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len([]rune(reason)) > 256 {
+		return fmt.Errorf("请填写 1–256 字的驳回原因")
+	}
+	return s.repo.ReviewProduct(id, "draft", reason)
 }
 
 func (s *Service) OfflineProduct(id int64) error {
@@ -937,6 +970,12 @@ func CalcOrderAmount(unitPriceFen int64, quantity, duration int, feeRateBp int64
 }
 
 func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
+	if err := s.repo.RequireTradingAccess(buyerID, "buyer"); err != nil {
+		return nil, err
+	}
+	if !req.ComplianceAgreed {
+		return nil, fmt.Errorf("请先确认算力资源使用规范")
+	}
 	p, err := s.repo.GetProductByID(req.ProductID)
 	if err != nil {
 		return nil, fmt.Errorf("product not found")
@@ -1692,6 +1731,9 @@ func (s *Service) ListResourceSyncs(operatorID int64, isAdmin bool, productID in
 // ===== Renewal (T-018) =====
 
 func (s *Service) RenewOrder(buyerID int64, orderNo string, additionalDuration int) (*Order, error) {
+	if err := s.repo.RequireTradingAccess(buyerID, "buyer"); err != nil {
+		return nil, err
+	}
 	o, err := s.repo.GetOrderByNo(orderNo)
 	if err != nil {
 		return nil, err
