@@ -1,0 +1,1 @@
+ALTER TABLE products ADD COLUMN rejected_reason VARCHAR(256) NOT NULL DEFAULT '';

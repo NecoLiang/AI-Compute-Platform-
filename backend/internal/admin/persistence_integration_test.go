@@ -3,6 +3,7 @@ package admin
 import (
 	"os"
 	"testing"
+	"tokenfactory/internal/intermediary"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -43,6 +44,28 @@ func TestConfigAndNoticeSurviveServiceRecreation(t *testing.T) {
 	}
 }
 
+func TestEmptyRiskAlertQueueUsesCurrentSchema(t *testing.T) {
+	db := setupAdminPersistenceTestDB(t)
+	list, total, err := NewService(NewRepository(db)).ListAlerts("", 1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(list) != 0 {
+		t.Fatalf("list=%+v total=%d", list, total)
+	}
+}
+
+func TestEmptyLeadQueueUsesCurrentSchema(t *testing.T) {
+	db := setupAdminPersistenceTestDB(t)
+	list, total, err := intermediary.NewService(intermediary.NewRepository(db)).ListLeads("", 1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(list) != 0 {
+		t.Fatalf("list=%+v total=%d", list, total)
+	}
+}
+
 func setupAdminPersistenceTestDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 	dsn := os.Getenv("TEST_MYSQL_DSN")
@@ -64,6 +87,8 @@ func setupAdminPersistenceTestDB(t *testing.T) *sqlx.DB {
 		`INSERT INTO system_config (config_key, config_value) VALUES ('trading_enabled','true'),('fee_rate','500')`,
 		`CREATE TABLE cms_notices (id BIGINT PRIMARY KEY AUTO_INCREMENT, content TEXT NOT NULL, status ENUM('published','withdrawn') NOT NULL DEFAULT 'published', created_by BIGINT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`,
 		`CREATE TABLE audit_logs (id BIGINT PRIMARY KEY AUTO_INCREMENT, operator_id BIGINT, action VARCHAR(64) NOT NULL, target_type VARCHAR(32), target_id BIGINT, before_value TEXT, after_value TEXT, ip VARCHAR(45), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE risk_alerts (id BIGINT PRIMARY KEY AUTO_INCREMENT, level ENUM('high','medium','low') NOT NULL, alert_type VARCHAR(32) NOT NULL, target_type VARCHAR(32), target_id BIGINT, rule_detail TEXT, status ENUM('pending','processing','resolved','dismissed') DEFAULT 'pending', operator_id BIGINT, resolution TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`,
+		`CREATE TABLE leads (id BIGINT PRIMARY KEY AUTO_INCREMENT, type ENUM('equipment','construction','finance_lease') NOT NULL, contact_name VARCHAR(64), contact_phone VARCHAR(20), contact_email VARCHAR(128), description TEXT, amount_range VARCHAR(32), term VARCHAR(32), status ENUM('new','assigned','following','quoted','closed','cancelled') DEFAULT 'new', assignee_id BIGINT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`,
 	} {
 		db.MustExec(statement)
 	}

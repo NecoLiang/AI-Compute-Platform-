@@ -33,36 +33,37 @@ type SupplierQualification struct {
 // gpu_model / card_count / delivery_mode 在 002 迁移后允许为 NULL(colocation 无设备),
 // 读取时统一 COALESCE 成零值以保持既有 API 兼容, 写入时零值转 NULL。
 type Product struct {
-	ID                int64     `db:"id" json:"id"`
-	SupplierID        int64     `db:"supplier_id" json:"supplier_id"`
-	ProductType       string    `db:"product_type" json:"product_type"`
-	GpuModel          string    `db:"gpu_model" json:"gpu_model"`
-	CardCount         int       `db:"card_count" json:"card_count"`
-	MachineCount      *int      `db:"machine_count" json:"machine_count"`
-	TotalPflopsApprox *string   `db:"total_pflops_approx" json:"total_pflops_approx"`
-	PowerCapacityKw   *int      `db:"power_capacity_kw" json:"power_capacity_kw"`
-	RackCount         *int      `db:"rack_count" json:"rack_count"`
-	CpuSpec           string    `db:"cpu_spec" json:"cpu_spec"`
-	MemorySpec        string    `db:"memory_spec" json:"memory_spec"`
-	StorageSpec       string    `db:"storage_spec" json:"storage_spec"`
-	BandwidthSpec     string    `db:"bandwidth_spec" json:"bandwidth_spec"`
-	DeliveryMode      string    `db:"delivery_mode" json:"delivery_mode"`
-	PricingMode       string    `db:"pricing_mode" json:"pricing_mode"`
-	UnitPrice         int64     `db:"unit_price" json:"unit_price"` // fen
-	PriceNegotiable   bool      `db:"price_negotiable" json:"price_negotiable"`
-	AvailableHours    string    `db:"available_hours" json:"available_hours"`
-	Stock             int       `db:"stock" json:"stock"`
-	MinOrder          int       `db:"min_order" json:"min_order"`
-	MinDuration       int       `db:"min_duration" json:"min_duration"`
-	Region            string    `db:"region" json:"region"`
-	Status            string    `db:"status" json:"status"`
+	ID                int64   `db:"id" json:"id"`
+	SupplierID        int64   `db:"supplier_id" json:"supplier_id"`
+	ProductType       string  `db:"product_type" json:"product_type"`
+	GpuModel          string  `db:"gpu_model" json:"gpu_model"`
+	CardCount         int     `db:"card_count" json:"card_count"`
+	MachineCount      *int    `db:"machine_count" json:"machine_count"`
+	TotalPflopsApprox *string `db:"total_pflops_approx" json:"total_pflops_approx"`
+	PowerCapacityKw   *int    `db:"power_capacity_kw" json:"power_capacity_kw"`
+	RackCount         *int    `db:"rack_count" json:"rack_count"`
+	CpuSpec           string  `db:"cpu_spec" json:"cpu_spec"`
+	MemorySpec        string  `db:"memory_spec" json:"memory_spec"`
+	StorageSpec       string  `db:"storage_spec" json:"storage_spec"`
+	BandwidthSpec     string  `db:"bandwidth_spec" json:"bandwidth_spec"`
+	DeliveryMode      string  `db:"delivery_mode" json:"delivery_mode"`
+	PricingMode       string  `db:"pricing_mode" json:"pricing_mode"`
+	UnitPrice         int64   `db:"unit_price" json:"unit_price"` // fen
+	PriceNegotiable   bool    `db:"price_negotiable" json:"price_negotiable"`
+	AvailableHours    string  `db:"available_hours" json:"available_hours"`
+	Stock             int     `db:"stock" json:"stock"`
+	MinOrder          int     `db:"min_order" json:"min_order"`
+	MinDuration       int     `db:"min_duration" json:"min_duration"`
+	Region            string  `db:"region" json:"region"`
+	Status            string  `db:"status" json:"status"`
+	RejectedReason    string  `db:"rejected_reason" json:"rejected_reason"`
 	// Health 节点探活聚合的健康度(unknown/healthy/degraded/offline), 由 scheduler 模块维护。
 	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
-	Health       string `db:"health" json:"health"`
-	SelfOperated bool   `db:"self_operated" json:"self_operated"`
-	ComplianceAgreed  bool      `db:"compliance_agreed" json:"compliance_agreed"`
-	CreatedAt         time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt         time.Time `db:"updated_at" json:"updated_at"`
+	Health           string    `db:"health" json:"health"`
+	SelfOperated     bool      `db:"self_operated" json:"self_operated"`
+	ComplianceAgreed bool      `db:"compliance_agreed" json:"compliance_agreed"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type Order struct {
@@ -148,7 +149,7 @@ const productColumns = `id, supplier_id, product_type,
 	COALESCE(price_negotiable,0) AS price_negotiable, COALESCE(available_hours,'') AS available_hours,
 	stock, COALESCE(min_order,1) AS min_order, COALESCE(min_duration,1) AS min_duration,
 	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
-	COALESCE(compliance_agreed,0) AS compliance_agreed, created_at, updated_at`
+	COALESCE(compliance_agreed,0) AS compliance_agreed, rejected_reason, created_at, updated_at`
 
 const orderColumns = `id, order_no, buyer_id, product_id, quantity, duration, unit_price,
 	total_amount, platform_fee, status, payment_expires_at, lease_start_at, lease_end_at,
@@ -383,6 +384,35 @@ func hydrateApplication(q *SupplierQualification) {
 }
 
 // Products
+func (r *Repository) RequireTradingAccess(userID int64, role string) error {
+	var access struct {
+		Role      bool `db:"has_role"`
+		Verified  bool `db:"verified"`
+		Qualified bool `db:"qualified"`
+	}
+	err := r.db.Get(&access, `SELECT
+		EXISTS(SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
+			WHERE u.id=? AND u.status='active' AND r.role=?) AS has_role,
+		(EXISTS(SELECT 1 FROM user_kyc WHERE user_id=? AND status='verified') OR
+		 EXISTS(SELECT 1 FROM enterprises WHERE user_id=? AND status='verified')) AS verified,
+		EXISTS(SELECT 1 FROM supplier_qualifications WHERE user_id=? AND status='verified'
+			AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)) AS qualified`,
+		userID, role, userID, userID, userID)
+	if err != nil {
+		return err
+	}
+	if !access.Role {
+		return fmt.Errorf("无权进行此操作，请使用有效的%s账号", map[string]string{"buyer": "买家", "supplier": "供给方"}[role])
+	}
+	if !access.Verified {
+		return fmt.Errorf("无权进行交易，请先完成个人或企业认证")
+	}
+	if role == "supplier" && !access.Qualified {
+		return fmt.Errorf("无权发布商品，请先完成供给方资质审核")
+	}
+	return nil
+}
+
 func (r *Repository) CreateProduct(p *Product) (int64, error) {
 	res, err := r.db.Exec(
 		`INSERT INTO products (supplier_id, product_type, gpu_model, card_count, machine_count, total_pflops_approx,
@@ -411,6 +441,45 @@ func (r *Repository) GetProductByID(id int64) (*Product, error) {
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (r *Repository) ResubmitProduct(id int64, p *Product) error {
+	result, err := r.db.Exec(`UPDATE products SET product_type=?, gpu_model=?, card_count=?,
+		machine_count=?, total_pflops_approx=?, power_capacity_kw=?, rack_count=?, cpu_spec=?,
+		memory_spec=?, storage_spec=?, bandwidth_spec=?, delivery_mode=?, pricing_mode=?, unit_price=?,
+		price_negotiable=?, available_hours=?, stock=?, min_order=?, min_duration=?, region=?,
+		compliance_agreed=?, status='pending', rejected_reason=''
+		WHERE id=? AND supplier_id=? AND status='draft'`,
+		p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
+		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
+		nullString(p.DeliveryMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours,
+		p.Stock, p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed, id, p.SupplierID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("product review conflict")
+	}
+	return nil
+}
+
+func (r *Repository) ReviewProduct(id int64, status, reason string) error {
+	result, err := r.db.Exec("UPDATE products SET status=?, rejected_reason=? WHERE id=? AND status='pending'", status, reason, id)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("product review conflict")
+	}
+	return nil
 }
 
 func (r *Repository) UpdateProductStatus(id int64, status string) error {
@@ -1066,6 +1135,8 @@ func ErrToCode(err error) int {
 	case "delivery not found":
 		return errcode.NotFound
 	case "product not available":
+		return errcode.Conflict
+	case "product review conflict":
 		return errcode.Conflict
 	case "order not active":
 		return errcode.Conflict

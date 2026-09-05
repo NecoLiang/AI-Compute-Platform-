@@ -68,7 +68,12 @@ func (r *Repository) ListLeads(status string, page, pageSize int) ([]Lead, int64
 		pageSize = 20
 	}
 	var list []Lead
-	err := r.db.Select(&list, "SELECT * FROM leads "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
+	err := r.db.Select(&list, `SELECT id, type,
+		COALESCE(contact_name, '') AS contact_name, COALESCE(contact_phone, '') AS contact_phone,
+		COALESCE(contact_email, '') AS contact_email, COALESCE(description, '') AS description,
+		COALESCE(amount_range, '') AS amount_range, COALESCE(term, '') AS term,
+		COALESCE(status, 'new') AS status, assignee_id, created_at
+		FROM leads `+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
 	return list, total, err
 }
 

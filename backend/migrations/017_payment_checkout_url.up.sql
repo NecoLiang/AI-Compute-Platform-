@@ -1,0 +1,1 @@
+ALTER TABLE payments ADD COLUMN pay_url TEXT NULL;

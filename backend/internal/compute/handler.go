@@ -41,6 +41,7 @@ func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
 	r.GET("/supplier/products", h.GetMyProducts)
 	r.GET("/supplier/products/summary", h.GetMyProductsGrouped)
 	r.POST("/supplier/products", h.CreateProduct)
+	r.PUT("/supplier/products/:id", h.ResubmitProduct)
 	r.GET("/supplier/orders", h.ListSupplierOrders)
 	r.GET("/supplier/resource-syncs", h.ListResourceSyncs)
 	r.POST("/supplier/resource-syncs/passive", h.PassiveResourceSync)
@@ -48,6 +49,7 @@ func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
 }
 
 func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
+	r.POST("/products/:id/inquiries", h.CreateProductInquiry)
 	r.POST("/orders", h.PlaceOrder)
 	r.GET("/orders", h.ListBuyerOrders)
 	r.GET("/orders/:id", h.GetOrder)
@@ -194,7 +196,9 @@ func (h *Handler) GetMyProducts(c *gin.Context) {
 	}
 	var result []gin.H
 	for _, p := range list {
-		result = append(result, productToJSON(&p))
+		item := productToJSON(&p)
+		item["rejected_reason"] = p.RejectedReason
+		result = append(result, item)
 	}
 	response.Success(c, result)
 }
@@ -211,7 +215,9 @@ func (h *Handler) GetMyProductsGrouped(c *gin.Context) {
 	for _, g := range groups {
 		items := make([]gin.H, 0, len(g.Products))
 		for i := range g.Products {
-			items = append(items, productToJSON(&g.Products[i]))
+			item := productToJSON(&g.Products[i])
+			item["rejected_reason"] = g.Products[i].RejectedReason
+			items = append(items, item)
 		}
 		result = append(result, gin.H{
 			"product_type": g.ProductType, "label": g.Label,
@@ -612,7 +618,7 @@ func (h *Handler) RejectQualification(c *gin.Context) {
 func (h *Handler) ApproveProduct(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err := h.svc.ApproveProduct(id); err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
 	response.Success(c, nil)
@@ -620,11 +626,36 @@ func (h *Handler) ApproveProduct(c *gin.Context) {
 
 func (h *Handler) RejectProduct(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err := h.svc.RejectProduct(id); err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, "请填写驳回原因")
+		return
+	}
+	if err := h.svc.RejectProduct(id, req.Reason); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
 	response.Success(c, nil)
+}
+
+func (h *Handler) ResubmitProduct(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "商品编号无效")
+		return
+	}
+	var req CreateProductReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if err := h.svc.ResubmitProduct(c.GetInt64("user_id"), id, req); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, gin.H{"id": id})
 }
 
 func (h *Handler) OfflineProduct(c *gin.Context) {
@@ -667,7 +698,21 @@ func (h *Handler) AdminUpdateOrderStatus(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	if err := h.svc.AdminUpdateOrderStatus(idOrNo, req.Status); err != nil {
+	var order *Order
+	var err error
+	if id, parseErr := strconv.ParseInt(idOrNo, 10, 64); parseErr == nil && id > 0 {
+		order, err = h.svc.GetOrderByID(id)
+	} else if validOrderNo(idOrNo) {
+		order, err = h.svc.GetOrder(idOrNo)
+	} else {
+		response.Error(c, errcode.ParamInvalid, "订单编号无效")
+		return
+	}
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	if err := h.svc.AdminUpdateOrderStatus(order.OrderNo, req.Status); err != nil {
 		response.Error(c, errcode.InternalError, err.Error())
 		return
 	}

@@ -86,7 +86,10 @@ func (r *Repository) ListAlerts(level string, page, pageSize int) ([]Alert, int6
 		pageSize = 20
 	}
 	var list []Alert
-	err := r.db.Select(&list, "SELECT * FROM risk_alerts "+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
+	err := r.db.Select(&list, `SELECT id, level, alert_type,
+		COALESCE(target_type, '') AS target_type, COALESCE(target_id, 0) AS target_id,
+		COALESCE(rule_detail, '') AS rule_detail, status, created_at
+		FROM risk_alerts `+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
 	return list, total, err
 }
 
