@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"tokenfactory/internal/legal"
 	"tokenfactory/pkg/errcode"
 )
 
@@ -23,22 +24,26 @@ func NewService(repo *Repository) *Service {
 }
 
 type PersonalKYCReq struct {
-	RealName string `json:"real_name" binding:"required"`
-	IDCard   string `json:"id_card" binding:"required"`
+	SensitiveDataAgreed bool   `json:"sensitive_data_agreed"`
+	PrivacyVersion      string `json:"privacy_version"`
+	RealName            string `json:"real_name" binding:"required"`
+	IDCard              string `json:"id_card" binding:"required"`
 }
 
 type EnterpriseReq struct {
-	Name               string `json:"enterprise_name"`
-	USCC               string `json:"uscc"`
-	LicenseURL         string `json:"license_url"`
-	LegalPerson        string `json:"legal_person"`
-	LegalPersonIDCard  string `json:"legal_person_id_card"`
-	BankName           string `json:"bank_name"`
-	BankAccountName    string `json:"bank_account_name"`
-	BankAccountNumber  string `json:"bank_account_number"`
-	LicenseFileName    string `json:"license_file_name"`
-	LicenseContentType string `json:"license_content_type"`
-	LicenseData        []byte `json:"-"`
+	SensitiveDataAgreed bool   `json:"sensitive_data_agreed"`
+	PrivacyVersion      string `json:"privacy_version"`
+	Name                string `json:"enterprise_name"`
+	USCC                string `json:"uscc"`
+	LicenseURL          string `json:"license_url"`
+	LegalPerson         string `json:"legal_person"`
+	LegalPersonIDCard   string `json:"legal_person_id_card"`
+	BankName            string `json:"bank_name"`
+	BankAccountName     string `json:"bank_account_name"`
+	BankAccountNumber   string `json:"bank_account_number"`
+	LicenseFileName     string `json:"license_file_name"`
+	LicenseContentType  string `json:"license_content_type"`
+	LicenseData         []byte `json:"-"`
 }
 
 var identityNumberPattern = regexp.MustCompile(`^(?:\d{15}|\d{17}[\dXx])$`)
@@ -56,6 +61,9 @@ type KYCItem struct {
 }
 
 func (s *Service) SubmitPersonalKYC(userID int64, req PersonalKYCReq) error {
+	if err := validateSensitiveConsent(req.SensitiveDataAgreed, req.PrivacyVersion); err != nil {
+		return err
+	}
 	existing, err := s.repo.GetPersonalKYC(userID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -64,10 +72,13 @@ func (s *Service) SubmitPersonalKYC(userID int64, req PersonalKYCReq) error {
 		return ErrAlreadySubmitted
 	}
 	// ponytail: pilot submissions auto-verify; replace this write with a provider verdict when real KYC is required.
-	return s.repo.CreatePersonalKYC(userID, req.RealName, req.IDCard)
+	return s.repo.CreatePersonalKYC(userID, req.RealName, req.IDCard, req.PrivacyVersion)
 }
 
 func (s *Service) SubmitEnterprise(userID int64, req EnterpriseReq) error {
+	if err := validateSensitiveConsent(req.SensitiveDataAgreed, req.PrivacyVersion); err != nil {
+		return err
+	}
 	if err := validateEnterpriseReq(req); err != nil {
 		return err
 	}
@@ -79,6 +90,13 @@ func (s *Service) SubmitEnterprise(userID int64, req EnterpriseReq) error {
 		return ErrAlreadySubmitted
 	}
 	return s.repo.CreateEnterprise(userID, req)
+}
+
+func validateSensitiveConsent(agreed bool, version string) error {
+	if !agreed {
+		return fmt.Errorf("%w: 请单独同意认证所需的敏感个人信息处理", ErrInvalidKYC)
+	}
+	return legal.ValidateVersion(version)
 }
 
 func validateEnterpriseReq(req EnterpriseReq) error {
@@ -139,7 +157,7 @@ func ErrToCode(err error) int {
 	switch {
 	case errors.Is(err, ErrAlreadySubmitted):
 		return errcode.Conflict
-	case errors.Is(err, ErrInvalidKYC):
+	case errors.Is(err, ErrInvalidKYC), errors.Is(err, legal.ErrVersion):
 		return errcode.ParamInvalid
 	default:
 		return errcode.InternalError

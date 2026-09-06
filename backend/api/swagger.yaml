@@ -602,8 +602,8 @@ paths:
                           properties:
                             document: { type: string, enum: [terms, privacy, resource-listing-rules, resource-usage-rules] }
                             version: { type: string, example: "2026-09-06.1" }
-                            action: { type: string, enum: [registration, publish, resubmit, order] }
-                            reference: { type: string, description: 注册为用户 ID，发布为商品 ID，下单为订单号 }
+                            action: { type: string, enum: [registration, publish, resubmit, order, kyc_personal, kyc_enterprise] }
+                            reference: { type: string, description: 注册/认证为用户 ID，发布为商品 ID，下单为订单号 }
                             accepted_at: { type: string, format: date-time }
 
   /auth/me:
@@ -624,8 +624,10 @@ paths:
           application/json:
             schema:
               type: object
-              required: [real_name, id_card]
+              required: [real_name, id_card, sensitive_data_agreed, privacy_version]
               properties:
+                sensitive_data_agreed: { type: boolean, enum: [true], description: 对本次认证所需敏感个人信息处理的单独同意；multipart 传字符串 true }
+                privacy_version: { type: string, enum: ["2026-09-06.1"] }
                 real_name: { type: string, example: "张三" }
                 id_card: { type: string, example: "110101199001011234" }
 
@@ -639,8 +641,10 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [enterprise_name, uscc, legal_person, legal_person_id_card, bank_name, bank_account_name, bank_account_number, business_license]
+              required: [enterprise_name, uscc, legal_person, legal_person_id_card, bank_name, bank_account_name, bank_account_number, business_license, sensitive_data_agreed, privacy_version]
               properties:
+                sensitive_data_agreed: { type: boolean, enum: [true], description: 对本次认证所需敏感个人信息处理的单独同意；multipart 传字符串 true }
+                privacy_version: { type: string, enum: ["2026-09-06.1"] }
                 enterprise_name: { type: string, example: "某科技有限公司" }
                 uscc: { type: string }
                 legal_person: { type: string }

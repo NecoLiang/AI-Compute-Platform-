@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+	"tokenfactory/internal/legal"
 
 	"tokenfactory/internal/auth"
 	"tokenfactory/internal/sms"
@@ -138,4 +140,65 @@ func TestTradeRecordsListingAndUsageConsentWithBusinessChanges(t *testing.T) {
 	require.Equal(t, 6, stock)
 	require.Equal(t, 1, orders)
 	require.Equal(t, 1, products)
+}
+
+func TestKYCSensitiveConsentIsSeparateAndAtomic(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	for index, kind := range []string{"personal", "enterprise"} {
+		accountID := int64(103 + index)
+		router := gin.New()
+		user.NewHandler(user.NewService(user.NewRepository(db))).RegisterRoutes(router.Group("/api/v1", userID(accountID)))
+		input := map[string]any{"real_name": "Consent test", "id_card": "110101199001011234", "enterprise_name": "Consent test enterprise", "uscc": "91110000123456789X", "legal_person": "Consent test", "legal_person_id_card": "110101199001011234", "bank_name": "Test bank", "bank_account_name": "Test enterprise", "bank_account_number": "1234567890", "privacy_version": "2026-09-06.1"}
+		post := func(expected int) {
+			t.Helper()
+			var body bytes.Buffer
+			contentType := "application/json"
+			if kind == "personal" {
+				require.NoError(t, json.NewEncoder(&body).Encode(input))
+			} else {
+				writer := multipart.NewWriter(&body)
+				for key, value := range input {
+					require.NoError(t, writer.WriteField(key, fmt.Sprint(value)))
+				}
+				file, err := writer.CreateFormFile("business_license", "consent-test.pdf")
+				require.NoError(t, err)
+				_, err = file.Write([]byte("%PDF-1.4\nTest license"))
+				require.NoError(t, err)
+				require.NoError(t, writer.Close())
+				contentType = writer.FormDataContentType()
+			}
+			req := httptest.NewRequest("POST", "/api/v1/user/kyc/"+kind, &body)
+			req.Header.Set("Content-Type", contentType)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			var result envelope
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+			require.Equal(t, expected, result.Code, "%s: %s", kind, result.Message)
+		}
+		post(40001)
+		input["sensitive_data_agreed"] = true
+		input["privacy_version"] = "old-version"
+		post(40001)
+		records, err := legal.List(db, accountID)
+		require.NoError(t, err)
+		require.Empty(t, records)
+		input["privacy_version"] = "2026-09-06.1"
+		post(0)
+		records, err = legal.List(db, accountID)
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		require.Equal(t, "privacy", records[0].Document)
+		require.Equal(t, "kyc_"+kind, records[0].Action)
+		require.Equal(t, "2026-09-06.1", records[0].Version)
+		require.WithinDuration(t, time.Now(), records[0].AcceptedAt, time.Minute)
+		post(40900)
+	}
+	db.MustExec("DROP TABLE legal_consents")
+	router := gin.New()
+	user.NewHandler(user.NewService(user.NewRepository(db))).RegisterRoutes(router.Group("/api/v1", userID(101)))
+	tradeRequest(t, router, "POST", "/api/v1/user/kyc/personal", map[string]any{"real_name": "Consent rollback", "id_card": "110101199001011234", "sensitive_data_agreed": true, "privacy_version": "2026-09-06.1"}, 50000)
+	var count int
+	require.NoError(t, db.Get(&count, "SELECT COUNT(*) FROM user_kyc WHERE user_id=101"))
+	require.Zero(t, count)
 }

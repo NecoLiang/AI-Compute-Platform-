@@ -90,17 +90,19 @@ func readEnterpriseRequest(c *gin.Context) (EnterpriseReq, error) {
 		return EnterpriseReq{}, fmt.Errorf("营业执照文件名无效")
 	}
 	return EnterpriseReq{
-		Name:               strings.TrimSpace(c.PostForm("enterprise_name")),
-		USCC:               strings.ToUpper(strings.TrimSpace(c.PostForm("uscc"))),
-		LicenseURL:         fileName,
-		LegalPerson:        strings.TrimSpace(c.PostForm("legal_person")),
-		LegalPersonIDCard:  strings.TrimSpace(c.PostForm("legal_person_id_card")),
-		BankName:           strings.TrimSpace(c.PostForm("bank_name")),
-		BankAccountName:    strings.TrimSpace(c.PostForm("bank_account_name")),
-		BankAccountNumber:  strings.TrimSpace(c.PostForm("bank_account_number")),
-		LicenseFileName:    fileName,
-		LicenseContentType: contentType,
-		LicenseData:        data,
+		SensitiveDataAgreed: c.PostForm("sensitive_data_agreed") == "true",
+		PrivacyVersion:      c.PostForm("privacy_version"),
+		Name:                strings.TrimSpace(c.PostForm("enterprise_name")),
+		USCC:                strings.ToUpper(strings.TrimSpace(c.PostForm("uscc"))),
+		LicenseURL:          fileName,
+		LegalPerson:         strings.TrimSpace(c.PostForm("legal_person")),
+		LegalPersonIDCard:   strings.TrimSpace(c.PostForm("legal_person_id_card")),
+		BankName:            strings.TrimSpace(c.PostForm("bank_name")),
+		BankAccountName:     strings.TrimSpace(c.PostForm("bank_account_name")),
+		BankAccountNumber:   strings.TrimSpace(c.PostForm("bank_account_number")),
+		LicenseFileName:     fileName,
+		LicenseContentType:  contentType,
+		LicenseData:         data,
 	}, nil
 }
 

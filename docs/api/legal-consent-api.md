@@ -5,7 +5,7 @@
 | 文档键 / 路由 | 文档 | 同意操作 |
 |---|---|---|
 | `/terms` | 用户服务协议 | 注册 |
-| `/privacy` | 隐私政策 | 注册 |
+| `/privacy` | 隐私政策 | 注册、个人/企业认证的独立同意 |
 | `/resource-listing-rules` | 算力资源上架规范 | 发布商品、驳回重提 |
 | `/resource-usage-rules` | 算力资源使用规范 | 创建订单 |
 
@@ -14,6 +14,7 @@
 ## HTTP 请求与记录
 
 - `POST /auth/register`：`agree_tos=true`、`terms_version`、`privacy_version` 都是必填的当前版本。
+- `POST /user/kyc/personal`、`POST /user/kyc/enterprise`：`sensitive_data_agreed=true`、`privacy_version`；认证页面独立告知所需信息、目的和影响，单独勾选默认关闭，切换认证类型后重置。
 - `POST /supplier/products`、`PUT /supplier/products/:id`、`POST /orders`：`compliance_agreed=true`、`compliance_version` 必须匹配当前版本。
 - 版本在浏览器 adapter 中随当前正文版本发送。BFF 仅转发，不替缺失版本补值；服务端不信任客户端时间。
 - 缺失/旧版本/未同意返回业务 `40001`。鉴权、角色、KYC、商品审核和库存规则继续独立生效。
@@ -23,7 +24,7 @@
 {"code":0,"message":"success","data":[{"document":"resource-usage-rules","version":"2026-09-06.1","action":"order","reference":"ORD20260906000000abcdef","accepted_at":"2026-09-06T08:00:00+08:00"}]}
 ```
 
-记录只追加，不覆盖。`action` 为 `registration`、`publish`、`resubmit`、`order`；`reference` 分别是用户 ID、商品 ID、商品 ID、订单号。同意记录与业务在同一事务中提交；任何一步失败全部回滚。旧账户与历史交易不回填无法证明的同意。
+记录只追加，不覆盖。`action` 为 `registration`、`publish`、`resubmit`、`order`、`kyc_personal`、`kyc_enterprise`；`reference` 分别是用户 ID、商品 ID、商品 ID、订单号、用户 ID、用户 ID。同意记录与业务在同一事务中提交；任何一步失败全部回滚。旧账户与历史交易不回填无法证明的同意。
 
 ## 迁移与版本发布
 
@@ -35,7 +36,7 @@
 
 - 运营主体工商登记全称，以及未登录也能使用的客服与隐私联系邮箱或电话；不能使用猜测或占位联系信息。
 - 正文与实际运营、短信服务商、材料保存期限、退款和投诉处理安排一致，经过运营方确认。
-- 当前 KYC 的真实性确认勾选不等于敏感个人信息处理的单独同意；不得把注册同意记录当作其证明。微信、支付或其他第三方实际启用前，需要按实际接收方补充披露及相应授权流程。
+- 微信、支付或其他第三方实际启用前，需要按实际接收方补充披露及相应授权流程。KYC 独立同意的技术记录不代表真实核验服务已经接入。
 
 页面与记录能力完成不等于协议已获法律审核、微信审核通过或支付可用。
 
