@@ -29,6 +29,7 @@ tags:
   - name: 认证 Auth
   - name: 用户 User
   - name: 算力撮合 Compute
+  - name: 型号库 Catalog
   - name: 开发 Dev
   - name: 支付分账 Payment
   - name: 居间金融 Intermediary
@@ -43,6 +44,35 @@ components:
       bearerFormat: JWT
 
   schemas:
+    GPUCatalogInput:
+      type: object
+      required: [vendor, model_name, origin, grade]
+      properties:
+        vendor: { type: string }
+        model_name: { type: string, description: 全局唯一标准型号名，商品 gpu_model 原样保存 }
+        origin: { type: string, enum: [domestic, international] }
+        grade: { type: string, enum: [datacenter, consumer] }
+        vram_gb: { type: integer, nullable: true, minimum: 1 }
+        vram_type: { type: string, nullable: true }
+        fp16_tflops: { type: number, nullable: true, description: 单卡 FP16 稠密 Tensor 算力 }
+        interconnect: { type: string, nullable: true }
+        secure_certified: { type: boolean, default: false }
+        spec_source: { type: string, nullable: true, description: 仅管理端返回 }
+        sort_weight: { type: integer, default: 0 }
+        status: { type: string, enum: [enabled, disabled], default: enabled, description: 更新时生效；新增始终 enabled }
+    GPUCatalogModel:
+      allOf:
+        - { $ref: '#/components/schemas/GPUCatalogInput' }
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+    GPUCatalogList:
+      type: object
+      properties:
+        list: { type: array, nullable: true, items: { $ref: '#/components/schemas/GPUCatalogModel' } }
+        total: { type: integer }
     Response:
       type: object
       properties:
@@ -283,6 +313,60 @@ security:
   - BearerAuth: []
 
 paths:
+  /gpu-catalog:
+    get:
+      tags: [型号库 Catalog]
+      summary: 查询启用的 GPU 型号，按权重降序、厂商、型号排序
+      security: []
+      parameters: &gpuCatalogFilters
+        - { name: origin, in: query, schema: { type: string, enum: [domestic, international] } }
+        - { name: grade, in: query, schema: { type: string, enum: [datacenter, consumer] } }
+        - { name: vendor, in: query, schema: { type: string }, description: 厂商精确匹配 }
+        - { name: q, in: query, schema: { type: string }, description: 型号模糊搜索 }
+      responses: &gpuCatalogListResponse
+        '200':
+          description: 业务成功 code=0；查询失败 code=50000
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/GPUCatalogList' }
+  /admin/gpu-catalog:
+    get:
+      tags: [型号库 Catalog]
+      summary: operator/admin 查询全部型号，包含 disabled 与 spec_source
+      parameters: *gpuCatalogFilters
+      responses: *gpuCatalogListResponse
+    post:
+      tags: [型号库 Catalog]
+      summary: operator/admin 新增型号，默认启用
+      requestBody: &gpuCatalogWriteBody
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GPUCatalogInput' }
+      responses: &gpuCatalogWriteResponse
+        '200':
+          description: 成功 code=0；校验或写入失败 code=40001
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/GPUCatalogModel' }
+  /admin/gpu-catalog/{id}:
+    put:
+      tags: [型号库 Catalog]
+      summary: operator/admin 整体更新型号；停用保留商品历史引用
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, format: int64 } }
+      requestBody: *gpuCatalogWriteBody
+      responses: *gpuCatalogWriteResponse
   # ==================== 认证 ====================
   /auth/captcha/verify:
     post:
