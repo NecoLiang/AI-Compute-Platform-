@@ -91,7 +91,7 @@ components:
 
     ProductSubmission:
       type: object
-      required: [product_type, pricing_mode, stock, region, compliance_agreed]
+      required: [product_type, pricing_mode, stock, region, compliance_agreed, compliance_version]
       properties:
         product_type: { type: string, enum: [card_rental, outright, center, colocation] }
         gpu_model: { type: string }
@@ -114,6 +114,7 @@ components:
         min_duration: { type: integer, minimum: 1 }
         region: { type: string }
         compliance_agreed: { type: boolean, enum: [true] }
+        compliance_version: { type: string, enum: ["2026-09-06.1"], description: 算力资源上架规范版本 }
 
     Product:
       type: object
@@ -525,11 +526,13 @@ paths:
           application/json:
             schema:
               type: object
-              required: [phone, sms_code, agree_tos]
+              required: [phone, sms_code, agree_tos, terms_version, privacy_version]
               properties:
                 phone: { type: string, example: "13800138000" }
                 sms_code: { type: string, example: "123456" }
-                agree_tos: { type: boolean, example: true }
+                agree_tos: { type: boolean, enum: [true] }
+                terms_version: { type: string, enum: ["2026-09-06.1"] }
+                privacy_version: { type: string, enum: ["2026-09-06.1"] }
       responses:
         '200':
           description: "注册成功，返回 access_token、refresh_token 与默认 buyer 用户信息"
@@ -575,6 +578,33 @@ paths:
               type: object
               properties:
                 refresh_token: { type: string, description: "传入时与 access token 一并撤销" }
+
+  /auth/consents:
+    get:
+      tags: [认证 Auth]
+      summary: 当前用户最近 100 条协议同意记录
+      description: 按记录 ID 降序返回，只读取 JWT 当前用户；accepted_at 为服务端记录时间，旧数据不补造同意记录。
+      responses:
+        '200':
+          description: 业务 code 为 0 时返回记录数组；未登录返回 code=40100
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          required: [document, version, action, reference, accepted_at]
+                          properties:
+                            document: { type: string, enum: [terms, privacy, resource-listing-rules, resource-usage-rules] }
+                            version: { type: string, example: "2026-09-06.1" }
+                            action: { type: string, enum: [registration, publish, resubmit, order] }
+                            reference: { type: string, description: 注册为用户 ID，发布为商品 ID，下单为订单号 }
+                            accepted_at: { type: string, format: date-time }
 
   /auth/me:
     get:
@@ -698,18 +728,19 @@ paths:
     post:
       tags: [算力撮合 Compute]
       summary: 下单
-      description: 需要有效 buyer 角色、个人或企业已认证，compliance_agreed 必须为 true。成功创建 pending_payment，保留库存 15 分钟。
+      description: 需要有效 buyer 角色、个人或企业已认证，compliance_agreed 必须为 true，compliance_version 必须是当前算力资源使用规范版本。缺失或旧版本返回 code=40001。同意记录与订单、库存变更在同一事务提交。成功创建 pending_payment，保留库存 15 分钟。
       requestBody:
         content:
           application/json:
             schema:
               type: object
-              required: [product_id, quantity, duration, compliance_agreed]
+              required: [product_id, quantity, duration, compliance_agreed, compliance_version]
               properties:
                 product_id: { type: integer }
                 quantity: { type: integer }
                 duration: { type: integer, description: "计费周期数（根据商品 hourly/daily/weekly/monthly）；perpetual 强制为 1" }
-                compliance_agreed: { type: boolean }
+                compliance_agreed: { type: boolean, enum: [true] }
+                compliance_version: { type: string, enum: ["2026-09-06.1"] }
       responses:
         '200': { description: "订单创建成功" }
     get:

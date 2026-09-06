@@ -100,7 +100,7 @@ func TestTradePublicProductVisibilityPreservesPrivateAccess(t *testing.T) {
 	if visible.Data.(map[string]any)["product"].(map[string]any)["gpu_model"] != "H100" {
 		t.Fatalf("approved product not visible: %v", visible.Data)
 	}
-	placed := tradeRequest(t, buyer, "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true}, 0)
+	placed := tradeRequest(t, buyer, "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
 	for _, status := range []string{"pending", "draft", "sold_out", "offline", "frozen"} {
 		t.Run(status, func(t *testing.T) {
@@ -133,7 +133,7 @@ func TestTradePaymentRejectsWrongOwnerBeforeContactingProvider(t *testing.T) {
 	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
-	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 1, "duration": 1, "compliance_agreed": true}, 0)
+	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 1, "duration": 1, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
 	pay := map[string]string{"order_no": no, "channel": "wechat"}
 	tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/payment/pay", pay, 40300)
@@ -175,7 +175,7 @@ func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
 	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
-	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true}, 0)
+	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
 	gateway := &testPaymentGateway{}
 	service := payment.NewService(payment.NewRepository(db), db, gateway)
@@ -241,7 +241,7 @@ func TestTradeLatePaymentCannotReviveCancelledOrderOrConsumeReleasedStock(t *tes
 	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
-	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true}, 0)
+	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
 	service := payment.NewService(payment.NewRepository(db), db, &testPaymentGateway{})
 	checkout, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "wechat"})
@@ -273,7 +273,7 @@ func TestTradeAdminClosesNumericOrderIDAndReleasesStockOnce(t *testing.T) {
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	admin := tradeRouter(db, 104)
 	tradeRequest(t, admin, "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
-	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true}, 0)
+	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
 	service := compute.NewService(compute.NewRepository(db), db)
 	order, _ := service.GetOrder(no)
@@ -296,7 +296,7 @@ func TestTradeInquiryReachesCRMWithProductContext(t *testing.T) {
 	seedTradeUsers(db)
 	tradeRequest(t, tradeRouter(db, 103), "POST", "/api/v1/leads", map[string]string{"type": "compute", "description": "forged product inquiry"}, 40001)
 	input := map[string]any{"product_type": "colocation", "power_capacity_kw": 200, "rack_count": 20,
-		"price_negotiable": true, "pricing_mode": "monthly", "stock": 20, "region": "北京", "compliance_agreed": true}
+		"price_negotiable": true, "pricing_mode": "monthly", "stock": 20, "region": "北京", "compliance_agreed": true, "compliance_version": "2026-09-06.1"}
 	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", input, 0)
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	path := fmt.Sprintf("/api/v1/products/%d/inquiries", id)
@@ -347,7 +347,7 @@ func seedTradeUsers(db *sqlx.DB) {
 func tradeProductInput() map[string]any {
 	return map[string]any{"product_type": "card_rental", "gpu_model": "H100", "card_count": 8,
 		"delivery_mode": "bare_metal", "pricing_mode": "hourly", "unit_price": 2300,
-		"stock": 8, "min_order": 1, "min_duration": 1, "region": "北京", "compliance_agreed": true}
+		"stock": 8, "min_order": 1, "min_duration": 1, "region": "北京", "compliance_agreed": true, "compliance_version": "2026-09-06.1"}
 }
 
 func TestTradeAdmissionRejectsWrongRoleUnverifiedAndMissingConsent(t *testing.T) {
@@ -356,7 +356,7 @@ func TestTradeAdmissionRejectsWrongRoleUnverifiedAndMissingConsent(t *testing.T)
 	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
-	order := map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true}
+	order := map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}
 	for _, user := range []int64{103, 104} {
 		tradeRequest(t, tradeRouter(db, user), "POST", "/api/v1/orders", order, 40300)
 	}

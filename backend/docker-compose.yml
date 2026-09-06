@@ -46,6 +46,7 @@ services:
       - ./migrations/016_compute_inquiry_leads.up.sql:/docker-entrypoint-initdb.d/016.sql:ro
       - ./migrations/017_payment_checkout_url.up.sql:/docker-entrypoint-initdb.d/017.sql:ro
       - ./migrations/018_wechat_login.up.sql:/docker-entrypoint-initdb.d/018.sql:ro
+      - ./migrations/019_legal_consents.up.sql:/docker-entrypoint-initdb.d/019.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

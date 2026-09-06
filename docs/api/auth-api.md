@@ -35,14 +35,16 @@
 ```
 curl -X POST http://localhost:8080/api/v1/auth/register \
   -H "Content-Type: application/json" \
-  -d '{"phone":"13800138000","sms_code":"123456","agree_tos":true}'
+  -d '{"phone":"13800138000","sms_code":"123456","agree_tos":true,"terms_version":"2026-09-06.1","privacy_version":"2026-09-06.1"}'
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|:--:|------|
 | phone | string | ✅ | 手机号 |
 | sms_code | string | ✅ | 短信验证码 |
-| agree_tos | bool | ✅ | 同意用户协议 |
+| agree_tos | bool | ✅ | 已阅读并同意用户服务协议及隐私政策，必须为 true |
+| terms_version | string | ✅ | 当前用户服务协议版本：`2026-09-06.1` |
+| privacy_version | string | ✅ | 当前隐私政策版本：`2026-09-06.1` |
 
 **成功** `200`
 ```json
@@ -144,3 +146,11 @@ curl -X POST http://localhost:8080/api/v1/user/kyc/enterprise \
 | 40300 | 账号被冻结 |
 | 40900 | 手机号已注册 |
 | 42900 | 请求过于频繁 |
+
+## 协议同意记录（2026-09-06）
+
+注册必须传入两个当前协议版本并明确同意。缺失、旧版本或未同意返回 `40001`；在短信校验前拒绝，不消费有效短信验证码。两条同意记录与用户、默认 buyer 角色在同一数据库事务提交。既有账户不补造历史同意。
+
+`GET /auth/consents`（前端 BFF：`GET /api/auth/consents`）需登录，返回当前用户最近 100 条记录（ID 倒序），不接受指定其他用户。`data` 为数组，每项包含 `document`、`version`、`action`、`reference`、`accepted_at`（带时区的服务端时间）。记录范围含注册、商品发布/重提和下单。
+
+参见 [协议页面与同意契约](legal-consent-api.md)。

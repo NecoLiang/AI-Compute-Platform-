@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/blockchain"
+	"tokenfactory/internal/legal"
 	"tokenfactory/pkg/crypto"
 
 	"github.com/google/uuid"
@@ -512,6 +513,7 @@ type CreateProductReq struct {
 	MinDuration       int    `json:"min_duration"`
 	Region            string `json:"region"`
 	ComplianceAgreed  bool   `json:"compliance_agreed"`
+	ComplianceVersion string `json:"compliance_version"`
 }
 
 // NormalizeProductReq 填补可省略字段的默认值。纯函数, 便于测试。
@@ -657,7 +659,7 @@ func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, 
 	if err != nil {
 		return 0, err
 	}
-	return s.repo.CreateProduct(p)
+	return s.repo.CreateProduct(p, req.ComplianceVersion)
 }
 
 func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) error {
@@ -672,7 +674,7 @@ func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) er
 	if existing.SupplierID != supplierID {
 		return fmt.Errorf("无权修改其他供给方的商品")
 	}
-	return s.repo.ResubmitProduct(id, p)
+	return s.repo.ResubmitProduct(id, p, req.ComplianceVersion)
 }
 
 func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Product, error) {
@@ -681,6 +683,9 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 	}
 	if !req.ComplianceAgreed {
 		return nil, fmt.Errorf("请先确认算力资源使用规范")
+	}
+	if err := legal.ValidateVersion(req.ComplianceVersion); err != nil {
+		return nil, err
 	}
 	req = NormalizeProductReq(req)
 	if err := ValidateProductReq(req); err != nil {
@@ -862,10 +867,11 @@ func (s *Service) OfflineProduct(id int64) error {
 // ===== Orders (T-015, T-016) =====
 
 type PlaceOrderReq struct {
-	ProductID        int64 `json:"product_id"`
-	Quantity         int   `json:"quantity"`
-	Duration         int   `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
-	ComplianceAgreed bool  `json:"compliance_agreed"`
+	ProductID         int64  `json:"product_id"`
+	Quantity          int    `json:"quantity"`
+	Duration          int    `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
+	ComplianceAgreed  bool   `json:"compliance_agreed"`
+	ComplianceVersion string `json:"compliance_version"`
 }
 
 // ValidateOrderParams 校验并归一化下单数量与时长。纯函数, 是资金安全的第一道闸门。
@@ -980,6 +986,9 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if !req.ComplianceAgreed {
 		return nil, fmt.Errorf("请先确认算力资源使用规范")
 	}
+	if err := legal.ValidateVersion(req.ComplianceVersion); err != nil {
+		return nil, err
+	}
 	p, err := s.repo.GetProductByID(req.ProductID)
 	if err != nil {
 		return nil, fmt.Errorf("product not found")
@@ -1029,6 +1038,9 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		return nil, fmt.Errorf("insufficient stock")
 	}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
+		return nil, err
+	}
+	if err := legal.Record(tx, buyerID, legal.Acceptance{Document: "resource-usage-rules", Version: req.ComplianceVersion}, "order", orderNo); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

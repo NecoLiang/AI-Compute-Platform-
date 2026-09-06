@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jmoiron/sqlx"
+	"strconv"
 	"strings"
 	"time"
+	"tokenfactory/internal/legal"
 	"tokenfactory/pkg/crypto"
 	"tokenfactory/pkg/errcode"
 )
@@ -413,8 +415,13 @@ func (r *Repository) RequireTradingAccess(userID int64, role string) error {
 	return nil
 }
 
-func (r *Repository) CreateProduct(p *Product) (int64, error) {
-	res, err := r.db.Exec(
+func (r *Repository) CreateProduct(p *Product, version string) (int64, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO products (supplier_id, product_type, gpu_model, card_count, machine_count, total_pflops_approx,
 		power_capacity_kw, rack_count, cpu_spec, memory_spec, storage_spec, bandwidth_spec,
 		delivery_mode, pricing_mode, unit_price, price_negotiable, available_hours, stock, min_order, min_duration,
@@ -428,7 +435,14 @@ func (r *Repository) CreateProduct(p *Product) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := legal.Record(tx, p.SupplierID, legal.Acceptance{Document: "resource-listing-rules", Version: version}, "publish", strconv.FormatInt(id, 10)); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 func (r *Repository) GetProductByID(id int64) (*Product, error) {
@@ -443,8 +457,13 @@ func (r *Repository) GetProductByID(id int64) (*Product, error) {
 	return &p, nil
 }
 
-func (r *Repository) ResubmitProduct(id int64, p *Product) error {
-	result, err := r.db.Exec(`UPDATE products SET product_type=?, gpu_model=?, card_count=?,
+func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE products SET product_type=?, gpu_model=?, card_count=?,
 		machine_count=?, total_pflops_approx=?, power_capacity_kw=?, rack_count=?, cpu_spec=?,
 		memory_spec=?, storage_spec=?, bandwidth_spec=?, delivery_mode=?, pricing_mode=?, unit_price=?,
 		price_negotiable=?, available_hours=?, stock=?, min_order=?, min_duration=?, region=?,
@@ -464,7 +483,10 @@ func (r *Repository) ResubmitProduct(id int64, p *Product) error {
 	if n != 1 {
 		return fmt.Errorf("product review conflict")
 	}
-	return nil
+	if err := legal.Record(tx, p.SupplierID, legal.Acceptance{Document: "resource-listing-rules", Version: version}, "resubmit", strconv.FormatInt(id, 10)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) ReviewProduct(id int64, status, reason string) error {

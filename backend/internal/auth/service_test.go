@@ -6,6 +6,7 @@ import (
 	"os"
 	"testing"
 	"time"
+	"tokenfactory/internal/legal"
 	"tokenfactory/pkg/config"
 
 	"github.com/redis/go-redis/v9"
@@ -87,7 +88,7 @@ func TestRegisterVerifiesSMSCodeAndStartsPasswordlessBuyerSession(t *testing.T) 
 	tokens, sessionUser, err := svc.Register(context.Background(), RegisterReq{
 		Phone:    "13900139000",
 		SmsCode:  sender.code,
-		AgreeTOS: true,
+		AgreeTOS: true, TermsVersion: legal.Version, PrivacyVersion: legal.Version,
 	})
 	require.NoError(t, err)
 	require.NotNil(t, tokens)
@@ -157,10 +158,10 @@ func TestSMSAuthenticationDoesNotRevealAccountStateBeforeCodeVerification(t *tes
 	assert.ErrorIs(t, unknownLoginErr, ErrInvalidSMSCode)
 
 	_, _, existingRegisterErr := svc.Register(context.Background(), RegisterReq{
-		Phone: "13800138000", SmsCode: "000000", AgreeTOS: true,
+		Phone: "13800138000", SmsCode: "000000", AgreeTOS: true, TermsVersion: legal.Version, PrivacyVersion: legal.Version,
 	})
 	_, _, newRegisterErr := svc.Register(context.Background(), RegisterReq{
-		Phone: "13900139000", SmsCode: "000000", AgreeTOS: true,
+		Phone: "13900139000", SmsCode: "000000", AgreeTOS: true, TermsVersion: legal.Version, PrivacyVersion: legal.Version,
 	})
 	assert.ErrorIs(t, existingRegisterErr, ErrInvalidSMSCode)
 	assert.ErrorIs(t, newRegisterErr, ErrInvalidSMSCode)
@@ -216,7 +217,7 @@ func newFakeUserRepository() *fakeUserRepository {
 	return &fakeUserRepository{nextID: 1, byPhone: map[string]*User{}, byID: map[int64]*User{}}
 }
 
-func (r *fakeUserRepository) CreateUser(phone, email, passwordHash string) (int64, error) {
+func (r *fakeUserRepository) CreateUser(phone, email, passwordHash string, _ ...legal.Acceptance) (int64, error) {
 	if _, ok := r.byPhone[phone]; ok {
 		return 0, ErrUserExists
 	}
@@ -226,6 +227,10 @@ func (r *fakeUserRepository) CreateUser(phone, email, passwordHash string) (int6
 	r.byPhone[phone] = user
 	r.byID[id] = user
 	return id, nil
+}
+
+func (r *fakeUserRepository) ListConsents(int64) ([]legal.Consent, error) {
+	return []legal.Consent{}, nil
 }
 
 func (r *fakeUserRepository) FindByPhone(phone string) (*User, error) {

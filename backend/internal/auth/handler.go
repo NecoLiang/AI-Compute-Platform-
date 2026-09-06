@@ -36,6 +36,20 @@ func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
 	r.POST("/auth/wechat/bind", h.WeChatBind)
 	r.GET("/auth/me", h.Me)
+	r.GET("/auth/consents", h.Consents)
+}
+
+func (h *Handler) Consents(c *gin.Context) {
+	if c.GetInt64("user_id") <= 0 {
+		response.Error(c, errcode.Unauthorized, "请先登录")
+		return
+	}
+	items, err := h.svc.repo.ListConsents(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "协议记录读取失败")
+		return
+	}
+	response.Success(c, items)
 }
 
 func (h *Handler) VerifyCaptcha(c *gin.Context) {

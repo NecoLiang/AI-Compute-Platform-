@@ -2,7 +2,9 @@ package auth
 
 import (
 	"errors"
+	"strconv"
 	"time"
+	"tokenfactory/internal/legal"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -27,7 +29,7 @@ func NewRepository(db *sqlx.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) CreateUser(phone, email, passwordHash string) (int64, error) {
+func (r *Repository) CreateUser(phone, email, passwordHash string, acceptances ...legal.Acceptance) (int64, error) {
 	tx, err := r.db.Beginx()
 	if err != nil {
 		return 0, err
@@ -52,10 +54,19 @@ func (r *Repository) CreateUser(phone, email, passwordHash string) (int64, error
 	if _, err := tx.Exec("INSERT INTO user_roles (user_id, role) VALUES (?, 'buyer')", userID); err != nil {
 		return 0, err
 	}
+	for _, acceptance := range acceptances {
+		if err := legal.Record(tx, userID, acceptance, "registration", strconv.FormatInt(userID, 10)); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return userID, nil
+}
+
+func (r *Repository) ListConsents(userID int64) ([]legal.Consent, error) {
+	return legal.List(r.db, userID)
 }
 
 func (r *Repository) FindByPhone(phone string) (*User, error) {
