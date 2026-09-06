@@ -77,6 +77,56 @@ func tradeRouter(db *sqlx.DB, id int64) *gin.Engine {
 	return r
 }
 
+func TestTradePublicProductVisibilityPreservesPrivateAccess(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	supplier, buyer, admin := tradeRouter(db, 101), tradeRouter(db, 102), tradeRouter(db, 104)
+	public := gin.New()
+	compute.NewHandler(compute.NewService(compute.NewRepository(db), db)).RegisterPublicRoutes(public.Group("/api/v1"))
+	created := tradeRequest(t, supplier, "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
+	id := int64(created.Data.(map[string]any)["id"].(float64))
+	path := fmt.Sprintf("/api/v1/products/%d", id)
+	missing := tradeRequest(t, public, "GET", "/api/v1/products/999999", nil, 40400)
+	assertHidden := func(t *testing.T) {
+		t.Helper()
+		hidden := tradeRequest(t, public, "GET", path, nil, 40400)
+		if hidden.Message != missing.Message || hidden.Data != nil {
+			t.Fatalf("hidden product exposed its existence or data: %+v", hidden)
+		}
+	}
+	assertHidden(t)
+	tradeRequest(t, admin, "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
+	visible := tradeRequest(t, public, "GET", path, nil, 0)
+	if visible.Data.(map[string]any)["product"].(map[string]any)["gpu_model"] != "H100" {
+		t.Fatalf("approved product not visible: %v", visible.Data)
+	}
+	placed := tradeRequest(t, buyer, "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true}, 0)
+	no := placed.Data.(map[string]any)["order_no"].(string)
+	for _, status := range []string{"pending", "draft", "sold_out", "offline", "frozen"} {
+		t.Run(status, func(t *testing.T) {
+			// Seed each visibility state; all observations use the HTTP interfaces.
+			db.MustExec("UPDATE products SET status=? WHERE id=?", status, id)
+			assertHidden(t)
+			market := tradeRequest(t, public, "GET", "/api/v1/products", nil, 0)
+			if market.Data.(map[string]any)["total"] != float64(0) {
+				t.Fatalf("hidden product leaked into market: %v", market.Data)
+			}
+			own := tradeRequest(t, supplier, "GET", "/api/v1/supplier/products", nil, 0)
+			if own.Data.([]any)[0].(map[string]any)["status"] != status {
+				t.Fatalf("supplier lost access to own product: %v", own.Data)
+			}
+			audit := tradeRequest(t, admin, "GET", "/api/v1/admin/products?status="+status, nil, 0)
+			if audit.Data.(map[string]any)["total"] != float64(1) {
+				t.Fatalf("admin lost access to product: %v", audit.Data)
+			}
+			order := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no, nil, 0)
+			if order.Data.(map[string]any)["product"].(map[string]any)["id"] != float64(id) {
+				t.Fatalf("buyer lost historical order product: %v", order.Data)
+			}
+		})
+	}
+}
+
 func TestTradePaymentRejectsWrongOwnerBeforeContactingProvider(t *testing.T) {
 	db := setupTradeDB(t)
 	seedTradeUsers(db)

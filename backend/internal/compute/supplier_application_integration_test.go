@@ -110,8 +110,9 @@ func assertQualificationDocument(t *testing.T, router http.Handler, qualificatio
 }
 
 type envelope struct {
-	Code int `json:"code"`
-	Data any `json:"data"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data"`
 }
 
 func callJSON(t *testing.T, router http.Handler, method, path string, body any) envelope {

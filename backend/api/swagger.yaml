@@ -687,6 +687,7 @@ paths:
     get:
       tags: [算力撮合 Compute]
       summary: 商品详情（含信用分）
+      description: 仅公开 active（在售）商品。不存在或任何非 active 状态均返回 code=40400、message=商品不存在，不包含商品或信用分数据；HTTP 状态沿用 200。供给方、运营审核与买家历史订单通过各自鉴权接口读取。
       security: []
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }

@@ -728,10 +728,14 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 	return p, nil
 }
 
+// GetProduct exposes only active products through the public market endpoint.
 func (s *Service) GetProduct(id int64) (*Product, *CreditScore, error) {
 	p, err := s.repo.GetProductByID(id)
 	if err != nil {
 		return nil, nil, err
+	}
+	if p.Status != "active" {
+		return nil, nil, fmt.Errorf("product not found")
 	}
 	credit, _ := s.repo.GetCreditScore(p.SupplierID)
 	return p, credit, nil
