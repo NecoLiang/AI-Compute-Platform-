@@ -76,6 +76,21 @@ func (r *Repository) FindByID(id int64) (*User, error) {
 	return &u, nil
 }
 
+func (r *Repository) FindByWeChat(appID, openID string) (*User, error) {
+	var u User
+	err := r.db.Get(&u, "SELECT u.* FROM users u JOIN user_wechat_identities w ON w.user_id=u.id WHERE w.app_id=? AND w.openid=?", appID, openID)
+	return &u, err
+}
+
+func (r *Repository) BindWeChat(userID int64, identity wechatIdentity) error {
+	_, err := r.db.Exec("INSERT INTO user_wechat_identities (app_id,openid,unionid,user_id) VALUES (?,?,NULLIF(?,''),?)", identity.AppID, identity.OpenID, identity.UnionID, userID)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return errWeChatConflict
+	}
+	return err
+}
+
 func (r *Repository) UpdatePassword(id int64, hash string) error {
 	_, err := r.db.Exec("UPDATE users SET password_hash = ? WHERE id = ?", hash, id)
 	return err

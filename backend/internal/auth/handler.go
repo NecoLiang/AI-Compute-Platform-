@@ -22,6 +22,9 @@ func NewHandler(svc *Service, captchaVerifier *CapVerifier) *Handler {
 }
 
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
+	r.GET("/auth/wechat/status", h.WeChatStatus)
+	r.POST("/auth/wechat/start", h.WeChatStart)
+	r.POST("/auth/wechat/exchange", h.WeChatExchange)
 	r.POST("/auth/captcha/verify", h.VerifyCaptcha)
 	r.POST("/auth/sms/code", h.SendSMSCode)
 	r.POST("/auth/sms/login", h.SMSLogin)
@@ -31,6 +34,7 @@ func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 }
 
 func (h *Handler) RegisterProtectedRoutes(r *gin.RouterGroup) {
+	r.POST("/auth/wechat/bind", h.WeChatBind)
 	r.GET("/auth/me", h.Me)
 }
 

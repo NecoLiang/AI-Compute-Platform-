@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -16,6 +17,13 @@ type Config struct {
 	Security   SecurityConfig
 	Blockchain BlockchainConfig
 	AI         AIConfig
+	WeChat     WeChatConfig
+}
+
+type WeChatConfig struct {
+	AppID       string
+	AppSecret   string
+	CallbackURL string
 }
 
 // AIConfig 智能搜索的模型网关(OpenAI 兼容 /chat/completions)。
@@ -95,6 +103,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg := &Config{
+		WeChat: WeChatConfig{AppID: strings.TrimSpace(v.GetString("wechat.app_id")), AppSecret: strings.TrimSpace(v.GetString("wechat.app_secret")), CallbackURL: strings.TrimSpace(v.GetString("wechat.callback_url"))},
 		Server: ServerConfig{
 			Port: v.GetString("server.port"),
 			Mode: v.GetString("server.mode"),
@@ -149,6 +158,21 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.JWT.AccessTTL == 0 {
 		cfg.JWT.AccessTTL = 900
+	}
+	wechatSet := 0
+	for _, value := range []string{cfg.WeChat.AppID, cfg.WeChat.AppSecret, cfg.WeChat.CallbackURL} {
+		if strings.TrimSpace(value) != "" {
+			wechatSet++
+		}
+	}
+	if wechatSet != 0 && wechatSet != 3 {
+		return nil, fmt.Errorf("wechat.app_id, wechat.app_secret and wechat.callback_url must be configured together")
+	}
+	if wechatSet == 3 {
+		u, err := url.Parse(cfg.WeChat.CallbackURL)
+		if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "/api/auth/wechat/callback" || (u.Scheme != "https" && !(cfg.Server.Mode != "release" && u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1"))) {
+			return nil, fmt.Errorf("wechat.callback_url must be an HTTPS URL ending in /api/auth/wechat/callback (local HTTP allowed in debug)")
+		}
 	}
 	if cfg.JWT.RefreshTTL == 0 {
 		cfg.JWT.RefreshTTL = 604800

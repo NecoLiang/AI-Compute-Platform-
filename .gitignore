@@ -2,4 +2,5 @@
 .DS_Store
 backend/tmp/
 backend/.env.sms.local
+backend/.env.wechat.local
 *.log

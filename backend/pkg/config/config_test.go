@@ -153,3 +153,28 @@ security:
 		t.Fatal("expected release mode to reject local authentication preview")
 	}
 }
+
+func TestWeChatConfigurationRequiresCompleteHTTPSCallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  mode: debug\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WECHAT_APP_ID", "wx-test")
+	t.Setenv("WECHAT_APP_SECRET", "")
+	t.Setenv("WECHAT_CALLBACK_URL", "")
+	if _, err := Load(path); err == nil {
+		t.Fatal("partial WeChat config accepted")
+	}
+	t.Setenv("WECHAT_APP_SECRET", "test-secret")
+	t.Setenv("WECHAT_CALLBACK_URL", "https://omnis.example/api/auth/wechat/callback")
+	cfg, err := Load(path)
+	if err != nil || cfg.WeChat.AppID != "wx-test" {
+		t.Fatalf("complete config failed: %v", err)
+	}
+	for _, invalid := range []string{"http://omnis.example/api/auth/wechat/callback", "https://omnis.example/other", "https://user:pass@omnis.example/api/auth/wechat/callback", "https://omnis.example/api/auth/wechat/callback?next=https://evil.example"} {
+		t.Setenv("WECHAT_CALLBACK_URL", invalid)
+		if _, err := Load(path); err == nil {
+			t.Fatalf("invalid callback accepted: %s", invalid)
+		}
+	}
+}

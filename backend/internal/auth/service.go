@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"regexp"
 	"time"
+	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/middleware"
 
@@ -39,6 +41,9 @@ var (
 )
 
 type Service struct {
+	wechatConfig  config.WeChatConfig
+	wechatRepo    *Repository
+	wechatHTTP    *http.Client
 	repo          UserRepository
 	userRoleRepo  UserRoleRepository
 	rdb           *redis.Client
@@ -391,6 +396,10 @@ func maskPhone(phone string) string {
 
 func ErrToCode(err error) int {
 	switch {
+	case errors.Is(err, errWeChatExpired):
+		return errcode.Unauthorized
+	case errors.Is(err, errWeChatConflict):
+		return errcode.Conflict
 	case errors.Is(err, ErrUserExists):
 		return errcode.Conflict
 	case errors.Is(err, ErrInvalidLogin):

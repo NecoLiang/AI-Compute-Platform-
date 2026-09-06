@@ -368,6 +368,79 @@ paths:
       requestBody: *gpuCatalogWriteBody
       responses: *gpuCatalogWriteResponse
   # ==================== 认证 ====================
+  /auth/wechat/status:
+    get:
+      tags: [认证 Auth]
+      security: []
+      summary: 查询微信登录是否配置
+      responses:
+        '200':
+          description: 业务成功 data 为 enabled 布尔值
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: {type: integer}
+                  data:
+                    type: object
+                    properties:
+                      enabled: {type: boolean}
+  /auth/wechat/start:
+    post:
+      tags: [认证 Auth]
+      security: []
+      summary: 创建与浏览器绑定的微信扫码授权
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [browser_verifier]
+              properties:
+                browser_verifier: {type: string, pattern: '^[a-f0-9]{64}$'}
+      responses:
+        '200':
+          description: code 0 时 data.authorize_url 为微信官方授权 URL；未配置 code 40300
+  /auth/wechat/exchange:
+    post:
+      tags: [认证 Auth]
+      security: []
+      summary: 消费授权状态并交换微信 code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, state, browser_verifier]
+              properties:
+                code: {type: string, minLength: 1, maxLength: 512}
+                state: {type: string, pattern: '^[a-f0-9]{64}$'}
+                browser_verifier: {type: string, pattern: '^[a-f0-9]{64}$'}
+      responses:
+        '200':
+          description: 已绑定时 data 同短信登录 token/user；未绑定时 data 为 binding_required=true 和 binding_ticket；过期/重放 code 40100，冻结 code 40300
+  /auth/wechat/bind:
+    post:
+      tags: [认证 Auth]
+      summary: 将一次性微信票据绑定到当前已认证账户
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [binding_ticket]
+              properties:
+                binding_ticket: {type: string, pattern: '^[a-f0-9]{64}$'}
+      responses:
+        '200':
+          description: code 0 成功；过期/重放 40100，冻结 40300，绑定冲突 40900；不修改角色
+        '401':
+          description: 未登录或 JWT 失效
+
   /auth/captcha/verify:
     post:
       tags: [认证 Auth]

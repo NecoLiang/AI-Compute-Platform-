@@ -1,5 +1,7 @@
 # 认证 Auth API
 
+微信网站扫码登录、首次手机号绑定和配置见 [微信登录](wechat-login-api.md)。
+
 **Base**: `http://localhost:8080/api/v1` | **Auth**: `/auth/me` 需 `Bearer <token>`
 
 ---

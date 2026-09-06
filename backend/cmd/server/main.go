@@ -80,6 +80,7 @@ func main() {
 		slog.Warn("SMS login is disabled; configure SMS sign and templates to enable it")
 	}
 	authSvc := auth.NewService(authRepo, userRepo, rdb, smsSender, time.Duration(cfg.SMS.CodeTTL)*time.Second, cfg.JWT.AccessSecret, cfg.JWT.RefreshSecret, cfg.JWT.AccessTTL, cfg.JWT.RefreshTTL)
+	authSvc.ConfigureWeChat(cfg.WeChat, authRepo)
 	capVerifier := auth.NewCapVerifier(cfg.Security.CapSiteVerifyURL, cfg.Security.CapSecret, cfg.Security.CapTestToken)
 	userSvc := user.NewService(userRepo)
 	computeRepo := compute.NewRepository(sqlDB)
