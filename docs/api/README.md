@@ -1,5 +1,7 @@
 # 前端联调接口文档索引
 
+> **按页面找接口 → 直接看 [page-api-map.md](page-api-map.md)**（页面 × 接口 × 字段对照表，AI coding 友好）
+
 **Base URL**: 开发 `http://localhost:8080/api/v1` ｜ 生产以运维提供的域名为准
 
 ## 通用约定
@@ -15,6 +17,8 @@
 | 文档 | 内容 | 角色 |
 |---|---|---|
 | [auth-api.md](auth-api.md) | 短信验证码注册/登录、token 刷新 | 全部 |
+| [wechat-login-api.md](wechat-login-api.md) | 微信扫码登录与账号绑定 | 全部 |
+| [legal-consent-api.md](legal-consent-api.md) | 协议版本与同意记录 | 全部 |
 | [compute-api.md](compute-api.md) | 算力市场：商品列表/详情、下单、订单、交付签收、访问凭证 | 买家/供应方 |
 | [agent-search-api.md](agent-search-api.md) | 市场页智能选型：算力推定 + 商品匹配 | 买家 |
 | [gpu-catalog-api.md](gpu-catalog-api.md) | GPU 型号库下拉（含安可认证标记）+ 管理端维护 | 发布页/运营 |
