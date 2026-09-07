@@ -32,7 +32,7 @@ curl -X POST http://localhost:8080/api/v1/node/heartbeat \
 ```
 
 - `available_cards` 必填（0 表示无可调度容量 → degraded）；utilization 选填。
-- 密钥错误 / available>total → 40001。
+- 节点不存在或密钥错误统一返回 40001「节点或密钥不正确」（不区分两种情况，防节点枚举）；`available_cards` 越界 → 40001。
 
 ## GET /supplier/schedule-advice?order_no= · 调度建议（供应方交付用）✅
 ## GET /admin/schedule-advice?order_no= · 调度建议（运营视角）✅
