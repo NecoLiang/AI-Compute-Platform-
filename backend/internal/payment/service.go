@@ -190,7 +190,7 @@ func (s *Service) HandleCallback(req CallbackReq) error {
 // CreateSplit submits persisted settlement amounts. Gateway acceptance is
 // processing, not proof that funds have reached the payees.
 func (s *Service) CreateSplit(orderNo string, totalAmount int64) error {
-	settlements, err := s.repo.GetSettlementsByOrder(orderNo)
+	settlements, err := s.repo.getSettlementsByOrderInternal(orderNo)
 	if err != nil {
 		return err
 	}
@@ -264,8 +264,8 @@ func (s *Service) GetOrderPayments(buyerID int64, orderNo string) ([]Payment, er
 	return append(list, *p), nil
 }
 
-func (s *Service) GetOrderSettlements(orderNo string) ([]Settlement, error) {
-	return s.repo.GetSettlementsByOrder(orderNo)
+func (s *Service) GetOrderSettlements(supplierID int64, orderNo string) ([]Settlement, error) {
+	return s.repo.GetSettlementsByOrder(supplierID, orderNo)
 }
 
 // ListSupplierSettlements 供给方结算流水(按商品归属)。

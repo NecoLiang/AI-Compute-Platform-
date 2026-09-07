@@ -2,6 +2,9 @@ package intermediary
 
 import (
 	"database/sql"
+	"errors"
+	"regexp"
+	"strings"
 	"github.com/jmoiron/sqlx"
 	"time"
 )
@@ -50,12 +53,21 @@ func (r *Repository) GetLead(id int64) (*Lead, error) {
 	return &l, err
 }
 
-func (r *Repository) ListLeads(status string, page, pageSize int) ([]Lead, int64, error) {
-	where := ""
-	args := []interface{}{}
+// ListLeads assigneeID>0 时只返回分配给该账号的线索(vendor 视角);
+// 0 = 不过滤(仅限运营视角调用)。线索含留资人姓名/手机等 PII, 归属过滤是硬约束。
+func (r *Repository) ListLeads(assigneeID int64, status string, page, pageSize int) ([]Lead, int64, error) {
+	conds, args := []string{}, []interface{}{}
+	if assigneeID > 0 {
+		conds = append(conds, "assignee_id=?")
+		args = append(args, assigneeID)
+	}
 	if status != "" {
-		where = "WHERE status=?"
+		conds = append(conds, "status=?")
 		args = append(args, status)
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
 	}
 	var total int64
 	if err := r.db.Get(&total, "SELECT COUNT(*) FROM leads "+where, args...); err != nil {
@@ -81,8 +93,12 @@ func (r *Repository) AssignLead(id, assigneeID int64) error {
 	return execExisting(r.db, "UPDATE leads SET assignee_id=?, status='assigned' WHERE id=?", assigneeID, id)
 }
 
-func (r *Repository) UpdateLeadStatus(id int64, status string) error {
-	return execExisting(r.db, "UPDATE leads SET status=? WHERE id=?", status, id)
+// QuoteLeadOwned 报价: 仅限被分配人, 且线索处于可报价状态。守卫在 SQL 条件里,
+// RowsAffected=0 即「不存在/不属于你/状态不允许」, 不泄露具体是哪种。
+func (r *Repository) QuoteLeadOwned(id, assigneeID int64) error {
+	return execExisting(r.db,
+		"UPDATE leads SET status='quoted' WHERE id=? AND assignee_id=? AND status IN ('assigned','following')",
+		id, assigneeID)
 }
 
 func (r *Repository) CreateCommission(c *Commission) error {
@@ -128,7 +144,27 @@ type CreateLeadReq struct {
 	Term         string `json:"term"`
 }
 
+var leadPhone = regexp.MustCompile(`^\+?[0-9 -]{6,20}$`)
+
+// validLeadTypes 公开留资允许的类型白名单; compute 线索只能由商品询价接口内部产生。
+var validLeadTypes = map[string]bool{"equipment": true, "construction": true, "finance_lease": true}
+
 func (s *Service) CreateLead(req CreateLeadReq) (int64, error) {
+	if !validLeadTypes[req.Type] {
+		return 0, errors.New("线索类型不正确")
+	}
+	req.ContactName = strings.TrimSpace(req.ContactName)
+	req.ContactPhone = strings.TrimSpace(req.ContactPhone)
+	req.Description = strings.TrimSpace(req.Description)
+	if req.ContactName == "" || len([]rune(req.ContactName)) > 64 {
+		return 0, errors.New("请填写 1-64 字的联系人姓名")
+	}
+	if !leadPhone.MatchString(req.ContactPhone) {
+		return 0, errors.New("请填写有效的联系电话")
+	}
+	if len([]rune(req.Description)) > 2000 {
+		return 0, errors.New("需求描述过长(≤2000字)")
+	}
 	return s.repo.CreateLead(&Lead{
 		Type: req.Type, ContactName: req.ContactName, ContactPhone: req.ContactPhone,
 		ContactEmail: req.ContactEmail, Description: req.Description,
@@ -136,25 +172,49 @@ func (s *Service) CreateLead(req CreateLeadReq) (int64, error) {
 	})
 }
 
-func (s *Service) ListLeads(status string, page, pageSize int) ([]Lead, int64, error) {
-	return s.repo.ListLeads(status, page, pageSize)
+func (s *Service) ListLeads(assigneeID int64, status string, page, pageSize int) ([]Lead, int64, error) {
+	return s.repo.ListLeads(assigneeID, status, page, pageSize)
 }
 
 func (s *Service) AssignLead(id, assigneeID int64) error { return s.repo.AssignLead(id, assigneeID) }
-func (s *Service) QuoteLead(id int64) error              { return s.repo.UpdateLeadStatus(id, "quoted") }
+
+// ErrLeadNotActionable 归属/状态守卫统一出口: 不区分「不存在」与「不是你的」。
+var ErrLeadNotActionable = errors.New("线索不存在、未分配给当前账号或状态不允许该操作")
+
+func (s *Service) QuoteLead(id, vendorID int64) error {
+	if err := s.repo.QuoteLeadOwned(id, vendorID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrLeadNotActionable
+		}
+		return err
+	}
+	return nil
+}
 
 type CloseDealReq struct {
 	DealAmount     int64   `json:"deal_amount"`
 	CommissionRate float64 `json:"commission_rate"`
 }
 
-func (s *Service) CloseDeal(leadID int64, req CloseDealReq) error {
+func (s *Service) CloseDeal(leadID, vendorID int64, req CloseDealReq) error {
+	// 成交金额与佣金率入台账, 必须先过数值合法性 —— 佣金由 rate 直接算出, 脏数据即假账。
+	if req.DealAmount <= 0 {
+		return errors.New("成交金额必须为正(单位: 分)")
+	}
+	if req.CommissionRate <= 0 || req.CommissionRate > 100 {
+		return errors.New("佣金率须在 (0, 100] 区间(单位: %)")
+	}
 	tx, err := s.repo.db.Beginx()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := execExisting(tx, "UPDATE leads SET status='closed' WHERE id=?", leadID); err != nil {
+	if err := execExisting(tx,
+		"UPDATE leads SET status='closed' WHERE id=? AND assignee_id=? AND status IN ('assigned','following','quoted')",
+		leadID, vendorID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrLeadNotActionable
+		}
 		return err
 	}
 	commissionFen := int64(float64(req.DealAmount) * req.CommissionRate / 100.0)

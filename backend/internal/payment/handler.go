@@ -92,7 +92,7 @@ func (h *Handler) OnboardStatus(c *gin.Context) {
 
 func (h *Handler) Settlements(c *gin.Context) {
 	orderNo := c.Query("order_no")
-	settlements, err := h.svc.GetOrderSettlements(orderNo)
+	settlements, err := h.svc.GetOrderSettlements(c.GetInt64("user_id"), orderNo)
 	if err != nil {
 		response.Error(c, errcode.InternalError, "结算流水读取失败")
 		return

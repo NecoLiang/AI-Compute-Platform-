@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/redis/go-redis/v9"
 )
 
 type Alert struct {
@@ -231,7 +233,10 @@ func (r *Repository) FreezeUser(id int64) error {
 	return nil
 }
 
-type Service struct{ repo *Repository }
+type Service struct {
+	repo *Repository
+	rdb  *redis.Client
+}
 
 func NewService(repo *Repository) *Service { return &Service{repo: repo} }
 
@@ -270,3 +275,15 @@ func (s *Service) ListNotices() ([]Notice, error) { return s.repo.ListNotices() 
 
 func (s *Service) ListUsers() ([]User, error) { return s.repo.ListUsers() }
 func (s *Service) FreezeUser(id int64) error  { return s.repo.FreezeUser(id) }
+
+// SetSessionRevoker 注入 Redis, 供冻结账号时写即时失效名单(main.go 装配)。
+func (s *Service) SetSessionRevoker(rdb *redis.Client) { s.rdb = rdb }
+
+// RevokeUserSessions 把用户加入冻结名单: 中间件对每个请求检查该键,
+// 存量 access token 立即失效, 不必等 15 分钟自然过期。TTL 覆盖 token 最长生命周期。
+func (s *Service) RevokeUserSessions(ctx context.Context, userID int64) error {
+	if s.rdb == nil {
+		return nil
+	}
+	return s.rdb.Set(ctx, "auth:frozen:"+strconv.FormatInt(userID, 10), "1", 24*time.Hour).Err()
+}

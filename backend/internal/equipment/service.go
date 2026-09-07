@@ -248,7 +248,8 @@ func (s *Service) CreateProduct(vendorID int64, req CreateProductReq) (int64, er
 func (s *Service) GetProduct(id int64) (*EquipmentProduct, error) {
 	p, err := s.repo.GetProductByID(id)
 	if err != nil { return nil, err }
-	if p == nil { return nil, ErrProductNotFound }
+	// 公开详情只放行在售: 与算力商品口径一致, 防止枚举 id 读取草稿/驳回/下架条目。
+	if p == nil || p.Status != "active" { return nil, ErrProductNotFound }
 	return p, nil
 }
 

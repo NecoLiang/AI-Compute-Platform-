@@ -1,6 +1,7 @@
 package compute_test
 
 import (
+	"strings"
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
@@ -197,7 +198,12 @@ func setupSupplierApplicationTestDB(t *testing.T) *sqlx.DB {
 	defer root.Close()
 	root.MustExec("DROP DATABASE IF EXISTS " + supplierApplicationTestDB)
 	root.MustExec("CREATE DATABASE " + supplierApplicationTestDB + " CHARACTER SET utf8mb4")
-	db, err := sqlx.Connect("mysql", dsn+supplierApplicationTestDB+"?parseTime=true")
+	testDSN := strings.Replace(dsn, "/?", "/"+supplierApplicationTestDB+"?", 1)
+	if !strings.Contains(testDSN, "loc=") {
+		// 与库会话时区(+08:00)对齐, 见 stock_release_test 的同款处理。
+		testDSN += "&loc=Asia%2FShanghai"
+	}
+	db, err := sqlx.Connect("mysql", testDSN)
 	if err != nil {
 		t.Fatal(err)
 	}

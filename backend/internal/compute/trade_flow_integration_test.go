@@ -34,6 +34,18 @@ func setupTradeDB(t *testing.T) *sqlx.DB {
 		t.Fatal(err)
 	}
 	cfg.DBName = ""
+	// 会话时区与驱动解析时区都钉死 +08:00: 订单过期等时间比较依赖两者一致,
+	// 否则在 +08:00 的库上会出现 8 小时偏移, "已过期"的订单看起来还没过期。
+	// 注意必须用可被 LoadLocation 解析的时区名, FixedZone 的名字进不了 DSN。
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Loc = loc
+	if cfg.Params == nil {
+		cfg.Params = map[string]string{}
+	}
+	cfg.Params["time_zone"] = "'+08:00'"
 	root, err := sqlx.Connect("mysql", cfg.FormatDSN())
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +236,7 @@ func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
 	if order.Status != "active" || gateway.splits != 1 {
 		t.Fatalf("callback replay regressed delivery or repeated split: status=%s splits=%d", order.Status, gateway.splits)
 	}
-	settlements, err := service.GetOrderSettlements(no)
+	settlements, err := service.GetOrderSettlements(101, no)
 	if err != nil || len(settlements) != 2 {
 		t.Fatalf("duplicate/missing settlement: %v %v", settlements, err)
 	}

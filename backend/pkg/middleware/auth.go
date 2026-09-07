@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"log/slog"
+	"strconv"
 	"net/http"
 	"strings"
 	"time"
@@ -43,7 +44,9 @@ func AuthRequired(secret string, rdb *redis.Client, roleProvider UserRoleProvide
 			return
 		}
 
-		exists, err := rdb.Exists(c.Request.Context(), "session:"+token).Result()
+		// 冻结账号即时失效: 冻结名单与登出黑名单一并检查(REQ-D-031)。
+		// access token 本身只有 15 分钟, 冻结键 TTL 覆盖它即��。
+		exists, err := rdb.Exists(c.Request.Context(), "session:"+token, "auth:frozen:"+strconv.FormatInt(claims.UserID, 10)).Result()
 		if err != nil {
 			response.ErrorWithStatus(c, http.StatusServiceUnavailable, errcode.InternalError, "认证服务暂不可用")
 			c.Abort()

@@ -14,6 +14,7 @@ package scheduler
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -78,16 +79,20 @@ func hashKey(key string) string {
 
 // Heartbeat 节点心跳。身份由 node_key 哈希比对完成, 不走用户 JWT(机器不持有用户态)。
 // 心跳成功即触发该商品健康度重算 —— 节点恢复上线能立刻解除商品的下单拦截。
+//
+// 鉴权先行: 这是公开路由, 密钥校验通过之前不返回任何区分性信息(节点是否存在、
+// 总卡数几何都属于供给方产能情报), 统一回「节点或密钥不正确」。
 func (s *Service) Heartbeat(nodeID int64, nodeKey string, availableCards int, gpuUtil, vramUtil *int) error {
-	if availableCards < 0 {
-		return fmt.Errorf("available_cards 不能为负")
-	}
+	errUnauthorized := fmt.Errorf("节点或密钥不正确")
 	node, err := s.repo.GetNode(nodeID)
 	if err != nil {
 		return err
 	}
-	if node == nil {
-		return fmt.Errorf("节点不存在")
+	if node == nil || subtle.ConstantTimeCompare([]byte(hashKey(nodeKey)), []byte(node.NodeKeyHash)) != 1 {
+		return errUnauthorized
+	}
+	if availableCards < 0 {
+		return fmt.Errorf("available_cards 不能为负")
 	}
 	if availableCards > node.TotalCards {
 		return fmt.Errorf("available_cards 超过节点总卡数 %d", node.TotalCards)
@@ -97,7 +102,7 @@ func (s *Service) Heartbeat(nodeID int64, nodeKey string, availableCards int, gp
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("节点密钥不正确")
+		return errUnauthorized
 	}
 	s.refreshProductHealth(node.ProductID, node.SupplierID)
 	return nil

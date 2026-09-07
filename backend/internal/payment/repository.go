@@ -128,9 +128,21 @@ func (r *Repository) SumSupplierSettlements(supplierID int64) (total, succeeded,
 	return
 }
 
-func (r *Repository) GetSettlementsByOrder(orderNo string) ([]Settlement, error) {
+// getSettlementsByOrderInternal 内部分账流程用(支付回调链路), 不做归属过滤 —— 不得暴露给 HTTP handler。
+func (r *Repository) getSettlementsByOrderInternal(orderNo string) ([]Settlement, error) {
 	var list []Settlement
 	err := r.db.Select(&list, "SELECT * FROM settlements WHERE order_no = ?", orderNo)
+	return list, err
+}
+
+// GetSettlementsByOrder 归属过滤在 SQL 内: 只能看自己商品所属订单的结算流水。
+// 不带 supplier 条件的版本曾允许任意供给方按订单号窥探他人分账金额(2026-09-07 修复)。
+func (r *Repository) GetSettlementsByOrder(supplierID int64, orderNo string) ([]Settlement, error) {
+	var list []Settlement
+	err := r.db.Select(&list, `SELECT s.* FROM settlements s
+		JOIN orders o ON o.order_no = s.order_no
+		JOIN products p ON p.id = o.product_id
+		WHERE s.order_no = ? AND p.supplier_id = ?`, orderNo, supplierID)
 	return list, err
 }
 

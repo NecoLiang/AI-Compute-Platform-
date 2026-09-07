@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"strings"
 	"os"
 	"testing"
 	"tokenfactory/internal/intermediary"
@@ -57,7 +58,7 @@ func TestEmptyRiskAlertQueueUsesCurrentSchema(t *testing.T) {
 
 func TestEmptyLeadQueueUsesCurrentSchema(t *testing.T) {
 	db := setupAdminPersistenceTestDB(t)
-	list, total, err := intermediary.NewService(intermediary.NewRepository(db)).ListLeads("", 1, 100)
+	list, total, err := intermediary.NewService(intermediary.NewRepository(db)).ListLeads(0, "", 1, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,12 @@ func setupAdminPersistenceTestDB(t *testing.T) *sqlx.DB {
 	}
 	root.MustExec("DROP DATABASE IF EXISTS " + adminPersistenceTestDB)
 	root.MustExec("CREATE DATABASE " + adminPersistenceTestDB + " CHARACTER SET utf8mb4")
-	db, err := sqlx.Connect("mysql", dsn+adminPersistenceTestDB+"?parseTime=true")
+	testDSN := strings.Replace(dsn, "/?", "/"+adminPersistenceTestDB+"?", 1)
+	if !strings.Contains(testDSN, "loc=") {
+		// 与库会话时区(+08:00)对齐, 见 stock_release_test 的同款处理。
+		testDSN += "&loc=Asia%2FShanghai"
+	}
+	db, err := sqlx.Connect("mysql", testDSN)
 	if err != nil {
 		t.Fatal(err)
 	}

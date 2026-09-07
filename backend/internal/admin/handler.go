@@ -151,6 +151,11 @@ func (h *Handler) FreezeUser(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, "账户不存在或已冻结")
 		return
 	}
+	// 冻结必须即时生效: 存量 token 若还能用 15 分钟, 风控冻结就是摆设。
+	if err := h.svc.RevokeUserSessions(c.Request.Context(), id); err != nil {
+		response.Error(c, errcode.InternalError, "账户已冻结, 但会话失效名单写入失败, 请重试")
+		return
+	}
 	if err := h.svc.LogAudit(c.GetInt64("user_id"), "freeze_user", "user", id, "active", "frozen", c.ClientIP()); err != nil {
 		response.Error(c, errcode.InternalError, "账户审计写入失败")
 		return
