@@ -21,6 +21,7 @@ import (
 
 var (
 	ErrUserExists        = errors.New("用户已存在")
+	ErrUserNotRegistered = errors.New("该手机号尚未注册，请先注册")
 	ErrInvalidLogin      = errors.New("账号或凭证不正确")
 	ErrUserFrozen        = errors.New("账号已被冻结")
 	ErrInvalidPhone      = errors.New("手机号格式不正确")
@@ -139,7 +140,10 @@ func (s *Service) SendSMSCode(ctx context.Context, phone, purpose, clientIP stri
 		return ErrUserExists
 	}
 	if errors.Is(err, sql.ErrNoRows) && purpose == "login" {
-		return nil
+		if err := s.smsStore.Reserve(ctx, phone, purpose, clientIP); err != nil {
+			return err
+		}
+		return ErrUserNotRegistered
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -393,6 +397,8 @@ func ErrToCode(err error) int {
 	switch {
 	case errors.Is(err, ErrUserExists):
 		return errcode.Conflict
+	case errors.Is(err, ErrUserNotRegistered):
+		return errcode.NotFound
 	case errors.Is(err, ErrInvalidLogin):
 		return errcode.Unauthorized
 	case errors.Is(err, ErrInvalidRefresh):

@@ -41,6 +41,32 @@ func TestSendSMSCodeReturnsLocalPreviewCode(t *testing.T) {
 	assert.Regexp(t, `^[0-9]{6}$`, body.Data.PreviewCode)
 }
 
+func TestLoginCodeForUnregisteredPhonePromptsRegistration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sender := &fakeSMSSender{}
+	handler := NewHandler(newSMSService(newFakeUserRepository(), sender, &fakeSMSCodeStore{}), NewCapVerifier("", "", "demo-cap-token"))
+	for _, captcha := range []string{"invalid", "demo-cap-token"} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/sms/code", strings.NewReader(`{"phone":"13900139000","purpose":"login","captcha_token":"`+captcha+`"}`))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		handler.SendSMSCode(ctx)
+		var body struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+		if captcha == "invalid" {
+			assert.NotContains(t, body.Message, "未注册")
+			assert.NotZero(t, body.Code)
+		} else {
+			assert.Equal(t, 40400, body.Code)
+			assert.Equal(t, "该手机号尚未注册，请先注册", body.Message)
+		}
+		assert.Empty(t, sender.code)
+	}
+}
+
 func TestMeNeverReturnsRawPhoneFromTokenClaims(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	repo := newFakeUserRepository()

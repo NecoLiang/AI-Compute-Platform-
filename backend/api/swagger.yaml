@@ -320,7 +320,7 @@ paths:
                 captcha_token: { type: string }
       responses:
         '200':
-          description: "请求已处理；注册手机号已存在时返回业务码 40900 且不发送验证码；否则验证码有效期默认 300 秒，60 秒后可重新获取"
+          description: "请求已处理；注册手机号已存在时返回业务码 40900，登录手机号未注册时通过 Cap 及限流后返回 40400 并提示先注册，均不发送验证码；成功时验证码有效期默认 300 秒，60 秒后可重新获取"
           content:
             application/json:
               schema:
@@ -485,14 +485,14 @@ paths:
     post:
       tags: [算力撮合 Compute]
       summary: 提交供给方入驻申请
-      description: "需先完成个人或企业 KYC；审核通过后自动授予 supplier 角色。"
+      description: "需先完成个人或企业 KYC；仅认证企业与结算资料，不含机房登记；审核通过后自动授予 supplier 角色。"
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [company_name, credit_code, representative, representative_id_number, business_license, contact_method, bank_name, account_name, account_number, facility_address, has_idc_license, power_description, cooling_description]
+              required: [company_name, credit_code, representative, representative_id_number, business_license, contact_method, bank_name, account_name, account_number]
               properties:
                 company_name: { type: string }
                 credit_code: { type: string, minLength: 18, maxLength: 18 }
@@ -503,10 +503,6 @@ paths:
                 bank_name: { type: string }
                 account_name: { type: string }
                 account_number: { type: string }
-                facility_address: { type: string }
-                has_idc_license: { type: boolean }
-                power_description: { type: string }
-                cooling_description: { type: string }
 
   # ==================== 算力撮合 ====================
   /products:

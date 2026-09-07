@@ -396,10 +396,11 @@ type SupplierOnboardingReq struct {
 	BankName                string `json:"bank_name"`
 	AccountName             string `json:"account_name"`
 	AccountNumber           string `json:"account_number"`
-	FacilityAddress         string `json:"facility_address"`
-	HasIDCLicense           bool   `json:"has_idc_license"`
-	PowerDescription        string `json:"power_description"`
-	CoolingDescription      string `json:"cooling_description"`
+	// Retained for reading historical applications; new certification excludes facilities.
+	FacilityAddress    string `json:"facility_address"`
+	HasIDCLicense      bool   `json:"has_idc_license"`
+	PowerDescription   string `json:"power_description"`
+	CoolingDescription string `json:"cooling_description"`
 }
 
 var supplierIdentityNumberPattern = regexp.MustCompile(`^(?:\d{15}|\d{17}[\dXx])$`)
@@ -410,7 +411,6 @@ func ValidateSupplierOnboardingReq(req SupplierOnboardingReq) error {
 		{"企业名称", req.CompanyName}, {"法定代表人", req.Representative},
 		{"营业执照", req.BusinessLicenseFileName}, {"业务联系人", req.ContactMethod},
 		{"开户银行", req.BankName}, {"账户名称", req.AccountName},
-		{"机房地址", req.FacilityAddress}, {"供电说明", req.PowerDescription}, {"散热说明", req.CoolingDescription},
 	}
 	for _, field := range required {
 		if strings.TrimSpace(field.value) == "" {
@@ -425,9 +425,6 @@ func ValidateSupplierOnboardingReq(req SupplierOnboardingReq) error {
 	}
 	if !supplierAccountNumberPattern.MatchString(strings.TrimSpace(req.AccountNumber)) {
 		return fmt.Errorf("银行账号需为 8–32 位数字")
-	}
-	if !req.HasIDCLicense {
-		return fmt.Errorf("请确认已具备 IDC 经营资质")
 	}
 	if len(req.BusinessLicenseData) == 0 {
 		return fmt.Errorf("请选择营业执照文件")

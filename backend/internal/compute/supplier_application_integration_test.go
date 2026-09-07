@@ -70,8 +70,7 @@ func submitSupplierApplication(t *testing.T, router http.Handler, license []byte
 		"company_name": "测试企业", "credit_code": "91310115MA1K4X2A7Q",
 		"representative": "测试负责人", "representative_id_number": "110101199001011237",
 		"contact_method": "18800001101", "bank_name": "测试银行", "account_name": "测试企业",
-		"account_number": "6225888888888888", "facility_address": "上海市浦东新区测试路 1 号",
-		"has_idc_license": "true", "power_description": "双路市电与 UPS", "cooling_description": "液冷与风冷混合系统",
+		"account_number": "6225888888888888",
 	}
 	for name, value := range fields {
 		if err := form.WriteField(name, value); err != nil {

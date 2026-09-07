@@ -132,12 +132,12 @@ func TestSendRegistrationCodeRejectsExistingUserWithoutSending(t *testing.T) {
 	assert.Empty(t, sender.code)
 }
 
-func TestSendLoginCodeDoesNotRevealUnknownAccount(t *testing.T) {
+func TestSendLoginCodePromptsUnknownAccountToRegisterWithoutSending(t *testing.T) {
 	repo := newFakeUserRepository()
 	sender := &fakeSMSSender{}
 	svc := newSMSService(repo, sender, &fakeSMSCodeStore{})
 
-	require.NoError(t, svc.SendSMSCode(context.Background(), "13900139000", "login", "127.0.0.1"))
+	require.ErrorIs(t, svc.SendSMSCode(context.Background(), "13900139000", "login", "127.0.0.1"), ErrUserNotRegistered)
 	assert.Empty(t, sender.code)
 }
 

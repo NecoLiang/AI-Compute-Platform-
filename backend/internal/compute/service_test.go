@@ -47,9 +47,7 @@ func validSupplierOnboardingReq() SupplierOnboardingReq {
 		Representative: "张明远", RepresentativeIDNumber: "110101199001011237",
 		BusinessLicenseFileName: "business-license.pdf", BusinessLicenseType: "application/pdf", BusinessLicenseData: []byte("%PDF-1.4"), ContactMethod: "18800001003",
 		BankName: "招商银行上海张江支行", AccountName: "万象算力（上海）测试有限公司",
-		AccountNumber: "6225888888888888", FacilityAddress: "上海市浦东新区张江路 88 号",
-		HasIDCLicense: true, PowerDescription: "双路市电与 UPS 保障",
-		CoolingDescription: "液冷与风冷混合系统",
+		AccountNumber: "6225888888888888",
 	}
 }
 
@@ -66,7 +64,6 @@ func TestValidateSupplierOnboardingReq(t *testing.T) {
 		{"信用代码格式错误", func(r *SupplierOnboardingReq) { r.CreditCode = "123" }, "统一社会信用代码"},
 		{"证件号格式错误", func(r *SupplierOnboardingReq) { r.RepresentativeIDNumber = "123" }, "证件号"},
 		{"银行账号格式错误", func(r *SupplierOnboardingReq) { r.AccountNumber = "abc" }, "银行账号"},
-		{"未确认IDC资质", func(r *SupplierOnboardingReq) { r.HasIDCLicense = false }, "IDC"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

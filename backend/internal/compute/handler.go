@@ -279,8 +279,6 @@ func readSupplierApplication(c *gin.Context) (SupplierOnboardingReq, error) {
 		BusinessLicenseFileName: fileName, BusinessLicenseType: contentType, BusinessLicenseData: data,
 		ContactMethod: strings.TrimSpace(c.PostForm("contact_method")), BankName: strings.TrimSpace(c.PostForm("bank_name")),
 		AccountName: strings.TrimSpace(c.PostForm("account_name")), AccountNumber: strings.TrimSpace(c.PostForm("account_number")),
-		FacilityAddress: strings.TrimSpace(c.PostForm("facility_address")), HasIDCLicense: c.PostForm("has_idc_license") == "true",
-		PowerDescription: strings.TrimSpace(c.PostForm("power_description")), CoolingDescription: strings.TrimSpace(c.PostForm("cooling_description")),
 	}, nil
 }
 

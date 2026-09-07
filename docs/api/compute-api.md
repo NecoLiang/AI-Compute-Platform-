@@ -221,6 +221,11 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 ## GET /supplier-applications · 我的供给方入驻申请 ✅ authenticated
 ## POST /supplier-applications · 提交供给方入驻申请 ✅ authenticated + KYC
 
+供给方认证独立于机房登记。必填企业名称、统一社会信用代码、法定代表人及证件号、营业执照、业务联系人、开户银行、账户名称和银行账号；不再要求或接收机房地址、IDC 确认、供配电和制冷说明。历史申请中的机房字段保留可读，不影响审核。
+
+发布入口按模块区分：`/console/supplier/products/new` 仅零租与买断，`/console/supplier/centers/new` 仅成熟算力中心，`/console/supplier/colocation/new` 仅空心机房。共用服务端商品接口与类型校验；编辑重提保留原商品类型。运营商品管理的待审核条目链接至 `/admin/reviews?tab=products`，复用通过／驳回流程。
+
+
 POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且不超过 5MB；完整字段和文件内容写入 MySQL。审核通过后，服务端在同一事务中将申请置为 `verified`、授予 `supplier` 角色并写入审计日志。用户不能通过通用角色接口绕过审核。
 
 ---
