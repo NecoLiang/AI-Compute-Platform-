@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -30,7 +30,12 @@ func setupKYCTestDB(t *testing.T) (*Service, *sqlx.DB) {
 	root.MustExec("DROP DATABASE IF EXISTS " + kycTestDB)
 	root.MustExec("CREATE DATABASE " + kycTestDB + " CHARACTER SET utf8mb4")
 
-	db, err := sqlx.Connect("mysql", dsn+kycTestDB+"?parseTime=true")
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DBName, cfg.ParseTime = kycTestDB, true
+	db, err := sqlx.Connect("mysql", cfg.FormatDSN())
 	if err != nil {
 		t.Fatalf("连接测试库失败: %v", err)
 	}
@@ -64,6 +69,14 @@ func setupKYCTestDB(t *testing.T) (*Service, *sqlx.DB) {
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	)`)
 
+	db.MustExec("CREATE TABLE users (id BIGINT PRIMARY KEY)")
+	db.MustExec("INSERT INTO users (id) VALUES (101),(202),(303)")
+	consentSchema, err := os.ReadFile("../../migrations/019_legal_consents.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.MustExec(string(consentSchema))
+
 	t.Cleanup(func() {
 		db.Exec("DROP DATABASE IF EXISTS " + kycTestDB)
 		db.Close()
@@ -74,10 +87,11 @@ func setupKYCTestDB(t *testing.T) (*Service, *sqlx.DB) {
 func TestKYCSubmissionIsAutoVerified(t *testing.T) {
 	svc, _ := setupKYCTestDB(t)
 
-	if err := svc.SubmitPersonalKYC(101, PersonalKYCReq{RealName: "测试用户", IDCard: "110101199001011234"}); err != nil {
+	if err := svc.SubmitPersonalKYC(101, PersonalKYCReq{SensitiveDataAgreed: true, PrivacyVersion: "2026-09-06.1", RealName: "测试用户", IDCard: "110101199001011234"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.SubmitEnterprise(202, EnterpriseReq{
+		SensitiveDataAgreed: true, PrivacyVersion: "2026-09-06.1",
 		Name: "测试企业", USCC: "91110000123456789X", LicenseURL: "license.png",
 		LegalPerson: "测试法人", LegalPersonIDCard: "110101199001011234",
 		BankName: "测试银行", BankAccountName: "测试企业", BankAccountNumber: "1234567890",
@@ -109,6 +123,7 @@ func TestEnterpriseKYCSubmissionPersistsCompleteApplication(t *testing.T) {
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	fields := map[string]string{
+		"sensitive_data_agreed": "true", "privacy_version": "2026-09-06.1",
 		"enterprise_name":      "万象算力测试有限公司",
 		"uscc":                 "91310115MA1K4X2A7Q",
 		"legal_person":         "张明远",

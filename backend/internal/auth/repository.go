@@ -2,7 +2,9 @@ package auth
 
 import (
 	"errors"
+	"strconv"
 	"time"
+	"tokenfactory/internal/legal"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -27,7 +29,7 @@ func NewRepository(db *sqlx.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) CreateUser(phone, email, passwordHash string) (int64, error) {
+func (r *Repository) CreateUser(phone, email, passwordHash string, acceptances ...legal.Acceptance) (int64, error) {
 	tx, err := r.db.Beginx()
 	if err != nil {
 		return 0, err
@@ -52,10 +54,19 @@ func (r *Repository) CreateUser(phone, email, passwordHash string) (int64, error
 	if _, err := tx.Exec("INSERT INTO user_roles (user_id, role) VALUES (?, 'buyer')", userID); err != nil {
 		return 0, err
 	}
+	for _, acceptance := range acceptances {
+		if err := legal.Record(tx, userID, acceptance, "registration", strconv.FormatInt(userID, 10)); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return userID, nil
+}
+
+func (r *Repository) ListConsents(userID int64) ([]legal.Consent, error) {
+	return legal.List(r.db, userID)
 }
 
 func (r *Repository) FindByPhone(phone string) (*User, error) {
@@ -74,6 +85,21 @@ func (r *Repository) FindByID(id int64) (*User, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+func (r *Repository) FindByWeChat(appID, openID string) (*User, error) {
+	var u User
+	err := r.db.Get(&u, "SELECT u.* FROM users u JOIN user_wechat_identities w ON w.user_id=u.id WHERE w.app_id=? AND w.openid=?", appID, openID)
+	return &u, err
+}
+
+func (r *Repository) BindWeChat(userID int64, identity wechatIdentity) error {
+	_, err := r.db.Exec("INSERT INTO user_wechat_identities (app_id,openid,unionid,user_id) VALUES (?,?,NULLIF(?,''),?)", identity.AppID, identity.OpenID, identity.UnionID, userID)
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return errWeChatConflict
+	}
+	return err
 }
 
 func (r *Repository) UpdatePassword(id int64, hash string) error {

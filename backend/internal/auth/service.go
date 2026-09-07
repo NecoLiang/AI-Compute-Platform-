@@ -10,8 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"regexp"
 	"time"
+	"tokenfactory/internal/legal"
+	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/middleware"
 
@@ -40,6 +43,9 @@ var (
 )
 
 type Service struct {
+	wechatConfig  config.WeChatConfig
+	wechatRepo    *Repository
+	wechatHTTP    *http.Client
 	repo          UserRepository
 	userRoleRepo  UserRoleRepository
 	rdb           *redis.Client
@@ -53,7 +59,8 @@ type Service struct {
 }
 
 type UserRepository interface {
-	CreateUser(phone, email, passwordHash string) (int64, error)
+	CreateUser(phone, email, passwordHash string, acceptances ...legal.Acceptance) (int64, error)
+	ListConsents(userID int64) ([]legal.Consent, error)
 	FindByPhone(phone string) (*User, error)
 	FindByID(id int64) (*User, error)
 }
@@ -91,9 +98,11 @@ func NewService(repo UserRepository, userRoleRepo UserRoleRepository, rdb *redis
 }
 
 type RegisterReq struct {
-	Phone    string `json:"phone" binding:"required"`
-	SmsCode  string `json:"sms_code" binding:"required"`
-	AgreeTOS bool   `json:"agree_tos"`
+	Phone          string `json:"phone" binding:"required"`
+	SmsCode        string `json:"sms_code" binding:"required"`
+	AgreeTOS       bool   `json:"agree_tos"`
+	TermsVersion   string `json:"terms_version"`
+	PrivacyVersion string `json:"privacy_version"`
 }
 
 type SendSMSCodeReq struct {
@@ -171,6 +180,9 @@ func (s *Service) Register(ctx context.Context, req RegisterReq) (*TokenPair, *U
 	if !req.AgreeTOS {
 		return nil, nil, ErrTermsRequired
 	}
+	if legal.ValidateVersion(req.TermsVersion) != nil || legal.ValidateVersion(req.PrivacyVersion) != nil {
+		return nil, nil, legal.ErrVersion
+	}
 	if err := s.verifySMSCode(ctx, req.Phone, "register", req.SmsCode); err != nil {
 		return nil, nil, err
 	}
@@ -179,7 +191,9 @@ func (s *Service) Register(ctx context.Context, req RegisterReq) (*TokenPair, *U
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, err
 	}
-	userID, err := s.repo.CreateUser(req.Phone, "", "")
+	userID, err := s.repo.CreateUser(req.Phone, "", "",
+		legal.Acceptance{Document: "terms", Version: req.TermsVersion},
+		legal.Acceptance{Document: "privacy", Version: req.PrivacyVersion})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -395,6 +409,10 @@ func maskPhone(phone string) string {
 
 func ErrToCode(err error) int {
 	switch {
+	case errors.Is(err, errWeChatExpired):
+		return errcode.Unauthorized
+	case errors.Is(err, errWeChatConflict):
+		return errcode.Conflict
 	case errors.Is(err, ErrUserExists):
 		return errcode.Conflict
 	case errors.Is(err, ErrUserNotRegistered):
@@ -405,7 +423,7 @@ func ErrToCode(err error) int {
 		return errcode.Unauthorized
 	case errors.Is(err, ErrUserFrozen):
 		return errcode.Forbidden
-	case errors.Is(err, ErrInvalidPhone), errors.Is(err, ErrInvalidSMSPurpose), errors.Is(err, ErrTermsRequired):
+	case errors.Is(err, ErrInvalidPhone), errors.Is(err, ErrInvalidSMSPurpose), errors.Is(err, ErrTermsRequired), errors.Is(err, legal.ErrVersion):
 		return errcode.ParamInvalid
 	case errors.Is(err, ErrInvalidSMSCode):
 		return errcode.Unauthorized

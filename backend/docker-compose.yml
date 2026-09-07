@@ -4,6 +4,8 @@ services:
     env_file:
       - path: .env.sms.local
         required: false
+      - path: .env.wechat.local
+        required: false
     ports:
       - "8080:8080"
     depends_on:
@@ -34,6 +36,7 @@ services:
       - ./migrations/008_invoice_management.up.sql:/docker-entrypoint-initdb.d/008.sql:ro
       - ./migrations/008_supplier_nodes_and_health.up.sql:/docker-entrypoint-initdb.d/008_supplier_nodes.sql:ro
       - ./migrations/009_ticket_support.up.sql:/docker-entrypoint-initdb.d/009.sql:ro
+      - ./migrations/009_gpu_catalog.up.sql:/docker-entrypoint-initdb.d/009_gpu_catalog.sql:ro
       - ./migrations/010_notifications.up.sql:/docker-entrypoint-initdb.d/010.sql:ro
       - ./migrations/011_supplier_onboarding.up.sql:/docker-entrypoint-initdb.d/011.sql:ro
       - ./migrations/012_persist_enterprise_kyc_application.up.sql:/docker-entrypoint-initdb.d/012.sql:ro
@@ -42,6 +45,8 @@ services:
       - ./migrations/015_product_review_reason.up.sql:/docker-entrypoint-initdb.d/015.sql:ro
       - ./migrations/016_compute_inquiry_leads.up.sql:/docker-entrypoint-initdb.d/016.sql:ro
       - ./migrations/017_payment_checkout_url.up.sql:/docker-entrypoint-initdb.d/017.sql:ro
+      - ./migrations/018_wechat_login.up.sql:/docker-entrypoint-initdb.d/018.sql:ro
+      - ./migrations/019_legal_consents.up.sql:/docker-entrypoint-initdb.d/019.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

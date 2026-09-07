@@ -40,6 +40,10 @@ curl "http://localhost:8080/api/v1/products?gpu_model=H100&region=北京&pricing
 
 ## GET /products/:id · 商品详情（公开）
 
+仅返回 `active`（在售）商品，与公开市场列表保持一致。不存在或处于 `draft`（含审核驳回）、`pending`、`sold_out`、`offline`、`frozen` 等非在售状态时，统一返回 HTTP 200、`code: 40400`、`message: "商品不存在"`，不含 `data`，避免暴露商品或供给方信用资料。
+
+供给方仍通过 `/supplier/products` 查看自己的商品，运营通过 `/admin/products` 审核；买家历史订单通过 `/orders/:order_no` 获取商品资料，不受公开可见性限制影响。
+
 ```
 curl http://localhost:8080/api/v1/products/1
 ```
@@ -60,7 +64,7 @@ curl http://localhost:8080/api/v1/products/1
 curl -X POST http://localhost:8080/api/v1/supplier/products \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"gpu_model":"NVIDIA H100 SXM 80GB","card_count":64,"cpu_spec":"2× Intel Xeon 8480+","memory_spec":"2TB DDR5","storage_spec":"30TB NVMe","bandwidth_spec":"10Gbps","delivery_mode":"bare_metal","pricing_mode":"hourly","unit_price":3500,"available_hours":"全天 24h","stock":64,"min_order":1,"min_duration":1,"region":"北京","compliance_agreed":true}'
+  -d '{"gpu_model":"NVIDIA H100 SXM 80GB","card_count":64,"cpu_spec":"2× Intel Xeon 8480+","memory_spec":"2TB DDR5","storage_spec":"30TB NVMe","bandwidth_spec":"10Gbps","delivery_mode":"bare_metal","pricing_mode":"hourly","unit_price":3500,"available_hours":"全天 24h","stock":64,"min_order":1,"min_duration":1,"region":"北京","compliance_agreed":true,"compliance_version":"2026-09-06.1"}'
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -73,6 +77,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 | stock | int | ✅ | 可售余量 |
 | region | string | ✅ | 地域 |
 | compliance_agreed | bool | ✅ | 合规承诺（必须为 true） |
+| compliance_version | string | ✅ | 当前规范版本：`2026-09-06.1`；发布为上架规范，下单为使用规范 |
 
 ---
 
@@ -82,7 +87,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 curl -X POST http://localhost:8080/api/v1/orders \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"product_id":1,"quantity":8,"duration":720,"compliance_agreed":true}'
+  -d '{"product_id":1,"quantity":8,"duration":720,"compliance_agreed":true,"compliance_version":"2026-09-06.1"}'
 ```
 
 | 参数 | 类型 | 必填 | 说明 |
@@ -91,6 +96,7 @@ curl -X POST http://localhost:8080/api/v1/orders \
 | quantity | int | ✅ | 卡数 |
 | duration | int | ✅ | 租期(小时) |
 | compliance_agreed | bool | ✅ | 合规承诺 |
+| compliance_version | string | ✅ | 当前规范版本：`2026-09-06.1`；发布为上架规范，下单为使用规范 |
 
 **成功**
 ```json
@@ -265,3 +271,9 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 - 页面入口：商品列表“修改并重提”、商品详情“申请报价”、订单详情“前往支付”和“确认签收”。支付渠道可用性见 payment-api.md。
 
 数据库增量：`015_product_review_reason`、`016_compute_inquiry_leads`；先迁移再启用对应接口。
+
+## 协议版本要求（2026-09-06）
+
+商品发布 `POST /supplier/products`、驳回重提 `PUT /supplier/products/:id` 和下单 `POST /orders` 必须同时传入 `compliance_agreed=true` 与 `compliance_version="2026-09-06.1"`。发布/重提对应《算力资源上架规范》，下单对应《算力资源使用规范》。缺失、旧版本或未同意返回 `40001`。同意记录与商品或订单、库存变更原子提交；失败不留下新同意记录，记录失败也不保留业务变更。
+
+现有续租及面议询价接口不新增该参数，不伪造新的同意记录。参见 [协议页面与同意契约](legal-consent-api.md)。

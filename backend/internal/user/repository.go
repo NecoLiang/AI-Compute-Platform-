@@ -2,7 +2,9 @@ package user
 
 import (
 	"database/sql"
+	"strconv"
 	"time"
+	"tokenfactory/internal/legal"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -48,12 +50,23 @@ func NewRepository(db *sqlx.DB) *Repository {
 }
 
 // Personal KYC
-func (r *Repository) CreatePersonalKYC(userID int64, realName, idCard string) error {
-	_, err := r.db.Exec(
+func (r *Repository) CreatePersonalKYC(userID int64, realName, idCard, version string) error {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
 		"INSERT INTO user_kyc (user_id, real_name, id_card, status) VALUES (?, ?, ?, 'verified') ON DUPLICATE KEY UPDATE real_name=?, id_card=?, status='verified'",
 		userID, realName, idCard, realName, idCard,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := legal.Record(tx, userID, legal.Acceptance{Document: "privacy", Version: version}, "kyc_personal", strconv.FormatInt(userID, 10)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) GetPersonalKYC(userID int64) (*PersonalKYC, error) {
@@ -64,7 +77,12 @@ func (r *Repository) GetPersonalKYC(userID int64) (*PersonalKYC, error) {
 
 // Enterprise
 func (r *Repository) CreateEnterprise(userID int64, req EnterpriseReq) error {
-	_, err := r.db.Exec(
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
 		`INSERT INTO enterprises (user_id, name, uscc, license_url, legal_person,
 			legal_person_id_card, bank_name, bank_account_name, bank_account_number,
 			license_file_name, license_content_type, license_blob, status)
@@ -78,7 +96,13 @@ func (r *Repository) CreateEnterprise(userID int64, req EnterpriseReq) error {
 		req.LegalPersonIDCard, req.BankName, req.BankAccountName, req.BankAccountNumber,
 		req.LicenseFileName, req.LicenseContentType, req.LicenseData,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := legal.Record(tx, userID, legal.Acceptance{Document: "privacy", Version: req.PrivacyVersion}, "kyc_enterprise", strconv.FormatInt(userID, 10)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) GetEnterprise(userID int64) (*Enterprise, error) {

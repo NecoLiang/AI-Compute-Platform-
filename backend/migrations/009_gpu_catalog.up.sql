@@ -4,6 +4,8 @@
 -- 与主流消费卡。规格为公开资料初始参考值, spec_source 标注来源, 待运营按厂商官网复核。
 -- fp16_tflops 口径统一为「FP16 稠密 Tensor 算力」; 规格不确定的置 NULL, 宁缺毋错。
 
+SET NAMES utf8mb4;
+
 CREATE TABLE gpu_catalog (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     vendor VARCHAR(32) NOT NULL,
