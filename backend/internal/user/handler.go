@@ -30,11 +30,16 @@ func (h *Handler) RegisterRoutes(r *gin.RouterGroup) {
 }
 
 func (h *Handler) GetProfile(c *gin.Context) {
-	response.Success(c, gin.H{"user_id": c.GetInt64("user_id"), "phone": c.GetString("phone")})
+	profile, err := h.svc.GetProfile(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, errcode.InternalError, "个人资料读取失败")
+		return
+	}
+	response.Success(c, profile)
 }
 
 func (h *Handler) UpdateProfile(c *gin.Context) {
-	response.Success(c, gin.H{"message": "更新成功"})
+	response.ErrorWithStatus(c, http.StatusNotImplemented, errcode.InternalError, "资料修改暂未开放")
 }
 
 func (h *Handler) SubmitPersonalKYC(c *gin.Context) {

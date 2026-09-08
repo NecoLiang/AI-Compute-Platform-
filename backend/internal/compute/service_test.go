@@ -697,7 +697,7 @@ func TestBuyerOrderDetailRules(t *testing.T) {
 	assert.False(t, actions.CanRenew)
 
 	active := buyerOrderActions(&Order{Status: "active"}, product, nil)
-	assert.True(t, active.CanRenew)
+	assert.False(t, active.CanRenew)
 	assert.True(t, active.CanRefund)
 	assert.False(t, active.CanViewCredential)
 

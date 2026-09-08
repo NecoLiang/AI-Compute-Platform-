@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"time"
 	"tokenfactory/internal/legal"
+	"tokenfactory/pkg/middleware"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -119,6 +120,17 @@ func (r *Repository) GetEnterprise(userID int64) (*Enterprise, error) {
 
 // Roles
 func (r *Repository) GetRoles(userID int64) ([]string, error) {
+	var status string
+	if err := r.db.Get(&status, "SELECT status FROM users WHERE id=?", userID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, middleware.ErrAccountInactive
+		}
+		return nil, err
+	}
+	if status != "active" {
+		return nil, middleware.ErrAccountInactive
+	}
+
 	var roles []string
 	err := r.db.Select(&roles, "SELECT role FROM user_roles WHERE user_id = ?", userID)
 	if err != nil && err != sql.ErrNoRows {
@@ -138,4 +150,15 @@ func (r *Repository) UpdateKYCStatus(userID int64, status string) error {
 func (r *Repository) UpdateEnterpriseStatus(userID int64, status string) error {
 	_, err := r.db.Exec("UPDATE enterprises SET status = ? WHERE user_id = ?", status, userID)
 	return err
+}
+
+type Profile struct {
+	UserID int64  `db:"user_id" json:"user_id"`
+	Phone  string `db:"phone" json:"phone"`
+}
+
+func (r *Repository) GetProfile(userID int64) (*Profile, error) {
+	var profile Profile
+	err := r.db.Get(&profile, "SELECT id AS user_id, phone FROM users WHERE id=?", userID)
+	return &profile, err
 }

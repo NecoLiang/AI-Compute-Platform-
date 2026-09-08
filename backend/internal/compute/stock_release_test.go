@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/jmoiron/sqlx"
 )
 
 const stockTestDB = "tokenfactory_stock_test"
@@ -33,7 +33,9 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 	}
 
 	root, err := sqlx.Connect("mysql", dsn)
-	if err != nil { t.Fatalf("连接 MySQL 失败: %v", err) }
+	if err != nil {
+		t.Fatalf("连接 MySQL 失败: %v", err)
+	}
 	defer root.Close()
 
 	root.MustExec("DROP DATABASE IF EXISTS " + stockTestDB)
@@ -46,7 +48,9 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		testDSN += "&loc=Asia%2FShanghai"
 	}
 	db, err := sqlx.Connect("mysql", testDSN)
-	if err != nil { t.Fatalf("连接测试库失败: %v", err) }
+	if err != nil {
+		t.Fatalf("连接测试库失败: %v", err)
+	}
 
 	db.MustExec(`CREATE TABLE products (
 		id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -60,6 +64,7 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		buyer_id BIGINT NOT NULL DEFAULT 1,
 		product_id BIGINT NOT NULL,
 		quantity INT NOT NULL,
+        stock_reserved INT NULL,
 		duration INT NOT NULL DEFAULT 1,
 		unit_price BIGINT NOT NULL DEFAULT 0,
 		total_amount BIGINT NOT NULL DEFAULT 0,
@@ -102,22 +107,26 @@ func seedOrder(t *testing.T, db *sqlx.DB, stock, qty int, status string, payExpi
 	res := db.MustExec("INSERT INTO products (stock, status) VALUES (?, 'active')", stock)
 	pid, _ := res.LastInsertId()
 	no := fmt.Sprintf("ORD%d%s", time.Now().UnixNano(), status)
-	db.MustExec(`INSERT INTO orders (order_no, product_id, quantity, status, payment_expires_at, lease_end_at)
-		VALUES (?,?,?,?,?,?)`, no, pid, qty, status, payExpire, leaseEnd)
+	db.MustExec(`INSERT INTO orders (order_no, product_id, quantity, stock_reserved, status, payment_expires_at, lease_end_at)
+		VALUES (?,?,?,?,?,?,?)`, no, pid, qty, qty, status, payExpire, leaseEnd)
 	return no, pid
 }
 
 func stockOf(t *testing.T, db *sqlx.DB, pid int64) int {
 	t.Helper()
 	var s int
-	if err := db.Get(&s, "SELECT stock FROM products WHERE id=?", pid); err != nil { t.Fatal(err) }
+	if err := db.Get(&s, "SELECT stock FROM products WHERE id=?", pid); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
 func statusOf(t *testing.T, db *sqlx.DB, no string) string {
 	t.Helper()
 	var s string
-	if err := db.Get(&s, "SELECT status FROM orders WHERE order_no=?", no); err != nil { t.Fatal(err) }
+	if err := db.Get(&s, "SELECT status FROM orders WHERE order_no=?", no); err != nil {
+		t.Fatal(err)
+	}
 	return s
 }
 
@@ -128,10 +137,18 @@ func TestStock_CloseExpiredUnpaidOrders(t *testing.T) {
 	no, pid := seedOrder(t, db, 5, 3, "pending_payment", &past, nil)
 
 	n, err := svc.CloseExpiredUnpaidOrders()
-	if err != nil { t.Fatalf("关单失败: %v", err) }
-	if n != 1 { t.Fatalf("应关闭 1 笔, 实际 %d", n) }
-	if got := statusOf(t, db, no); got != "cancelled" { t.Errorf("状态应为 cancelled, 实际 %s", got) }
-	if got := stockOf(t, db, pid); got != 8 { t.Errorf("余量应归还为 8, 实际 %d", got) }
+	if err != nil {
+		t.Fatalf("关单失败: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("应关闭 1 笔, 实际 %d", n)
+	}
+	if got := statusOf(t, db, no); got != "cancelled" {
+		t.Errorf("状态应为 cancelled, 实际 %s", got)
+	}
+	if got := stockOf(t, db, pid); got != 8 {
+		t.Errorf("余量应归还为 8, 实际 %d", got)
+	}
 }
 
 // 未到期的待支付订单不得被关闭。
@@ -143,8 +160,12 @@ func TestStock_UnexpiredOrderNotClosed(t *testing.T) {
 	if n, err := svc.CloseExpiredUnpaidOrders(); err != nil || n != 0 {
 		t.Fatalf("不应关闭任何订单, n=%d err=%v", n, err)
 	}
-	if got := statusOf(t, db, no); got != "pending_payment" { t.Errorf("状态不应变化, 实际 %s", got) }
-	if got := stockOf(t, db, pid); got != 5 { t.Errorf("余量不应变化, 实际 %d", got) }
+	if got := statusOf(t, db, no); got != "pending_payment" {
+		t.Errorf("状态不应变化, 实际 %s", got)
+	}
+	if got := stockOf(t, db, pid); got != 5 {
+		t.Errorf("余量不应变化, 实际 %d", got)
+	}
 }
 
 // 重复执行不得重复归还 —— 幂等性。
@@ -154,7 +175,9 @@ func TestStock_ReleaseIsIdempotent(t *testing.T) {
 	_, pid := seedOrder(t, db, 5, 3, "pending_payment", &past, nil)
 
 	for i := 0; i < 3; i++ {
-		if _, err := svc.CloseExpiredUnpaidOrders(); err != nil { t.Fatal(err) }
+		if _, err := svc.CloseExpiredUnpaidOrders(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if got := stockOf(t, db, pid); got != 8 {
 		t.Errorf("重复关单后余量应仍为 8(只归还一次), 实际 %d", got)
@@ -174,15 +197,25 @@ func TestStock_ConcurrentReleaseOnlyOnce(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			ok, err := svc.releaseStock(no, []string{"pending_payment"}, "cancelled")
-			if err == nil { released[idx] = ok }
+			if err == nil {
+				released[idx] = ok
+			}
 		}(i)
 	}
 	wg.Wait()
 
 	cnt := 0
-	for _, r := range released { if r { cnt++ } }
-	if cnt != 1 { t.Errorf("并发下应只有 1 次真正归还, 实际 %d", cnt) }
-	if got := stockOf(t, db, pid); got != 8 { t.Errorf("余量应为 8, 实际 %d", got) }
+	for _, r := range released {
+		if r {
+			cnt++
+		}
+	}
+	if cnt != 1 {
+		t.Errorf("并发下应只有 1 次真正归还, 实际 %d", cnt)
+	}
+	if got := stockOf(t, db, pid); got != 8 {
+		t.Errorf("余量应为 8, 实际 %d", got)
+	}
 }
 
 // 退款完成 -> 归还余量。
@@ -190,9 +223,15 @@ func TestStock_RefundRestoresStock(t *testing.T) {
 	db, svc := setupStockDB(t)
 	no, pid := seedOrder(t, db, 2, 4, "refunding", nil, nil)
 
-	if err := svc.CompleteRefund(no); err != nil { t.Fatalf("退款失败: %v", err) }
-	if got := statusOf(t, db, no); got != "refunded" { t.Errorf("状态应为 refunded, 实际 %s", got) }
-	if got := stockOf(t, db, pid); got != 6 { t.Errorf("余量应为 6, 实际 %d", got) }
+	if err := svc.CompleteRefund(no); err != nil {
+		t.Fatalf("退款失败: %v", err)
+	}
+	if got := statusOf(t, db, no); got != "refunded" {
+		t.Errorf("状态应为 refunded, 实际 %s", got)
+	}
+	if got := stockOf(t, db, pid); got != 6 {
+		t.Errorf("余量应为 6, 实际 %d", got)
+	}
 }
 
 // 租期到期 -> 置完成并归还余量 (REQ-A-043)。
@@ -202,10 +241,18 @@ func TestStock_CompleteExpiredLeases(t *testing.T) {
 	no, pid := seedOrder(t, db, 0, 2, "active", nil, &past)
 
 	n, err := svc.CompleteExpiredLeases()
-	if err != nil { t.Fatalf("处理到期租约失败: %v", err) }
-	if n != 1 { t.Fatalf("应完成 1 笔, 实际 %d", n) }
-	if got := statusOf(t, db, no); got != "completed" { t.Errorf("状态应为 completed, 实际 %s", got) }
-	if got := stockOf(t, db, pid); got != 2 { t.Errorf("余量应归还为 2, 实际 %d", got) }
+	if err != nil {
+		t.Fatalf("处理到期租约失败: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("应完成 1 笔, 实际 %d", n)
+	}
+	if got := statusOf(t, db, no); got != "completed" {
+		t.Errorf("状态应为 completed, 实际 %s", got)
+	}
+	if got := stockOf(t, db, pid); got != 2 {
+		t.Errorf("余量应归还为 2, 实际 %d", got)
+	}
 }
 
 // 买断订单 lease_end_at 为 NULL, 使用权永久, 绝不能被到期任务关掉。
@@ -216,8 +263,12 @@ func TestStock_PerpetualLeaseNeverExpires(t *testing.T) {
 	if n, err := svc.CompleteExpiredLeases(); err != nil || n != 0 {
 		t.Fatalf("买断订单不应被完成, n=%d err=%v", n, err)
 	}
-	if got := statusOf(t, db, no); got != "active" { t.Errorf("买断订单状态不应变化, 实际 %s", got) }
-	if got := stockOf(t, db, pid); got != 1 { t.Errorf("余量不应变化, 实际 %d", got) }
+	if got := statusOf(t, db, no); got != "active" {
+		t.Errorf("买断订单状态不应变化, 实际 %s", got)
+	}
+	if got := stockOf(t, db, pid); got != 1 {
+		t.Errorf("余量不应变化, 实际 %d", got)
+	}
 }
 
 // 售罄商品归还余量后应自动恢复在售。
@@ -227,11 +278,15 @@ func TestStock_SoldOutRecoversToActive(t *testing.T) {
 	no, pid := seedOrder(t, db, 0, 2, "pending_payment", &past, nil)
 	db.MustExec("UPDATE products SET status='sold_out' WHERE id=?", pid)
 
-	if _, err := svc.releaseStock(no, []string{"pending_payment"}, "cancelled"); err != nil { t.Fatal(err) }
+	if _, err := svc.releaseStock(no, []string{"pending_payment"}, "cancelled"); err != nil {
+		t.Fatal(err)
+	}
 
 	var st string
 	db.Get(&st, "SELECT status FROM products WHERE id=?", pid)
-	if st != "active" { t.Errorf("售罄商品归还余量后应恢复 active, 实际 %s", st) }
+	if st != "active" {
+		t.Errorf("售罄商品归还余量后应恢复 active, 实际 %s", st)
+	}
 }
 
 // 被运营强制下架/风控冻结的商品, 不得因归还余量而自动重新上架。
@@ -242,7 +297,9 @@ func TestStock_OfflineProductNotResurrected(t *testing.T) {
 		no, pid := seedOrder(t, db, 0, 2, "pending_payment", &past, nil)
 		db.MustExec("UPDATE products SET status=? WHERE id=?", blocked, pid)
 
-		if _, err := svc.releaseStock(no, []string{"pending_payment"}, "cancelled"); err != nil { t.Fatal(err) }
+		if _, err := svc.releaseStock(no, []string{"pending_payment"}, "cancelled"); err != nil {
+			t.Fatal(err)
+		}
 
 		var st string
 		db.Get(&st, "SELECT status FROM products WHERE id=?", pid)
@@ -264,8 +321,12 @@ func TestStock_TerminalStatusNotReleased(t *testing.T) {
 		db.Get(&no, "SELECT order_no FROM orders WHERE product_id=?", pid)
 
 		ok, err := svc.releaseStock(no, stockHoldingStatuses, "cancelled")
-		if err != nil { t.Fatal(err) }
-		if ok { t.Errorf("终态 %s 不应发生归还", st) }
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ok {
+			t.Errorf("终态 %s 不应发生归还", st)
+		}
 		if got := stockOf(t, db, pid); got != 5 {
 			t.Errorf("终态 %s 的余量不应变化, 实际 %d", st, got)
 		}
@@ -273,3 +334,42 @@ func TestStock_TerminalStatusNotReleased(t *testing.T) {
 }
 
 var _ = sql.ErrNoRows
+
+func TestStock_UnreservedOrderNeverCreatesInventory(t *testing.T) {
+	db, svc := setupStockDB(t)
+	past := time.Now().Add(-time.Hour)
+	for _, status := range []string{"pending_payment", "refunding", "active"} {
+		no, pid := seedOrder(t, db, 5, 3, status, &past, &past)
+		db.MustExec("UPDATE orders SET stock_reserved=0 WHERE order_no=?", no)
+		for i := 0; i < 2; i++ {
+			var err error
+			switch status {
+			case "pending_payment":
+				_, err = svc.CloseExpiredUnpaidOrders()
+			case "refunding":
+				err = svc.CompleteRefund(no)
+			case "active":
+				_, err = svc.CompleteExpiredLeases()
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := stockOf(t, db, pid); got != 5 {
+			t.Fatalf("unreserved %s order fabricated inventory: %d", status, got)
+		}
+	}
+}
+
+func TestStock_UnknownReservationRequiresReconciliation(t *testing.T) {
+	db, svc := setupStockDB(t)
+	past := time.Now().Add(-time.Hour)
+	no, pid := seedOrder(t, db, 5, 3, "pending_payment", &past, nil)
+	db.MustExec("UPDATE orders SET stock_reserved=NULL WHERE order_no=?", no)
+	if _, err := svc.CloseExpiredUnpaidOrders(); err == nil {
+		t.Fatal("unknown reservation must not be guessed")
+	}
+	if stockOf(t, db, pid) != 5 || statusOf(t, db, no) != "pending_payment" {
+		t.Fatal("failed release must roll back state and inventory")
+	}
+}

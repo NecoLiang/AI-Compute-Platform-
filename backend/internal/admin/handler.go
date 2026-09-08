@@ -1,8 +1,11 @@
 package admin
 
 import (
+	"database/sql"
+	"errors"
 	"strconv"
 	"strings"
+	"tokenfactory/internal/compute"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
 
@@ -52,14 +55,11 @@ func (h *Handler) FreezeAlert(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, "告警编号不正确")
 		return
 	}
-	if err := h.svc.ResolveAlert(id); err != nil {
-		response.Error(c, errcode.InternalError, "告警处置失败")
+	if err := h.svc.FreezeAlert(c.Request.Context(), c.GetInt64("user_id"), id, c.ClientIP()); err != nil {
+		respondAlertError(c, err)
 		return
 	}
-	if err := h.svc.LogAudit(c.GetInt64("user_id"), "freeze_alert", "risk_alert", id, "", "resolved", c.ClientIP()); err != nil {
-		response.Error(c, errcode.InternalError, "审计日志写入失败")
-		return
-	}
+
 	response.Success(c, nil)
 }
 
@@ -70,7 +70,7 @@ func (h *Handler) DismissAlert(c *gin.Context) {
 		return
 	}
 	if err := h.svc.DismissAlert(id); err != nil {
-		response.Error(c, errcode.InternalError, "告警处置失败")
+		respondAlertError(c, err)
 		return
 	}
 	response.Success(c, nil)
@@ -147,19 +147,11 @@ func (h *Handler) FreezeUser(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, "不能冻结当前登录账户")
 		return
 	}
-	if err := h.svc.FreezeUser(id); err != nil {
-		response.Error(c, errcode.ParamInvalid, "账户不存在或已冻结")
+	if err := h.svc.FreezeUser(c.Request.Context(), c.GetInt64("user_id"), id, c.ClientIP()); err != nil {
+		respondAlertError(c, err)
 		return
 	}
-	// 冻结必须即时生效: 存量 token 若还能用 15 分钟, 风控冻结就是摆设。
-	if err := h.svc.RevokeUserSessions(c.Request.Context(), id); err != nil {
-		response.Error(c, errcode.InternalError, "账户已冻结, 但会话失效名单写入失败, 请重试")
-		return
-	}
-	if err := h.svc.LogAudit(c.GetInt64("user_id"), "freeze_user", "user", id, "active", "frozen", c.ClientIP()); err != nil {
-		response.Error(c, errcode.InternalError, "账户审计写入失败")
-		return
-	}
+
 	response.Success(c, nil)
 }
 
@@ -190,3 +182,18 @@ func (h *Handler) ListNotices(c *gin.Context) {
 }
 
 var _ = errcode.Success
+
+func respondAlertError(c *gin.Context, err error) {
+	code := compute.ErrToCode(err)
+	if errors.Is(err, sql.ErrNoRows) {
+		code = errcode.NotFound
+	}
+	if errors.Is(err, ErrAlertConflict) {
+		code = errcode.Conflict
+	}
+	message := err.Error()
+	if code == errcode.InternalError {
+		message = "告警处置未完成，请重试"
+	}
+	response.Error(c, code, message)
+}

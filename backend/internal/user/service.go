@@ -163,3 +163,7 @@ func ErrToCode(err error) int {
 		return errcode.InternalError
 	}
 }
+
+func (s *Service) GetProfile(userID int64) (*Profile, error) {
+	return s.repo.GetProfile(userID)
+}

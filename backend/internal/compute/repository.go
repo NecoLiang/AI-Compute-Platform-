@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"tokenfactory/internal/legal"
+	"tokenfactory/internal/trading"
 	"tokenfactory/pkg/crypto"
 	"tokenfactory/pkg/errcode"
 )
@@ -73,6 +74,7 @@ type Order struct {
 	OrderNo          string     `db:"order_no" json:"order_no"`
 	BuyerID          int64      `db:"buyer_id" json:"buyer_id"`
 	ProductID        int64      `db:"product_id" json:"product_id"`
+	StockReserved    *int       `db:"stock_reserved" json:"-"`
 	Quantity         int        `db:"quantity" json:"quantity"`
 	Duration         int        `db:"duration" json:"duration"`
 	UnitPrice        int64      `db:"unit_price" json:"unit_price"`
@@ -153,11 +155,11 @@ const productColumns = `id, supplier_id, product_type,
 	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, rejected_reason, created_at, updated_at`
 
-const orderColumns = `id, order_no, buyer_id, product_id, quantity, duration, unit_price,
+const orderColumns = `id, order_no, buyer_id, product_id, stock_reserved, quantity, duration, unit_price,
 	total_amount, platform_fee, status, payment_expires_at, lease_start_at, lease_end_at,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, created_at, updated_at`
 
-const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.quantity, o.duration, o.unit_price,
+const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.stock_reserved, o.quantity, o.duration, o.unit_price,
 	o.total_amount, o.platform_fee, o.status, o.payment_expires_at, o.lease_start_at, o.lease_end_at,
 	COALESCE(o.compliance_agreed,0) AS compliance_agreed, o.created_at, o.updated_at,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
@@ -704,9 +706,9 @@ func (r *Repository) GetProductsBySupplier(supplierID int64) ([]Product, error) 
 // Orders
 func (r *Repository) CreateOrderTx(tx *sqlx.Tx, o *Order) error {
 	const q = `INSERT INTO orders (order_no, buyer_id, product_id, quantity, duration, unit_price, total_amount, platform_fee,
-		status, payment_expires_at, compliance_agreed) VALUES (?,?,?,?,?,?,?,?,'pending_payment',?,?)`
+		status, payment_expires_at, compliance_agreed, stock_reserved) VALUES (?,?,?,?,?,?,?,?,'pending_payment',?,?,?)`
 	args := []interface{}{o.OrderNo, o.BuyerID, o.ProductID, o.Quantity, o.Duration, o.UnitPrice, o.TotalAmount,
-		o.PlatformFee, o.PaymentExpires, o.ComplianceAgreed}
+		o.PlatformFee, o.PaymentExpires, o.ComplianceAgreed, o.StockReserved}
 	var err error
 	// tx 为 nil 时退回库句柄, 避免 nil *sqlx.Tx 调 Exec 直接 panic。
 	if tx != nil {
@@ -786,10 +788,10 @@ func (r *Repository) TransitionOrderStatusTx(tx *sqlx.Tx, orderNo string, from [
 	return n > 0, nil
 }
 
-// GetOrderForUpdateTx 在事务内读订单(不加额外锁, 供流转成功后取 product_id/quantity 用)。
+// GetOrderForUpdateTx locks the current order before a lifecycle transition.
 func (r *Repository) GetOrderForUpdateTx(tx *sqlx.Tx, orderNo string) (*Order, error) {
 	var o Order
-	err := tx.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE order_no = ?", orderNo)
+	err := tx.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE order_no = ? FOR UPDATE", orderNo)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -990,10 +992,15 @@ func (r *Repository) GetDeliveryByOrder(orderID int64) (*OrderDelivery, error) {
 
 // RevokeAccessByOrder 吊销访问凭证(退款/取消/到期)。幂等: 重复调用不改变已吊销记录。
 func (r *Repository) RevokeAccessByOrder(orderID int64) error {
-	_, err := r.db.Exec(
-		"UPDATE order_deliveries SET access_status='revoked', revoked_at=NOW() WHERE order_id=? AND access_status IN ('generated','delivered')",
-		orderID,
-	)
+	return r.RevokeAccessByOrderTx(nil, orderID)
+}
+
+func (r *Repository) RevokeAccessByOrderTx(tx *sqlx.Tx, orderID int64) error {
+	var db sqlx.Execer = r.db
+	if tx != nil {
+		db = tx
+	}
+	_, err := db.Exec("UPDATE order_deliveries SET access_status='revoked', revoked_at=NOW() WHERE order_id=? AND access_status IN ('generated','delivered')", orderID)
 	return err
 }
 
@@ -1140,6 +1147,9 @@ func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Produ
 // 分三类: 已知的英文哨兵串按语义映射; 加密密钥未配置属服务端配置缺失 -> 500;
 // 其余为参数/权限校验产生的中文提示 -> 40001 / 40300, 直接把原因回给前端展示。
 func ErrToCode(err error) int {
+	if errors.Is(err, trading.ErrDisabled) || errors.Is(err, ErrRenewalUnavailable) {
+		return errcode.Conflict
+	}
 	if err == nil {
 		return errcode.Success
 	}

@@ -27,6 +27,7 @@ func NewHandler(svc *Service) *Handler {
 
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 	r.GET("/products", h.ListProducts)
+	r.GET("/trading-config", h.GetTradingConfig)
 	r.GET("/products/:id", h.GetProduct)
 }
 
@@ -730,8 +731,18 @@ func productToJSON(p *Product) gin.H {
 		"unit_price": p.UnitPrice, "price_negotiable": p.PriceNegotiable,
 		"available_hours": p.AvailableHours,
 		"stock":           p.Stock, "min_order": p.MinOrder, "min_duration": p.MinDuration,
-		"region": p.Region, "status": p.Status, "self_operated": p.SelfOperated,
+		"region": p.Region, "status": p.Status, "self_operated": p.SelfOperated, "health": p.Health,
 	}
 }
 
 var _ = middleware.RBAC
+
+func (h *Handler) GetTradingConfig(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	config, err := h.svc.GetTradingConfig()
+	if err != nil {
+		response.ErrorWithStatus(c, http.StatusServiceUnavailable, errcode.InternalError, "交易配置暂不可用")
+		return
+	}
+	response.Success(c, config)
+}

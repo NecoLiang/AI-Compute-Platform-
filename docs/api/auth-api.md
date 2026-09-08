@@ -163,3 +163,13 @@ curl -X POST http://localhost:8080/api/v1/user/kyc/enterprise \
 ## 认证敏感信息的单独同意
 
 个人认证 JSON 和企业认证 multipart 均必填 `sensitive_data_agreed=true` 与 `privacy_version="2026-09-06.1"`（multipart 使用字符串 `true`）。注册时同意隐私政策不代替本次认证授权；身份真实性确认也不代替此同意。缺失、未同意或旧版本返回 `40001`，不保存申请。认证同意与申请同一事务保存，记录文档为 `privacy`，操作为 `kyc_personal` / `kyc_enterprise`，引用为用户 ID；存储失败时申请回滚。重复的已提交/已认证申请返回 `40900`，不追加记录。既有认证状态不回填同意。
+
+## GET /user/profile · 读取当前资料
+
+需登录；从数据库返回当前账户 `{user_id:number,phone:string}`，不使用令牌中的旧手机号。前端账户资料仍复用现有 `/auth/me` 与 KYC 状态。
+
+## PUT /user/profile · 资料修改暂未开放
+
+需登录；HTTP 501、`code=50000`、`message=资料修改暂未开放`，不写数据库，不返回更新成功。手机号/邮箱修改及二次验证不属于本批范围。
+
+冻结或停用账户在鉴权时会被数据库状态检查拒绝，已有 access token 不会因 Redis 冻结名单过期而恢复访问。

@@ -136,7 +136,15 @@ components:
         min_duration: { type: integer }
         region: { type: string, example: "北京" }
         status: { type: string }
+        health: { type: string, enum: [unknown, healthy, degraded, offline], description: offline 禁止下单；unknown 表示尚未接入探活 }
         self_operated: { type: boolean }
+
+    TradingConfig:
+      type: object
+      required: [trading_enabled, fee_rate]
+      properties:
+        trading_enabled: { type: boolean, description: 仅控制新订单创建 }
+        fee_rate: { type: integer, minimum: 0, maximum: 10000, description: 费率基点，100 基点为 1% }
 
     CreditScore:
       type: object
@@ -664,10 +672,29 @@ paths:
   /user/profile:
     get:
       tags: [用户 User]
-      summary: 个人信息
+      summary: 读取当前账户资料
+      responses:
+        '200':
+          description: code=0 时返回数据库中的当前用户 ID 和手机号
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [user_id, phone]
+                        properties:
+                          user_id: { type: integer, format: int64 }
+                          phone: { type: string }
     put:
       tags: [用户 User]
-      summary: 更新个人信息
+      summary: 资料修改暂未开放
+      description: 不接受资料变更，不写库，不返回保存成功。
+      responses:
+        '501': { description: 'code=50000，资料修改暂未开放' }
 
   /supplier-applications:
     get:
@@ -713,6 +740,25 @@ paths:
       responses:
         '200': { description: "商品列表" }
 
+  /trading-config:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 读取下单开关和当前费率
+      security: []
+      description: 仅返回两个交易字段，Cache-Control 为 no-store。用于下单前提示；订单创建事务会重新读取并锁定配置。
+      responses:
+        '200':
+          description: code=0
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/TradingConfig' }
+        '503': { description: 'code=50000，配置读取失败、缺失或不合法；不回退为开放交易' }
+
   /products/{id}:
     get:
       tags: [算力撮合 Compute]
@@ -728,7 +774,7 @@ paths:
     post:
       tags: [算力撮合 Compute]
       summary: 下单
-      description: 需要有效 buyer 角色、个人或企业已认证，compliance_agreed 必须为 true，compliance_version 必须是当前算力资源使用规范版本。缺失或旧版本返回 code=40001。同意记录与订单、库存变更在同一事务提交。成功创建 pending_payment，保留库存 15 分钟。
+      description: 需要有效 buyer 角色、个人或企业已认证，compliance_agreed 必须为 true，compliance_version 必须是当前算力资源使用规范版本。缺失或旧版本返回 code=40001。同意记录与订单、库存变更在同一事务提交。成功创建 pending_payment，保留库存 15 分钟。交易关闭返回 code=40900；缺失或损坏配置返回 code=50000。当前费率与交易开关在订单事务中读取并锁定，平台费保存于订单，后续配置变化不改写旧订单费用。
       requestBody:
         content:
           application/json:
@@ -820,15 +866,19 @@ paths:
   /orders/{id}/renew:
     post:
       tags: [算力撮合 Compute]
-      summary: 续费
+      summary: 续租暂未开放
+      description: 当前版本不创建续租订单、不改变库存或租期；订单 actions.can_renew 固定为 false。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: 原订单号 }
       requestBody:
         content:
           application/json:
             schema:
               type: object
-              required: [duration]
               properties:
                 duration: { type: integer }
+      responses:
+        '200': { description: 'code=40900，续租暂未开放；JSON 解析失败时 code=40001' }
 
   /orders/{id}/refund:
     post:
@@ -1324,7 +1374,12 @@ paths:
   /admin/risk/alerts/{id}/freeze:
     post:
       tags: [运营管理 Admin]
-      summary: 冻结处置
+      summary: 冻结告警关联的订单或账户
+      description: 服务端按 target_type 和 target_id 解析对象。订单状态、凭证吊销、审计和告警 processing 同事务；账户会话失效后才标记 resolved。processing 可重试，resolved 重复请求幂等。支持 order/user/account，不能冻结自己。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200': { description: 'code=0 成功；40001 无效对象；40400 不存在；40900 状态冲突；50000 处置未完成需重试' }
 
   /admin/risk/alerts/{id}/dismiss:
     post:
@@ -1339,10 +1394,34 @@ paths:
   /admin/config:
     get:
       tags: [运营管理 Admin]
-      summary: 系统配置
+      summary: 系统配置（operator/admin）
+      responses:
+        '200':
+          description: 业务结果仍需检查 code
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/Response' }
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/TradingConfig' }
     put:
       tags: [运营管理 Admin]
-      summary: 更新配置
+      summary: 更新配置（operator/admin）
+      description: 与审计同事务保存，影响保存成功后的新订单；已有订单继续按原费用履约。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: { type: string, enum: [trading_enabled, fee_rate] }
+                value: { type: string, description: 'trading_enabled 取 true/false；fee_rate 为 0–10000 的整数基点字符串' }
+      responses:
+        '200': { description: '成功 code=0；参数错误 code=40001；保存失败 code=50000' }
 
   /admin/users:
     get:
