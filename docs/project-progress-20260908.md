@@ -7,20 +7,20 @@
 1. 修复前创建或复用目标 Issue，写明问题、证据和验收标准。
 2. 在独立分支修复并留下对应回归。PR 使用 `Closes #编号` 关闭本仓库已完成目标；跨端依赖和部分完成项用 `Refs`。
 3. 检查通过且验收条件满足后 merge；提交、合并、部署、生产迁移和真实渠道验收分别记录。不得将后续欠项顺带关闭。
-4. 本批后端需迁移 020，合并 main 会自动部署；生产迁移须先单独授权并核对备份和库存，不把合并授权扩大到数据库。
+4. 首批 020 已执行；本轮续租新增 021，合并 main 会自动部署。021 生产迁移仍须单独授权，不能复用 020 的授权。
 
 ## 后端
 
 | Issue | 本轮安排 |
 |---|---|
-| [[P0] 交易开关必须在创建订单时实际生效](https://github.com/NecoLiang/AI-Compute-Platform-/issues/2) | 本批修复，合并后按验收关闭 |
-| [[P0] 新订单使用动态费率并保持历史费用快照](https://github.com/NecoLiang/AI-Compute-Platform-/issues/3) | 本批修复，合并后按验收关闭 |
-| [[P0] 风控告警冻结必须改变关联订单或账户](https://github.com/NecoLiang/AI-Compute-Platform-/issues/4) | 本批修复，合并后按验收关闭 |
-| [[P0] 按真实库存占用释放，暂停不完整续租](https://github.com/NecoLiang/AI-Compute-Platform-/issues/5) | 本批修复，合并后按验收关闭 |
-| [[P0] 消除个人资料更新假成功](https://github.com/NecoLiang/AI-Compute-Platform-/issues/6) | 本批修复，合并后按验收关闭 |
-| [[P1] 公共商品响应保留 health 契约](https://github.com/NecoLiang/AI-Compute-Platform-/issues/7) | 本批修复，合并后按验收关闭 |
+| [[P0] 交易开关必须在创建订单时实际生效](https://github.com/NecoLiang/AI-Compute-Platform-/issues/2) | 首批已合并并关闭 |
+| [[P0] 新订单使用动态费率并保持历史费用快照](https://github.com/NecoLiang/AI-Compute-Platform-/issues/3) | 首批已合并并关闭 |
+| [[P0] 风控告警冻结必须改变关联订单或账户](https://github.com/NecoLiang/AI-Compute-Platform-/issues/4) | 首批已合并并关闭 |
+| [[P0] 按真实库存占用释放，暂停不完整续租](https://github.com/NecoLiang/AI-Compute-Platform-/issues/5) | 首批已合并并关闭 |
+| [[P0] 消除个人资料更新假成功](https://github.com/NecoLiang/AI-Compute-Platform-/issues/6) | 首批已合并并关闭 |
+| [[P1] 公共商品响应保留 health 契约](https://github.com/NecoLiang/AI-Compute-Platform-/issues/7) | 首批已合并并关闭 |
 | [[P1] 补齐超时签收与机房侧凭证失效闭环](https://github.com/NecoLiang/AI-Compute-Platform-/issues/8) | 后续待办，保持开放 |
-| [[P1] 实现关联原订单的完整续租生命周期](https://github.com/NecoLiang/AI-Compute-Platform-/issues/9) | 后续待办，保持开放 |
+| [[P1] 实现关联原订单的完整续租生命周期](https://github.com/NecoLiang/AI-Compute-Platform-/issues/9) | 续租实现与跨端验收已完成，待 021 授权及 PR 发布 |
 | [[P2] 实现可验证的账户资料编辑](https://github.com/NecoLiang/AI-Compute-Platform-/issues/10) | 后续待办，保持开放 |
 | [[P1] 将试点自动通过 KYC 替换为真实核验](https://github.com/NecoLiang/AI-Compute-Platform-/issues/11) | 后续待办，保持开放 |
 | [[P1] 完成易宝支付、分账、退款与渠道对账闭环](https://github.com/NecoLiang/AI-Compute-Platform-/issues/12) | 后续待办，保持开放 |
@@ -32,18 +32,18 @@
 | [[P1] 完成微信生产开通与绑定验收](https://github.com/NecoLiang/AI-Compute-Platform-/issues/18) | 后续待办，保持开放 |
 | [[P2] 明确资方业务与 Token 工厂集成边界并交付后端能力](https://github.com/NecoLiang/AI-Compute-Platform-/issues/19) | 后续待办，保持开放 |
 | [[P1] 迁移 020、存量库存核对与生产业务验收](https://github.com/NecoLiang/AI-Compute-Platform-/issues/20) | 后续待办，保持开放 |
-| [[P1] 校正进度文档并建立 Issue → PR → merge 交付记录](https://github.com/NecoLiang/AI-Compute-Platform-/issues/21) | 本批修复，合并后按验收关闭 |
+| [[P1] 校正进度文档并建立 Issue → PR → merge 交付记录](https://github.com/NecoLiang/AI-Compute-Platform-/issues/21) | 首批已合并并关闭 |
 
 ## 前端
 
 | Issue | 本轮安排 |
 |---|---|
-| [[P0] 结算读取交易开关和动态费率](https://github.com/Dylan-Nihilo/compute-exchange/issues/16) | 本批修复，合并后按验收关闭 |
-| [[P0] 风控冻结确认、真实结果与失败重试](https://github.com/Dylan-Nihilo/compute-exchange/issues/17) | 本批修复，合并后按验收关闭 |
-| [[P1] 贯通市场、详情和结算健康度](https://github.com/Dylan-Nihilo/compute-exchange/issues/18) | 本批修复，合并后按验收关闭 |
-| [[P1] 校正前端接入清单并按目标 Issue 合并修复](https://github.com/Dylan-Nihilo/compute-exchange/issues/19) | 本批修复，合并后按验收关闭 |
+| [[P0] 结算读取交易开关和动态费率](https://github.com/Dylan-Nihilo/compute-exchange/issues/16) | 首批已合并并关闭 |
+| [[P0] 风控冻结确认、真实结果与失败重试](https://github.com/Dylan-Nihilo/compute-exchange/issues/17) | 首批已合并并关闭 |
+| [[P1] 贯通市场、详情和结算健康度](https://github.com/Dylan-Nihilo/compute-exchange/issues/18) | 首批已合并并关闭 |
+| [[P1] 校正前端接入清单并按目标 Issue 合并修复](https://github.com/Dylan-Nihilo/compute-exchange/issues/19) | 首批已合并并关闭 |
 | [[P1] 完成支付状态反馈、退款与渠道对账交互](https://github.com/Dylan-Nihilo/compute-exchange/issues/20) | 后续待办，保持开放 |
-| [[P1] 在后端续期闭环完成后开放买家续租](https://github.com/Dylan-Nihilo/compute-exchange/issues/21) | 后续待办，保持开放 |
+| [[P1] 在后端续期闭环完成后开放买家续租](https://github.com/Dylan-Nihilo/compute-exchange/issues/21) | 续租页面与跨端验收已完成，待关联 PR 发布 |
 | [[P2] 对接真实账户资料编辑和敏感变更验证](https://github.com/Dylan-Nihilo/compute-exchange/issues/22) | 后续待办，保持开放 |
 | [[P1] 补协议运营信息并验收真实 KYC 与同意留痕](https://github.com/Dylan-Nihilo/compute-exchange/issues/23) | 后续待办，保持开放 |
 | [[P2] 接入智能选型页面](https://github.com/Dylan-Nihilo/compute-exchange/issues/24) | 后续待办，保持开放 |

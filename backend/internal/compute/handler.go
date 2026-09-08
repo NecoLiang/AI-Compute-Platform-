@@ -56,6 +56,8 @@ func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
 	r.GET("/orders/:id", h.GetOrder)
 	r.POST("/orders/:id/confirm", h.ConfirmDelivery)
 	r.POST("/orders/:id/renew", h.RenewOrder)
+	r.POST("/orders/:id/cancel", h.CancelBuyerOrder)
+	r.GET("/orders/:id/renewal-quote", h.RenewalQuote)
 	r.POST("/orders/:id/refund", h.RequestRefund)
 	r.GET("/orders/:id/access-credential", h.GetAccessCredential)
 	r.POST("/orders/:id/access-credential/reveal", h.RevealAccessCredential)
@@ -530,16 +532,36 @@ func (h *Handler) ConfirmDelivery(c *gin.Context) {
 	response.Success(c, nil)
 }
 
+func (h *Handler) CancelBuyerOrder(c *gin.Context) {
+	if err := h.svc.CancelBuyerOrder(c.GetInt64("user_id"), c.Param("id")); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, nil)
+}
+
+func (h *Handler) RenewalQuote(c *gin.Context) {
+	duration, err := strconv.Atoi(c.Query("duration"))
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, "invalid duration")
+		return
+	}
+	quote, err := h.svc.GetRenewalQuote(c.GetInt64("user_id"), c.Param("id"), duration)
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, quote)
+}
+
 func (h *Handler) RenewOrder(c *gin.Context) {
 	idOrNo := c.Param("id")
-	var req struct {
-		Duration int `json:"duration"`
-	}
+	var req RenewOrderReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	o, err := h.svc.RenewOrder(c.GetInt64("user_id"), idOrNo, req.Duration)
+	o, err := h.svc.RenewOrder(c.GetInt64("user_id"), idOrNo, req)
 	if err != nil {
 		response.Error(c, ErrToCode(err), err.Error())
 		return

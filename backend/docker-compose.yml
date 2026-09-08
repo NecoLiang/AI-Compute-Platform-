@@ -48,6 +48,7 @@ services:
       - ./migrations/018_wechat_login.up.sql:/docker-entrypoint-initdb.d/018.sql:ro
       - ./migrations/019_legal_consents.up.sql:/docker-entrypoint-initdb.d/019.sql:ro
       - ./migrations/020_order_stock_reservation.up.sql:/docker-entrypoint-initdb.d/020.sql:ro
+      - ./migrations/021_order_renewals.up.sql:/docker-entrypoint-initdb.d/021.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

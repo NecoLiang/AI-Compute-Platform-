@@ -57,6 +57,10 @@ func (s *Service) Pay(buyerID int64, req PayReq) (*PayResp, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	renewalOrder, parent, renewal, err := compute.NewRepository(s.db).LockOrderFamilyTx(tx, req.OrderNo)
+	if err != nil {
+		return nil, err
+	}
 	var order payableOrder
 	if err := tx.Get(&order, `SELECT buyer_id,total_amount,status,payment_expires_at FROM orders WHERE order_no=? FOR UPDATE`, req.OrderNo); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -72,6 +76,9 @@ func (s *Service) Pay(buyerID int64, req PayReq) (*PayResp, error) {
 	}
 	if order.Amount <= 0 {
 		return nil, fmt.Errorf("订单金额无效")
+	}
+	if err := compute.ValidateRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
+		return nil, err
 	}
 	var existing Payment
 	err = tx.Get(&existing, "SELECT * FROM payments WHERE order_no=? AND status='pending' ORDER BY id DESC LIMIT 1", req.OrderNo)
@@ -145,6 +152,10 @@ func (s *Service) HandleCallback(req CallbackReq) error {
 		return err
 	}
 	defer tx.Rollback()
+	renewalOrder, parent, renewal, err := compute.NewRepository(s.db).LockOrderFamilyTx(tx, req.OrderNo)
+	if err != nil {
+		return err
+	}
 	var order struct {
 		payableOrder
 		SupplierID int64 `db:"supplier_id"`
@@ -172,6 +183,9 @@ func (s *Service) HandleCallback(req CallbackReq) error {
 			return err
 		}
 		if _, err := tx.Exec("UPDATE orders SET status='paid' WHERE order_no=?", req.OrderNo); err != nil {
+			return err
+		}
+		if err := compute.ApplyRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
 			return err
 		}
 		for _, item := range []SplitItem{{PayeeType: "platform", Amount: order.Fee}, {PayeeType: "supplier", PayeeID: order.SupplierID, Amount: order.Amount - order.Fee}} {

@@ -7,7 +7,7 @@
 | `/terms` | 用户服务协议 | 注册 |
 | `/privacy` | 隐私政策 | 注册、个人/企业认证的独立同意 |
 | `/resource-listing-rules` | 算力资源上架规范 | 发布商品、驳回重提 |
-| `/resource-usage-rules` | 算力资源使用规范 | 创建订单 |
+| `/resource-usage-rules` | 算力资源使用规范 | 创建订单、续租订单 |
 
 表单链接附带 `?version=2026-09-06.1` 并在新标签页打开，不丢失输入。未支持的版本返回未找到，不能把新正文冒充旧版本展示。首页页脚提供统一入口。勾选默认关闭，点击正文链接不代替勾选。
 
@@ -15,7 +15,7 @@
 
 - `POST /auth/register`：`agree_tos=true`、`terms_version`、`privacy_version` 都是必填的当前版本。
 - `POST /user/kyc/personal`、`POST /user/kyc/enterprise`：`sensitive_data_agreed=true`、`privacy_version`；认证页面独立告知所需信息、目的和影响，单独勾选默认关闭，切换认证类型后重置。
-- `POST /supplier/products`、`PUT /supplier/products/:id`、`POST /orders`：`compliance_agreed=true`、`compliance_version` 必须匹配当前版本。
+- `POST /supplier/products`、`PUT /supplier/products/:id`、`POST /orders`、`POST /orders/:id/renew`：`compliance_agreed=true`、`compliance_version` 必须匹配当前版本。
 - 版本在浏览器 adapter 中随当前正文版本发送。BFF 仅转发，不替缺失版本补值；服务端不信任客户端时间。
 - 缺失/旧版本/未同意返回业务 `40001`。鉴权、角色、KYC、商品审核和库存规则继续独立生效。
 - `GET /auth/consents` 使用 Bearer JWT；浏览器 BFF 为 `GET /api/auth/consents`，返回当前用户最新 100 条。未登录返回 `40100`；其他用户的 ID 不能改变读取范围。

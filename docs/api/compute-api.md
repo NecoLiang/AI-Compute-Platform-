@@ -207,11 +207,39 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 - 状态不允许、尚未生成凭证或重复签收：`code=40900`
 - 订单不存在：`code=40400`
 
-## POST /orders/:id/renew · 续租暂未开放
+## GET /orders/:id/renewal-quote · 续租报价 ✅ buyer
 
-路由保留，`:id` 是原订单号。合法 JSON 请求返回 `code=40900`、`message=续租暂未开放`。不创建新订单、不改变库存或租期；订单详情 `actions.can_renew=false`。完整续租需后续实现原订单关联、租期延长、支付及显式协议同意。
+`:id` 为原订单号，`duration` 查询参数为正整数计费周期数。仅订单本人且 buyer/KYC 有效可用；子续租订单不能再次续租。交易关闭、商品下架/离线/面议/买断、未知库存占用、冻结/退款或存在未处理续租时拒绝。
+
+```json
+{"parent_order_no":"ORD20260908000000abcdef","mode":"extend","quantity":2,"duration":2,"pricing_mode":"hourly","min_duration":1,"max_duration":87600,"unit_price":3000,"total_amount":12000,"platform_fee":780,"fee_rate":650,"lease_end_at":"2026-09-08T12:00:00+08:00","renewed_until":"2026-09-08T14:00:00+08:00"}
+```
+
+金额均为分，采用当前商品价格和平台费率，原订单金额不变。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
+
+## POST /orders/:id/renew · 创建续租订单 ✅ buyer
+
+```json
+{"duration":2,"request_id":"cdd36d72-79ab-4a0a-9d2d-56a25f89c877","compliance_agreed":true,"compliance_version":"2026-09-06.1","expected_lease_end_at":"2026-09-08T12:00:00+08:00","expected_renewed_until":"2026-09-08T14:00:00+08:00","expected_total_amount":12000,"expected_platform_fee":780}
+```
+
+- 同一次提交重试保持 UUID `request_id` 和报价字段不变；同一原订单、同一请求返回同一子订单。修改参数复用请求号返回 `40900`。
+- 服务器锁定原订单并重新报价；租期或金额变化返回 `40900`，前端刷新报价后重新显式同意。每个原订单最多一笔待支付续租。
+- 成功返回 `{order_no,total_amount,platform_fee}`，订单号以 `REN` 开头。合规同意记录与订单在同一事务落库，`reference` 是子订单号。
+- 创建不延长租期。到期前续租不重复扣库存，支付期限为 15 分钟与原租期结束时间的较早者。到期后续租只预留尚未持有的卡；取消、超时只释放这笔实际占用。
+- 验签成功且金额、支付记录、订单状态与时限匹配后，在同一事务记录支付、分账金额及履约变更。重复回调不重复延长/划转库存，运营不能通过改子订单状态绕过支付。
+- 到期前支付更新原订单结束时间与凭证有效期；到期后支付将预留库存划归原订单、原订单转为 `paid` 并吊销旧凭证，供给方在原订单重新交付，买家重新签收。子订单 `completed` 表示续租款项已应用，实际资源交付仍看原订单。
+- 原订单价格/数量/原购买周期不改写。重新交付使用子订单的周期与计费方式快照；原交付存证保留，新交付关联本次续租订单。
+
+订单详情新增 `order.parent_order_no`、`pending_renewal_order_no`、`product.min_duration` 及可空 `renewal`（`parent_order_no,mode,pricing_mode,lease_end_at,renewed_until,applied_at,confirmed_at`）。前端仅在 `actions.can_renew=true` 时提供新续租，待支付子订单通过 `pending_renewal_order_no` 恢复处理。
+
+## POST /orders/:id/cancel · 取消待支付订单 ✅ buyer
+
+仅订单本人可取消 `pending_payment`，重复取消成功且不重复归还库存。已支付订单不可取消。原订单冻结、关闭或申请退款时，待支付续租在同一事务取消，后续回调不会重新开通。
 
 ## POST /orders/:id/refund · 申请退款 ✅ buyer
+
+普通订单沿现有退款流程。续租只允许尚未使用、且未被后续租期覆盖的最后一段续期；到期后重新交付仅在重新签收前可申请。申请转 `refunding`，运营确认完成时回退未使用的租期/预留，重复处理不重复归还库存。若处理时已开始使用或租期已变化，拒绝自动回退，须平台核对；已使用部分的按比例退款与真实渠道到账仍属于后端 Issue #12。
 
 ---
 
@@ -275,7 +303,7 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 
 商品发布 `POST /supplier/products`、驳回重提 `PUT /supplier/products/:id` 和下单 `POST /orders` 必须同时传入 `compliance_agreed=true` 与 `compliance_version="2026-09-06.1"`。发布/重提对应《算力资源上架规范》，下单对应《算力资源使用规范》。缺失、旧版本或未同意返回 `40001`。同意记录与商品或订单、库存变更原子提交；失败不留下新同意记录，记录失败也不保留业务变更。
 
-现有续租及面议询价接口不新增该参数，不伪造新的同意记录。参见 [协议页面与同意契约](legal-consent-api.md)。
+续租必须携带当次显式同意与当前版本，并为子订单追加同意记录。面议询价不伪造协议同意。参见 [协议页面与同意契约](legal-consent-api.md)。
 
 ## 2026-09-08 第一批交易控制契约
 

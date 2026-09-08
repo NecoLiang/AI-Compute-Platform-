@@ -967,12 +967,20 @@ func (r *Repository) CreateDelivery(d *OrderDelivery) error {
 // SaveDeliveryWithAccess 落库交付凭证 + 访问凭证(C-06)。
 // access_value_encrypted 必须是 AES-256-GCM 密文, 调用方负责加密, 本方法不做任何明文兜底。
 func (r *Repository) SaveDeliveryWithAccess(d *OrderDelivery) error {
-	_, err := r.db.Exec(
+	return r.SaveDeliveryWithAccessTx(nil, d)
+}
+
+func (r *Repository) SaveDeliveryWithAccessTx(tx *sqlx.Tx, d *OrderDelivery) error {
+	var db sqlx.Execer = r.db
+	if tx != nil {
+		db = tx
+	}
+	_, err := db.Exec(
 		`INSERT INTO order_deliveries (order_id, credential_encrypted, access_key, access_value_encrypted, access_status, access_expires_at)
 		VALUES (?,?,?,?,?,?)
 		ON DUPLICATE KEY UPDATE credential_encrypted=VALUES(credential_encrypted), access_key=VALUES(access_key),
 		access_value_encrypted=VALUES(access_value_encrypted), access_status=VALUES(access_status),
-		access_expires_at=VALUES(access_expires_at), revoked_at=NULL`,
+		access_expires_at=VALUES(access_expires_at), revoked_at=NULL, confirmed_by_buyer=0, buyer_confirmed_at=NULL`,
 		d.OrderID, d.CredentialEncrypted, d.AccessKey, d.AccessValueEncrypted, d.AccessStatus, d.AccessExpiresAt,
 	)
 	return err
@@ -1147,7 +1155,7 @@ func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Produ
 // 分三类: 已知的英文哨兵串按语义映射; 加密密钥未配置属服务端配置缺失 -> 500;
 // 其余为参数/权限校验产生的中文提示 -> 40001 / 40300, 直接把原因回给前端展示。
 func ErrToCode(err error) int {
-	if errors.Is(err, trading.ErrDisabled) || errors.Is(err, ErrRenewalUnavailable) {
+	if errors.Is(err, trading.ErrDisabled) || errors.Is(err, ErrRenewalConflict) {
 		return errcode.Conflict
 	}
 	if err == nil {
