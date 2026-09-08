@@ -179,7 +179,14 @@ type Attester interface {
 	Attest(targetType, targetID string, payload any) error
 }
 
+type CurrentLease struct {
+	OrderNo     string `json:"order_no"`
+	Duration    int    `json:"duration"`
+	PricingMode string `json:"pricing_mode"`
+}
+
 type BuyerOrderDetail struct {
+	CurrentLease          *CurrentLease            `json:"current_lease"`
 	PendingRenewalOrderNo string                   `json:"pending_renewal_order_no"`
 	Renewal               *Renewal                 `json:"renewal"`
 	Order                 BuyerOrderDetailOrder    `json:"order"`
@@ -1148,48 +1155,42 @@ func (s *Service) FreezeOrder(orderNo string) error {
 		return err
 	}
 	defer tx.Rollback()
-	before, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
+	before, err := s.FreezeOrderTx(tx, orderNo)
 	if err != nil {
-		return err
-	}
-	if before == nil {
-		return fmt.Errorf("order not found")
-	}
-	if err := s.FreezeOrderTx(tx, orderNo); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if before.Status != "frozen" {
+	if before != "frozen" {
 		s.AttestOrderFreeze(orderNo)
 	}
 	return nil
 }
 
 // FreezeOrderTx lets alert resolution share the order and credential transaction.
-func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) error {
+func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) (string, error) {
 	order, _, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if order == nil {
-		return fmt.Errorf("order not found")
+		return "", fmt.Errorf("order not found")
 	}
 	switch order.Status {
 	case "pending_payment", "paid", "provisioning", "active", "frozen":
 	default:
-		return fmt.Errorf("order not active")
+		return "", fmt.Errorf("order not active")
 	}
 	if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "frozen"); err != nil {
-		return err
+		return "", err
 	}
 	if renewal == nil {
 		if err := s.cancelPendingRenewalsTx(tx, order.ID); err != nil {
-			return err
+			return "", err
 		}
 	}
-	return s.repo.RevokeAccessByOrderTx(tx, order.ID)
+	return order.Status, s.repo.RevokeAccessByOrderTx(tx, order.ID)
 }
 
 // Call after a new freeze commits; retries must not emit another attestation.
@@ -1273,6 +1274,14 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 		}
 		detail.Actions.CanRefund = order.Status == "completed" && unusedRenewal(parent, renewal)
 	} else {
+		lease, pricingMode, err := s.currentLeaseOrder(s.db, &order, product.PricingMode)
+		if err != nil {
+			return nil, err
+		}
+		if lease.ID != order.ID {
+			detail.CurrentLease = &CurrentLease{OrderNo: lease.OrderNo, Duration: lease.Duration, PricingMode: pricingMode}
+			detail.Actions.CanRefund = false
+		}
 		var pending []string
 		if err := s.db.Select(&pending, `SELECT o.order_no FROM order_renewals r JOIN orders o ON o.id=r.order_id WHERE r.parent_order_id=? AND o.status='pending_payment' ORDER BY o.id LIMIT 1`, order.ID); err != nil {
 			return nil, err
@@ -1366,7 +1375,21 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 }
 
 func (s *Service) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]SupplierOrder, int64, map[string]int64, error) {
-	return s.repo.ListSupplierOrders(supplierID, status, page, pageSize)
+	list, total, counts, err := s.repo.ListSupplierOrders(supplierID, status, page, pageSize)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	// ponytail: one lease lookup per row (20 by default); use a bulk join if larger pages become common.
+	for i := range list {
+		lease, mode, err := s.currentLeaseOrder(s.db, &list[i].Order, list[i].PricingMode)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		if lease.ID != list[i].ID {
+			list[i].CurrentLease = &CurrentLease{OrderNo: lease.OrderNo, Duration: lease.Duration, PricingMode: mode}
+		}
+	}
+	return list, total, counts, nil
 }
 
 // ===== Delivery + 访问凭证 (T-017, C-06) =====
@@ -1500,7 +1523,7 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 
 	// 永久使用权无到期时间; 其余按租期换算, 到期后由 RevokeExpiredAccess 吊销。
 	// duration 是计费周期数, 必须走 LeaseEndAt 换算, 否则 monthly 订单的凭证会在几小时后就失效。
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p)
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1590,7 +1613,7 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		return fmt.Errorf("product not found")
 	}
 
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p)
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
 	if err != nil {
 		return err
 	}
@@ -1904,6 +1927,13 @@ func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
 			return err
 		}
 	} else {
+		lease, _, err := s.currentLeaseOrder(tx, o, "")
+		if err != nil {
+			return err
+		}
+		if lease.ID != o.ID {
+			return fmt.Errorf("%w，请在本次续租订单 %s 申请退款", ErrRenewalConflict, lease.OrderNo)
+		}
 		if o.Status != "active" && o.Status != "paid" && o.Status != "provisioning" {
 			return fmt.Errorf("invalid status transition")
 		}

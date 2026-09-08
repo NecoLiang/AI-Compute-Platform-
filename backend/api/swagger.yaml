@@ -226,6 +226,13 @@ components:
       type: object
       required: [order, product, supplier, delivery, actions]
       properties:
+        current_lease:
+          type: object
+          nullable: true
+          properties:
+            order_no: { type: string }
+            duration: { type: integer, minimum: 1 }
+            pricing_mode: { type: string }
         pending_renewal_order_no: { type: string }
         renewal: { $ref: '#/components/schemas/OrderRenewal' }
         order:
@@ -928,10 +935,11 @@ paths:
           application/json:
             schema:
               type: object
-              required: [duration, request_id, compliance_agreed, compliance_version, expected_lease_end_at, expected_renewed_until, expected_total_amount, expected_platform_fee]
+              required: [duration, request_id, expected_pricing_mode, compliance_agreed, compliance_version, expected_lease_end_at, expected_renewed_until, expected_total_amount, expected_platform_fee]
               properties:
                 duration: { type: integer, minimum: 1 }
                 request_id: { type: string, format: uuid }
+                expected_pricing_mode: { type: string, enum: [hourly, daily, weekly, monthly] }
                 compliance_agreed: { type: boolean, enum: [true] }
                 compliance_version: { type: string, example: '2026-09-06.1' }
                 expected_lease_end_at: { type: string, format: date-time }

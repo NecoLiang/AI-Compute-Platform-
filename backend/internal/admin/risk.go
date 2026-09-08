@@ -37,10 +37,8 @@ func (s *Service) FreezeAlert(ctx context.Context, operatorID, id int64, ip stri
 		if err := tx.Get(&orderNo, "SELECT order_no FROM orders WHERE id=?", alert.TargetID); err != nil {
 			return err
 		}
-		if err := tx.Get(&before, "SELECT status FROM orders WHERE id=? FOR UPDATE", alert.TargetID); err != nil {
-			return err
-		}
-		if err := s.orders.FreezeOrderTx(tx, orderNo); err != nil {
+		before, err = s.orders.FreezeOrderTx(tx, orderNo)
+		if err != nil {
 			return err
 		}
 	case "user", "account":

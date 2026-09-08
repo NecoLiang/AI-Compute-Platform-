@@ -220,16 +220,18 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 ## POST /orders/:id/renew · 创建续租订单 ✅ buyer
 
 ```json
-{"duration":2,"request_id":"cdd36d72-79ab-4a0a-9d2d-56a25f89c877","compliance_agreed":true,"compliance_version":"2026-09-06.1","expected_lease_end_at":"2026-09-08T12:00:00+08:00","expected_renewed_until":"2026-09-08T14:00:00+08:00","expected_total_amount":12000,"expected_platform_fee":780}
+{"duration":2,"expected_pricing_mode":"hourly","request_id":"cdd36d72-79ab-4a0a-9d2d-56a25f89c877","compliance_agreed":true,"compliance_version":"2026-09-06.1","expected_lease_end_at":"2026-09-08T12:00:00+08:00","expected_renewed_until":"2026-09-08T14:00:00+08:00","expected_total_amount":12000,"expected_platform_fee":780}
 ```
 
 - 同一次提交重试保持 UUID `request_id` 和报价字段不变；同一原订单、同一请求返回同一子订单。修改参数复用请求号返回 `40900`。
-- 服务器锁定原订单并重新报价；租期或金额变化返回 `40900`，前端刷新报价后重新显式同意。每个原订单最多一笔待支付续租。
+- 服务器锁定原订单并重新报价；计费方式、租期或金额变化返回 `40900`，前端刷新报价后重新显式同意。每个原订单最多一笔待支付续租。
 - 成功返回 `{order_no,total_amount,platform_fee}`，订单号以 `REN` 开头。合规同意记录与订单在同一事务落库，`reference` 是子订单号。
 - 创建不延长租期。到期前续租不重复扣库存，支付期限为 15 分钟与原租期结束时间的较早者。到期后续租只预留尚未持有的卡；取消、超时只释放这笔实际占用。
 - 验签成功且金额、支付记录、订单状态与时限匹配后，在同一事务记录支付、分账金额及履约变更。重复回调不重复延长/划转库存，运营不能通过改子订单状态绕过支付。
 - 到期前支付更新原订单结束时间与凭证有效期；到期后支付将预留库存划归原订单、原订单转为 `paid` 并吊销旧凭证，供给方在原订单重新交付，买家重新签收。子订单 `completed` 表示续租款项已应用，实际资源交付仍看原订单。
 - 原订单价格/数量/原购买周期不改写。重新交付使用子订单的周期与计费方式快照；原交付存证保留，新交付关联本次续租订单。
+
+原订单详情及供给方订单列表新增可空 `current_lease`（`order_no,duration,pricing_mode`），指向最近一次已付款且未退款的到期后续租。重新交付按此周期快照执行；原订单的金额和购买周期保持历史值。此时退款须从本次续租子订单申请，原订单 `can_refund=false`，服务端也拒绝绕过。
 
 订单详情新增 `order.parent_order_no`、`pending_renewal_order_no`、`product.min_duration` 及可空 `renewal`（`parent_order_no,mode,pricing_mode,lease_end_at,renewed_until,applied_at,confirmed_at`）。前端仅在 `actions.can_renew=true` 时提供新续租，待支付子订单通过 `pending_renewal_order_no` 恢复处理。
 

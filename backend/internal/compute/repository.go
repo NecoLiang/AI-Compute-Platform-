@@ -894,6 +894,7 @@ func (r *Repository) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, er
 
 // SupplierOrder 履约订单 + 产品摘要(订单管理页需要型号与计费模式展示)。
 type SupplierOrder struct {
+	CurrentLease *CurrentLease `json:"current_lease"`
 	Order
 	GPUModel    string `db:"gpu_model" json:"gpu_model"`
 	ProductType string `db:"product_type" json:"product_type"`

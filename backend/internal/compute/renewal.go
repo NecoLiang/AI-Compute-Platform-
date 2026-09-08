@@ -56,6 +56,7 @@ type RenewalQuote struct {
 }
 
 type RenewOrderReq struct {
+	ExpectedPricingMode  string     `json:"expected_pricing_mode"`
 	Duration             int        `json:"duration"`
 	RequestID            string     `json:"request_id"`
 	ComplianceAgreed     bool       `json:"compliance_agreed"`
@@ -192,7 +193,7 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 		if err != nil {
 			return nil, err
 		}
-		if o.Duration != req.Duration || o.TotalAmount != req.ExpectedTotalAmount || o.PlatformFee != req.ExpectedPlatformFee ||
+		if r.PricingMode != req.ExpectedPricingMode || o.Duration != req.Duration || o.TotalAmount != req.ExpectedTotalAmount || o.PlatformFee != req.ExpectedPlatformFee ||
 			!r.LeaseEndAt.Equal(req.ExpectedLeaseEndAt) || !sameTime(r.RenewedUntil, req.ExpectedRenewedUntil) {
 			return nil, ErrRenewalConflict
 		}
@@ -205,7 +206,7 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 	if err != nil {
 		return nil, err
 	}
-	if !q.LeaseEndAt.Equal(req.ExpectedLeaseEndAt) || !sameTime(q.RenewedUntil, req.ExpectedRenewedUntil) || q.TotalAmount != req.ExpectedTotalAmount || q.PlatformFee != req.ExpectedPlatformFee {
+	if q.PricingMode != req.ExpectedPricingMode || !q.LeaseEndAt.Equal(req.ExpectedLeaseEndAt) || !sameTime(q.RenewedUntil, req.ExpectedRenewedUntil) || q.TotalAmount != req.ExpectedTotalAmount || q.PlatformFee != req.ExpectedPlatformFee {
 		return nil, ErrRenewalConflict
 	}
 	expires := time.Now().Add(15 * time.Minute).Truncate(time.Second)
@@ -349,7 +350,7 @@ func ApplyRenewalPaymentTx(tx *sqlx.Tx, order, parent *Order, r *Renewal) error 
 	return err
 }
 
-func (s *Service) currentLeaseOrder(db sqlx.Queryer, parent *Order, product *Product) (*Order, string, error) {
+func (s *Service) currentLeaseOrder(db sqlx.Queryer, parent *Order, fallbackPricingMode string) (*Order, string, error) {
 	var lease struct {
 		ID          int64  `db:"id"`
 		OrderNo     string `db:"order_no"`
@@ -360,7 +361,7 @@ func (s *Service) currentLeaseOrder(db sqlx.Queryer, parent *Order, product *Pro
 		JOIN orders o ON o.id=r.order_id WHERE r.parent_order_id=? AND r.mode='restart'
 		AND r.applied_at IS NOT NULL AND o.status IN ('completed','refunding') ORDER BY r.order_id DESC LIMIT 1 FOR SHARE`, parent.ID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return parent, product.PricingMode, nil
+		return parent, fallbackPricingMode, nil
 	}
 	if err != nil {
 		return nil, "", err

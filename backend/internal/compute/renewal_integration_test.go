@@ -1,6 +1,7 @@
 package compute_test
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"tokenfactory/internal/admin"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/payment"
 )
@@ -94,7 +96,7 @@ func TestRenewalPaymentExtendsLeaseAndCredentialExactlyOnce(t *testing.T) {
 
 func renewalInput(quote map[string]any, requestID string) map[string]any {
 	return map[string]any{
-		"duration": quote["duration"], "request_id": requestID,
+		"duration": quote["duration"], "request_id": requestID, "expected_pricing_mode": quote["pricing_mode"],
 		"compliance_agreed": true, "compliance_version": "2026-09-06.1",
 		"expected_lease_end_at": quote["lease_end_at"], "expected_renewed_until": quote["renewed_until"],
 		"expected_total_amount": quote["total_amount"], "expected_platform_fee": quote["platform_fee"],
@@ -164,6 +166,22 @@ func TestRenewalAfterExpiryReservesAvailableStockAndRequiresFreshDelivery(t *tes
 	detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo, nil, 0).Data.(map[string]any)
 	if detail["order"].(map[string]any)["status"] != "paid" || detail["actions"].(map[string]any)["can_view_credential"] != false {
 		t.Fatalf("old access revived: %v", detail)
+	}
+	if detail["actions"].(map[string]any)["can_refund"] != false {
+		t.Fatalf("spent original financial order can still be refunded: %v", detail)
+	}
+	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/refund", nil, 40900)
+	lease, ok := detail["current_lease"].(map[string]any)
+	if !ok || lease["order_no"] != childNo || lease["duration"] != float64(2) || lease["pricing_mode"] != "hourly" {
+		t.Fatalf("current buyer lease terms missing: %v", detail)
+	}
+	supplierOrders := tradeRequest(t, tradeRouter(db, 101), "GET", "/api/v1/supplier/orders?status=paid", nil, 0).Data.(map[string]any)["list"].([]any)
+	if len(supplierOrders) != 1 {
+		t.Fatalf("unexpected supplier delivery list: %v", supplierOrders)
+	}
+	supplierLease, ok := supplierOrders[0].(map[string]any)["current_lease"].(map[string]any)
+	if !ok || supplierLease["order_no"] != childNo || supplierLease["duration"] != float64(2) {
+		t.Fatalf("supplier sees stale duration: %v", supplierOrders)
 	}
 	if _, err := service.DeliverWithAccess(101, parentNo, compute.DeliverInfo{IpAddress: "192.0.2.11"}, false); err != nil {
 		t.Fatal(err)
@@ -321,7 +339,7 @@ func TestRenewalConcurrentSubmissionsReturnTheSameOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := compute.RenewOrderReq{Duration: 2, RequestID: "88db33f5-d89a-4197-93f8-f9e1962e9e52", ComplianceAgreed: true,
+	req := compute.RenewOrderReq{ExpectedPricingMode: "hourly", Duration: 2, RequestID: "88db33f5-d89a-4197-93f8-f9e1962e9e52", ComplianceAgreed: true,
 		ComplianceVersion: "2026-09-06.1", ExpectedLeaseEndAt: q.LeaseEndAt, ExpectedRenewedUntil: q.RenewedUntil,
 		ExpectedTotalAmount: 9200, ExpectedPlatformFee: 460}
 	var wg sync.WaitGroup
@@ -360,6 +378,20 @@ func TestRenewalConcurrentSubmissionsReturnTheSameOrder(t *testing.T) {
 	}
 }
 
+func TestExpiredRenewalRejectsChangedPricingModeEvenWhenAmountsMatch(t *testing.T) {
+	db := setupTradeDB(t)
+	service, _, parentNo, productID := activeRenewalOrder(t, db)
+	db.MustExec("UPDATE orders SET lease_end_at=DATE_SUB(NOW(),INTERVAL 1 HOUR) WHERE order_no=?", parentNo)
+	if _, err := service.CompleteExpiredLeases(); err != nil {
+		t.Fatal(err)
+	}
+	buyer := tradeRouter(db, 102)
+	quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
+	input := renewalInput(quote, "642b6836-50a5-4319-aa69-3bf1d6d5578b")
+	db.MustExec("UPDATE products SET pricing_mode='daily' WHERE id=?", productID)
+	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", input, 40900)
+}
+
 func TestLeaseExpiryRechecksDeadlineAfterWaitingForTheOrderLock(t *testing.T) {
 	db := setupTradeDB(t)
 	service, _, parentNo, productID := activeRenewalOrder(t, db)
@@ -376,22 +408,7 @@ func TestLeaseExpiryRechecksDeadlineAfterWaitingForTheOrderLock(t *testing.T) {
 	}
 	finished := make(chan error, 1)
 	go func() { _, err := service.CompleteExpiredLeases(); finished <- err }()
-	// Coordinate a concurrent lease update through MySQL's real row lock.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var waiting int
-		if err := db.Get(&waiting, `SELECT COUNT(*) FROM performance_schema.data_lock_waits w
-			JOIN information_schema.innodb_trx t ON t.trx_id=w.BLOCKING_ENGINE_TRANSACTION_ID WHERE t.trx_mysql_thread_id=?`, connectionID); err != nil {
-			t.Fatal(err)
-		}
-		if waiting > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("expiry worker did not wait for the lease lock")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForRenewalLock(t, db, connectionID)
 	tx.MustExec("UPDATE orders SET lease_end_at=DATE_ADD(NOW(),INTERVAL 2 HOUR) WHERE order_no=?", parentNo)
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
@@ -451,5 +468,76 @@ func TestRenewalCreatesOneLinkedOrderWithoutExtendingOrReservingTwice(t *testing
 	product := tradeRequest(t, buyer, "GET", fmt.Sprintf("/api/v1/products/%d", productID), nil, 0).Data.(map[string]any)["product"].(map[string]any)
 	if product["stock"] != float64(6) {
 		t.Fatalf("renewal reserved the same cards twice: %v", product)
+	}
+}
+
+func waitForRenewalLock(t *testing.T, db *sqlx.DB, connectionID int64) {
+	t.Helper()
+	// Coordinate a concurrent lease update through MySQL's real row lock.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting int
+		if err := db.Get(&waiting, `SELECT COUNT(*) FROM performance_schema.data_lock_waits w
+			JOIN information_schema.innodb_trx t ON t.trx_id=w.BLOCKING_ENGINE_TRANSACTION_ID WHERE t.trx_mysql_thread_id=?`, connectionID); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not wait for the order lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRenewalFreezeLocksParentBeforeChild(t *testing.T) {
+	for _, viaAlert := range []bool{false, true} {
+		t.Run(fmt.Sprintf("alert=%t", viaAlert), func(t *testing.T) {
+			db := setupTradeDB(t)
+			service, _, parentNo, _ := activeRenewalOrder(t, db)
+			buyer := tradeRouter(db, 102)
+			quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
+			child := tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", renewalInput(quote, "90e7f6cc-b0ca-4681-9c01-5dc32280f6ae"), 0).Data.(map[string]any)["order_no"].(string)
+			var alertID int64
+			if viaAlert {
+				result := db.MustExec(`INSERT INTO risk_alerts (level,alert_type,target_type,target_id)
+					SELECT 'high','violation','order',id FROM orders WHERE order_no=?`, child)
+				alertID, _ = result.LastInsertId()
+			}
+			tx, err := db.Beginx()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			tx.MustExec("UPDATE orders SET updated_at=updated_at WHERE order_no=?", parentNo)
+			var connectionID int64
+			if err := tx.Get(&connectionID, "SELECT CONNECTION_ID()"); err != nil {
+				t.Fatal(err)
+			}
+			finished := make(chan error, 1)
+			go func() {
+				if viaAlert {
+					finished <- admin.NewService(admin.NewRepository(db)).FreezeAlert(context.Background(), 104, alertID, "127.0.0.1")
+				} else {
+					finished <- service.FreezeOrder(child)
+				}
+			}()
+			waitForRenewalLock(t, db, connectionID)
+			// A payment callback holds the parent before updating its renewal child.
+			if _, err := tx.Exec("UPDATE orders SET updated_at=updated_at WHERE order_no=?", child); err != nil {
+				t.Fatal(err)
+			}
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-finished; err != nil {
+				t.Fatal(err)
+			}
+			detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+child, nil, 0).Data.(map[string]any)
+			if detail["order"].(map[string]any)["status"] != "frozen" {
+				t.Fatalf("freeze lost: %v", detail)
+			}
+		})
 	}
 }
