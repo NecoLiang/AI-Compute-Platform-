@@ -2,13 +2,14 @@
 
 > 2026-09-07 依据前端 `src/app` 路由与后端 `main` 分支逐页核对生成。
 > 通用约定（响应包裹/鉴权/错误码/金额单位）见 [README.md](README.md)。
-> ✅=前端已接且字段一致 ｜ 🆕=后端就绪、页面待前端实现 ｜ ⬜=页面存在但接口待接
+> 2026-09-08：交易控制、健康度、风控与资料契约按第一批修复更新；代码/联调状态不代表生产已发布。详见 [第一批发布与验收](trade-controls-release.md)。
+> ✅=已接线（不等同业务或生产验收）｜ 🆕=新增能力需核对实现及外部依赖 ｜ ⬜=待接 ｜ 暂未开放=接口明确拒绝操作
 
 **全局字段口径（页面渲染前先确认这四条）**
 1. 所有金额字段单位是**分**（`unit_price`/`total_amount`/`platform_fee`/`amount`…），页面展示除以 100
 2. `duration` 是**计费周期数**不是小时：hourly=小时 daily=天 weekly=周 monthly=月 perpetual=1
 3. 时间一律 ISO8601 字符串；可空时间为 `null`
-4. 列表接口统一 `page`/`page_size` 入参，`data.list`+`data.total` 出参
+4. 分页接口使用 `page`/`page_size`、`data.list`+`data.total`；供应方商品等接口返回数组，以对应契约为准。
 
 ---
 
@@ -45,7 +46,7 @@
 ## 二、认证与账户
 
 ### `/auth/login` `/auth/register` `/auth/verify` ✅（经 BFF `/api/auth/*`）
-- `POST /auth/captcha/verify`（Cap token 换 captcha_token）
+- Cap 生成的 token 直接随 `/auth/sms/code` 提交，前端不提前调用 `/auth/captcha/verify` 消费。
 - `POST /auth/sms/code` `{phone, purpose(login|register), captcha_token}`
 - `POST /auth/sms/login` `{phone, sms_code, remember}`
 - `POST /auth/register` `{phone, sms_code, agree_tos:true, terms_version, privacy_version}` ⚠️ 两个 version 必填当前版本，缺失/旧版本返回 40001
@@ -62,14 +63,14 @@
 ## 三、买家控制台 `/console/buyer/*`
 
 ### `/checkout` 下单 ✅
-- `GET /products/:id`（回显）+ `POST /orders` `{product_id, quantity, duration(周期数), compliance_agreed:true, compliance_version}`
+- `GET /trading-config`（交易开关、动态费率；错误时不可下单）；`GET /products/:id`（回显）+ `POST /orders` `{product_id, quantity, duration(周期数), compliance_agreed:true, compliance_version}`
 - 下单被拦截的两种业务错误要区分展示：库存不足 / 「供应方算力节点已全部离线」(health=offline)
 
 ### `/console/buyer/orders` + `[orderId]` 订单 ✅
 - `GET /orders?status&order_no&page&page_size`、`GET /orders/:orderNo`
 - 状态枚举：`pending_payment|paid|provisioning|active|completed|cancelled|refunding|refunded|frozen`
 - 详情响应含 `actions {can_confirm, can_renew, can_refund, can_view_credential}` —— **按钮显隐直接用这组字段，不要前端自行推断**
-- `POST /orders/:id/confirm`（签收）、`POST /orders/:id/renew` ⬜、`POST /orders/:id/refund` ⬜（后端就绪，按钮待接）
+- `POST /orders/:id/confirm`（签收）；`POST /orders/:id/renew` 暂未开放，返回 40900、`can_renew=false`；`POST /orders/:id/refund` ⬜（申请接口存在，真实资金退款仍依赖支付渠道）。
 - 凭证：`GET /orders/:id/access-credential`（脱敏）、`POST .../reveal`（明文，二次确认后调用）
 - 🆕 订单详情可加「存证时间线」：复用 `/blockchain/verify?type=order|delivery&id=<orderNo>`
 - 支付：`POST /payment/pay` → 响应含 `pay_url`；`GET /payment/status/:order_no` ⬜（轮询支付结果，待接）
@@ -84,7 +85,7 @@
 - `GET /notifications?type(order|ticket|system)`、`POST /notifications/:id/read`、`POST /notifications/read-all`、`DELETE /notifications/:id`；列表响应的 `unread` 是全类型未读数（角标用）
 
 ### `/console/buyer/profile` `/console/buyer/billing` ⬜
-- `GET/PUT /user/profile`（后端就绪待接）；billing 可复用 `GET /payment/...` 系列
+- profile 已使用 `/auth/me` 和 KYC 状态，只读；`GET /user/profile` 返回当前数据库资料，`PUT` HTTP 501 明确未开放。billing 已接支付记录及结算查询；查询可用不代表真实支付已接入。
 
 ---
 

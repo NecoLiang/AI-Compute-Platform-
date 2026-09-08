@@ -1,9 +1,10 @@
 package middleware
 
 import (
+	"errors"
 	"log/slog"
-	"strconv"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"tokenfactory/pkg/errcode"
@@ -13,6 +14,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
 )
+
+var ErrAccountInactive = errors.New("account is not active")
 
 type Claims struct {
 	UserID int64    `json:"user_id"`
@@ -61,6 +64,11 @@ func AuthRequired(secret string, rdb *redis.Client, roleProvider UserRoleProvide
 		roles := claims.Roles
 		if roleProvider != nil {
 			roles, err = roleProvider.GetRoles(claims.UserID)
+			if errors.Is(err, ErrAccountInactive) {
+				response.ErrorWithStatus(c, http.StatusUnauthorized, errcode.Unauthorized, "账户已停用")
+				c.Abort()
+				return
+			}
 			if err != nil {
 				response.ErrorWithStatus(c, http.StatusServiceUnavailable, errcode.InternalError, "认证服务暂不可用")
 				c.Abort()

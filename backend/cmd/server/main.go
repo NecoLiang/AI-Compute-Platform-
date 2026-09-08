@@ -124,7 +124,7 @@ func main() {
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
 	adminRepo := admin.NewRepository(sqlDB)
-	adminSvc := admin.NewService(adminRepo)
+	adminSvc := admin.NewService(adminRepo, computeSvc)
 	adminSvc.SetSessionRevoker(rdb)
 	// 区块链存证 (T-057/T-058/T-059, docs/14)。BSN 未配置时存证照常落库为 pending,
 	// worker 待命, 配置上线后自动补推 —— 不阻塞业务。

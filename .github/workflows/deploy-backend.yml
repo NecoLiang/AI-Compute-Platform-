@@ -6,13 +6,14 @@ on:
     paths:
       - "backend/**"
       - ".github/workflows/deploy-backend.yml"
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: wanxiang-backend-production
+  group: wanxiang-backend-${{ github.event_name == 'pull_request' && github.ref || 'production' }}
   cancel-in-progress: false
 
 jobs:
@@ -23,6 +24,29 @@ jobs:
       run:
         working-directory: backend
 
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          TZ: Asia/Shanghai
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+
+    env:
+      TEST_MYSQL_DSN: "root@tcp(127.0.0.1:3306)/?parseTime=true&multiStatements=true&loc=Asia%2FShanghai&time_zone=%27%2B08%3A00%27"
+      TEST_REDIS_ADDR: 127.0.0.1:6379
+
     steps:
       - uses: actions/checkout@v7
 
@@ -32,10 +56,10 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Test
-        run: go test ./...
+        run: go test ./... -v
 
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 20

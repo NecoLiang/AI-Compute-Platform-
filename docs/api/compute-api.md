@@ -207,10 +207,9 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 - 状态不允许、尚未生成凭证或重复签收：`code=40900`
 - 订单不存在：`code=40400`
 
-## POST /orders/:id/renew · 续费 ✅ buyer
-```json
-{"duration": 720}
-```
+## POST /orders/:id/renew · 续租暂未开放
+
+路由保留，`:id` 是原订单号。合法 JSON 请求返回 `code=40900`、`message=续租暂未开放`。不创建新订单、不改变库存或租期；订单详情 `actions.can_renew=false`。完整续租需后续实现原订单关联、租期延长、支付及显式协议同意。
 
 ## POST /orders/:id/refund · 申请退款 ✅ buyer
 
@@ -277,3 +276,11 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 商品发布 `POST /supplier/products`、驳回重提 `PUT /supplier/products/:id` 和下单 `POST /orders` 必须同时传入 `compliance_agreed=true` 与 `compliance_version="2026-09-06.1"`。发布/重提对应《算力资源上架规范》，下单对应《算力资源使用规范》。缺失、旧版本或未同意返回 `40001`。同意记录与商品或订单、库存变更原子提交；失败不留下新同意记录，记录失败也不保留业务变更。
 
 现有续租及面议询价接口不新增该参数，不伪造新的同意记录。参见 [协议页面与同意契约](legal-consent-api.md)。
+
+## 2026-09-08 第一批交易控制契约
+
+- `GET /trading-config` 无需登录，返回 `{trading_enabled:boolean,fee_rate:number}`（基点），禁止缓存。读取失败/配置不完整时 HTTP 503、code 50000。
+- `POST /orders` 在订单事务内锁定当前交易配置；关闭返回 40900。费率为整数基点，费用向下取整到分，内含于总价；已创建订单使用保存的 `platform_fee`，支付分账不重新读取费率。
+- `GET /products`、`GET /products/:id` 的商品对象均包含 `health=unknown|healthy|degraded|offline`。offline 不可下单；unknown 不显示健康徽章，其他状态不改变既有准入规则。
+- 库存按订单实际 `stock_reserved` 归还并清零，与终态流转同事务；零占用订单不增加库存。历史 NULL 占用必须先核对，释放失败保持原状态，禁止猜测回填。该内部字段不对外返回。
+- 增量迁移、历史核对与应用回退见 [发布说明](trade-controls-release.md)。

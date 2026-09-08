@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"tokenfactory/internal/compute"
+	"tokenfactory/internal/trading"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
@@ -45,10 +47,7 @@ type User struct {
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 }
 
-type Config struct {
-	TradingEnabled bool `json:"trading_enabled"`
-	FeeRate        int  `json:"fee_rate"`
-}
+type Config = trading.Config
 
 type Notice struct {
 	ID        int64     `db:"id" json:"id"`
@@ -95,11 +94,6 @@ func (r *Repository) ListAlerts(level string, page, pageSize int) ([]Alert, int6
 	return list, total, err
 }
 
-func (r *Repository) UpdateAlertStatus(id int64, status string) error {
-	_, err := r.db.Exec("UPDATE risk_alerts SET status=? WHERE id=?", status, id)
-	return err
-}
-
 func (r *Repository) CreateAuditLog(l *AuditLog) error {
 	_, err := r.db.Exec(
 		"INSERT INTO audit_logs (operator_id, action, target_type, target_id, before_value, after_value, ip) VALUES (?,?,?,?,?,?,?)",
@@ -109,27 +103,7 @@ func (r *Repository) CreateAuditLog(l *AuditLog) error {
 }
 
 func (r *Repository) GetConfig() (Config, error) {
-	rows := make([]struct {
-		Key   string `db:"config_key"`
-		Value string `db:"config_value"`
-	}, 0, 2)
-	if err := r.db.Select(&rows, "SELECT config_key, config_value FROM system_config WHERE config_key IN ('trading_enabled','fee_rate')"); err != nil {
-		return Config{}, err
-	}
-	config := Config{TradingEnabled: true, FeeRate: 500}
-	for _, row := range rows {
-		switch row.Key {
-		case "trading_enabled":
-			config.TradingEnabled = row.Value == "true"
-		case "fee_rate":
-			feeRate, err := strconv.Atoi(row.Value)
-			if err != nil {
-				return Config{}, fmt.Errorf("invalid fee_rate: %w", err)
-			}
-			config.FeeRate = feeRate
-		}
-	}
-	return config, nil
+	return trading.ReadConfig(r.db)
 }
 
 func (r *Repository) UpdateConfig(operatorID int64, key, value, ip string) error {
@@ -218,27 +192,35 @@ func (r *Repository) ListUsers() ([]User, error) {
 	return list, err
 }
 
-func (r *Repository) FreezeUser(id int64) error {
-	result, err := r.db.Exec("UPDATE users SET status='frozen' WHERE id=? AND status='active'", id)
-	if err != nil {
-		return err
+func (r *Repository) freezeUserTx(tx *sqlx.Tx, id int64) (string, error) {
+	var before string
+	if err := tx.Get(&before, "SELECT status FROM users WHERE id=? FOR UPDATE", id); err != nil {
+		return "", err
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
+	if before != "active" && before != "frozen" {
+		return "", fmt.Errorf("账户状态不允许冻结")
 	}
-	if n == 0 {
-		return sql.ErrNoRows
+	if before != "frozen" {
+		if _, err := tx.Exec("UPDATE users SET status='frozen' WHERE id=?", id); err != nil {
+			return "", err
+		}
 	}
-	return nil
+	return before, nil
 }
 
 type Service struct {
-	repo *Repository
-	rdb  *redis.Client
+	orders *compute.Service
+	repo   *Repository
+	rdb    *redis.Client
 }
 
-func NewService(repo *Repository) *Service { return &Service{repo: repo} }
+func NewService(repo *Repository, orders ...*compute.Service) *Service {
+	orderService := compute.NewService(compute.NewRepository(repo.db), repo.db)
+	if len(orders) > 0 {
+		orderService = orders[0]
+	}
+	return &Service{repo: repo, orders: orderService}
+}
 
 func (s *Service) CreateAlert(level, alertType, targetType string, targetID int64, rule string) error {
 	return s.repo.CreateAlert(&Alert{Level: level, AlertType: alertType, TargetType: targetType, TargetID: targetID, RuleDetail: rule})
@@ -247,9 +229,6 @@ func (s *Service) CreateAlert(level, alertType, targetType string, targetID int6
 func (s *Service) ListAlerts(level string, page, pageSize int) ([]Alert, int64, error) {
 	return s.repo.ListAlerts(level, page, pageSize)
 }
-
-func (s *Service) ResolveAlert(id int64) error { return s.repo.UpdateAlertStatus(id, "resolved") }
-func (s *Service) DismissAlert(id int64) error { return s.repo.UpdateAlertStatus(id, "dismissed") }
 
 func (s *Service) LogAudit(operatorID int64, action, targetType string, targetID int64, before, after, ip string) error {
 	return s.repo.CreateAuditLog(&AuditLog{OperatorID: operatorID, Action: action, TargetType: targetType, TargetID: targetID, BeforeVal: before, AfterVal: after, IP: ip})
@@ -274,7 +253,6 @@ func (s *Service) CreateNotice(operatorID int64, content, ip string) (int64, err
 func (s *Service) ListNotices() ([]Notice, error) { return s.repo.ListNotices() }
 
 func (s *Service) ListUsers() ([]User, error) { return s.repo.ListUsers() }
-func (s *Service) FreezeUser(id int64) error  { return s.repo.FreezeUser(id) }
 
 // SetSessionRevoker 注入 Redis, 供冻结账号时写即时失效名单(main.go 装配)。
 func (s *Service) SetSessionRevoker(rdb *redis.Client) { s.rdb = rdb }
@@ -283,7 +261,7 @@ func (s *Service) SetSessionRevoker(rdb *redis.Client) { s.rdb = rdb }
 // 存量 access token 立即失效, 不必等 15 分钟自然过期。TTL 覆盖 token 最长生命周期。
 func (s *Service) RevokeUserSessions(ctx context.Context, userID int64) error {
 	if s.rdb == nil {
-		return nil
+		return fmt.Errorf("session revoker unavailable")
 	}
 	return s.rdb.Set(ctx, "auth:frozen:"+strconv.FormatInt(userID, 10), "1", 24*time.Hour).Err()
 }

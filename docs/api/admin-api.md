@@ -73,6 +73,11 @@ curl "http://localhost:8080/api/v1/admin/risk/alerts?level=high&page=1&page_size
 ### POST /admin/risk/alerts/:id/freeze · 冻结处置
 ### POST /admin/risk/alerts/:id/dismiss · 标记误报
 
+冻结接口无请求体，按告警保存的 `target_type/target_id` 解析对象：`order` 冻结订单并吊销凭证；`user/account` 冻结账户并使已有会话失效。不能冻结当前操作人。对象/告警不存在返回 `40400`，无效类型返回 `40001`，状态冲突返回 `40900`。
+
+目标冻结、审计与告警 `processing` 在同一 MySQL 事务提交；账户会话失效处理成功后才变为 `resolved`。会话失效处理失败返回 `50000`，保持 `processing`，允许重试冻结；数据库账户状态也会阻止已有令牌访问。重复冻结不会重复写冻结审计。`dismiss` 只允许 pending，重复 dismissed 幂等，不允许忽略 processing/resolved。
+
+
 ---
 
 ## 用户管理
@@ -98,7 +103,12 @@ curl "http://localhost:8080/api/v1/admin/audit-logs?page=1&page_size=20" \
 
 ### PUT /admin/config · 更新配置（合规开关）
 
-配置写入 `system_config`，服务重启后保持，并同步记录审计日志。
+配置写入 `system_config`，服务重启后保持，并同步记录审计日志。GET/PUT 均允许 operator/admin。
+
+- `trading_enabled=false` 阻止新订单创建，返回 `40900`；已有订单支付、交付、退款继续按原流程处理。
+- `fee_rate` 是 0–10000 的整数基点，PUT 的 value 使用字符串，例如 `{"key":"fee_rate","value":"650"}` 表示 6.5%。订单创建事务读取并锁定配置，使用整数分计算费用；既有订单费用及结算不随配置变化。
+- 买家预览使用公开的 `GET /trading-config`，返回同样两个字段，`Cache-Control: no-store`。读取失败、字段缺失或值非法时返回 HTTP 503 / code 50000；前端禁止提交，不能回退为 5% 或开放交易。
+
 ```
 curl -X PUT http://localhost:8080/api/v1/admin/config \
   -H "Authorization: Bearer <token>" \

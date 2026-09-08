@@ -2,6 +2,7 @@ package compute
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 
 	"tokenfactory/internal/blockchain"
 	"tokenfactory/internal/legal"
+	"tokenfactory/internal/trading"
 	"tokenfactory/pkg/crypto"
 
 	"github.com/google/uuid"
@@ -155,9 +157,9 @@ var pricingModeLabels = map[string]string{
 }
 
 type Service struct {
-	repo    *Repository
-	db      *sqlx.DB
-	feeRate int64 // platform fee rate in basis points, default 500 = 5%
+	repo *Repository
+	db   *sqlx.DB
+
 	// credentialKey 是访问凭证的 AES-256-GCM 密钥。为 nil/空 表示未配置:
 	// 此时任何需要加解密的操作都会返回 crypto.ErrKeyNotConfigured, 绝不降级存明文。
 	credentialKey []byte
@@ -260,7 +262,7 @@ type SeededBuyerOrder struct {
 // 可选第三参传 config.Security.CredentialKey (64 位 hex), 用于交付访问凭证加解密;
 // 不传或传空串时凭证功能返回明确的"密钥未配置"错误, 不做任何明文降级。
 func NewService(repo *Repository, db *sqlx.DB, credentialKeyHex ...string) *Service {
-	s := &Service{repo: repo, db: db, feeRate: 500}
+	s := &Service{repo: repo, db: db}
 	if len(credentialKeyHex) > 0 {
 		// 配置非法只记录为未配置状态, 由调用点返回明确错误, 不在此处 panic 影响其他模块启动。
 		if key, err := crypto.ParseKeyHex(credentialKeyHex[0]); err == nil {
@@ -1003,7 +1005,19 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if err != nil {
 		return nil, err
 	}
-	totalFen, feeFen, err := CalcOrderAmount(p.UnitPrice, qty, dur, s.feeRate)
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	policy, err := trading.LockConfig(tx)
+	if err != nil {
+		return nil, err
+	}
+	if !policy.TradingEnabled {
+		return nil, trading.ErrDisabled
+	}
+	totalFen, feeFen, err := CalcOrderAmount(p.UnitPrice, qty, dur, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
@@ -1016,6 +1030,7 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		BuyerID:          buyerID,
 		ProductID:        req.ProductID,
 		Quantity:         qty,
+		StockReserved:    &qty,
 		Duration:         dur,
 		UnitPrice:        p.UnitPrice,
 		TotalAmount:      totalFen,
@@ -1024,12 +1039,6 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		PaymentExpires:   &expires,
 		ComplianceAgreed: req.ComplianceAgreed,
 	}
-
-	tx, err := s.db.Beginx()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
 
 	if err := s.repo.DecrProductStock(tx, p.ID, qty); err != nil {
 		return nil, fmt.Errorf("insufficient stock")
@@ -1112,18 +1121,55 @@ func (s *Service) CancelOrder(orderNo string) error {
 // FreezeOrder 冻结订单(风控/违规)。冻结意味着买家不应再访问算力,
 // 因此必须同步吊销访问凭证 —— 与 C-06「订单到期/退款/冻结 → 凭证自动失效」一致。
 func (s *Service) FreezeOrder(orderNo string) error {
-	if err := s.repo.UpdateOrderStatus(orderNo, "frozen"); err != nil {
+	tx, err := s.db.Beginx()
+	if err != nil {
 		return err
 	}
-	if err := s.revokeAccessByOrderNo(orderNo); err != nil {
+	defer tx.Rollback()
+	before, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
+	if err != nil {
 		return err
 	}
-	// REQ-H-003/H-014: 违规处置强制留痕, 埋点在 service 层, 运营无法绕过。
-	// 风控规则引擎(T-055)落地前, 违规类型/结论未持久化, 载荷记冻结事实本身。
+	if before == nil {
+		return fmt.Errorf("order not found")
+	}
+	if err := s.FreezeOrderTx(tx, orderNo); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if before.Status != "frozen" {
+		s.AttestOrderFreeze(orderNo)
+	}
+	return nil
+}
+
+// FreezeOrderTx lets alert resolution share the order and credential transaction.
+func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) error {
+	order, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
+	if err != nil {
+		return err
+	}
+	if order == nil {
+		return fmt.Errorf("order not found")
+	}
+	switch order.Status {
+	case "pending_payment", "paid", "provisioning", "active", "frozen":
+	default:
+		return fmt.Errorf("order not active")
+	}
+	if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "frozen"); err != nil {
+		return err
+	}
+	return s.repo.RevokeAccessByOrderTx(tx, order.ID)
+}
+
+// Call after a new freeze commits; retries must not emit another attestation.
+func (s *Service) AttestOrderFreeze(orderNo string) {
 	s.attest("violation", orderNo, func() (any, error) {
 		return blockchain.ViolationPayload{TargetNo: orderNo, Violation: "order_frozen", Conclusion: "risk_freeze"}, nil
 	})
-	return nil
 }
 
 func (s *Service) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, error) {
@@ -1196,7 +1242,7 @@ func buyerOrderActions(order *Order, product *Product, delivery *OrderDelivery) 
 	return BuyerOrderActions{
 		CanConfirm: order.Status == "provisioning" && delivery != nil &&
 			delivery.AccessStatus == AccessStatusGenerated && !delivery.ConfirmedByBuyer,
-		CanRenew:  order.Status == "active" && product.PricingMode != PricingPerpetual,
+		CanRenew:  false,
 		CanRefund: order.Status == "active" || order.Status == "paid" || order.Status == "provisioning",
 		CanViewCredential: delivery != nil && delivery.AccessValueEncrypted != "" &&
 			(delivery.AccessStatus == AccessStatusGenerated || delivery.AccessStatus == AccessStatusDelivered),
@@ -1212,6 +1258,10 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 		return nil, fmt.Errorf("no active products available for buyer fixtures")
 	}
 
+	policy, err := trading.ReadConfig(s.db)
+	if err != nil {
+		return nil, err
+	}
 	statuses := []string{"pending_payment", "paid", "active", "completed"}
 	now := time.Now().UTC().Truncate(time.Second)
 	tx, err := s.db.Beginx()
@@ -1243,11 +1293,11 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 			}
 		}
 		total := product.UnitPrice * int64(duration)
-		platformFee := total * s.feeRate / 10000
+		platformFee := total * int64(policy.FeeRate) / 10000
 		_, err := tx.Exec(`INSERT INTO orders
 			(order_no,buyer_id,product_id,quantity,duration,unit_price,total_amount,platform_fee,status,
-			 payment_expires_at,lease_start_at,lease_end_at,compliance_agreed,created_at,updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)
+			 payment_expires_at,lease_start_at,lease_end_at,compliance_agreed,created_at,updated_at,stock_reserved)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,0)
 			ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id),product_id=VALUES(product_id),quantity=VALUES(quantity),
 			duration=VALUES(duration),unit_price=VALUES(unit_price),total_amount=VALUES(total_amount),
 			platform_fee=VALUES(platform_fee),status=VALUES(status),payment_expires_at=VALUES(payment_expires_at),
@@ -1743,60 +1793,11 @@ func (s *Service) ListResourceSyncs(operatorID int64, isAdmin bool, productID in
 
 // ===== Renewal (T-018) =====
 
+var ErrRenewalUnavailable = errors.New("续租暂未开放")
+
+// Renewal stays unavailable until parent lease extension and payment are atomic.
 func (s *Service) RenewOrder(buyerID int64, orderNo string, additionalDuration int) (*Order, error) {
-	if err := s.repo.RequireTradingAccess(buyerID, "buyer"); err != nil {
-		return nil, err
-	}
-	o, err := s.repo.GetOrderByNo(orderNo)
-	if err != nil {
-		return nil, err
-	}
-	if o == nil {
-		return nil, fmt.Errorf("order not found")
-	}
-	if o.BuyerID != buyerID {
-		return nil, fmt.Errorf("无权续租该订单")
-	}
-	if o.Status != "active" {
-		return nil, fmt.Errorf("order not active")
-	}
-
-	p, err := s.repo.GetProductByID(o.ProductID)
-	if err != nil {
-		return nil, err
-	}
-	// 买断/永久使用权无续租概念。
-	if p.PricingMode == PricingPerpetual {
-		return nil, fmt.Errorf("买断商品为永久使用权，无需续租")
-	}
-
-	// 续租沿用原订单数量, 仅时长来自请求; 与下单同一套校验与溢出保护, 但不重复占用库存。
-	qty, dur, err := ValidateRenewParams(p, o.Quantity, additionalDuration)
-	if err != nil {
-		return nil, err
-	}
-	totalFen, feeFen, err := CalcOrderAmount(o.UnitPrice, qty, dur, s.feeRate)
-	if err != nil {
-		return nil, err
-	}
-
-	newOrderNo := "REN" + time.Now().Format("20060102150405") + uuid.New().String()[:6]
-	expires := time.Now().Add(15 * time.Minute)
-
-	no := &Order{
-		OrderNo:          newOrderNo,
-		BuyerID:          buyerID,
-		ProductID:        o.ProductID,
-		Quantity:         qty,
-		Duration:         dur,
-		UnitPrice:        o.UnitPrice,
-		TotalAmount:      totalFen,
-		PlatformFee:      feeFen,
-		Status:           "pending_payment",
-		PaymentExpires:   &expires,
-		ComplianceAgreed: true,
-	}
-	return no, s.repo.CreateOrderTx(nil, no)
+	return nil, ErrRenewalUnavailable
 }
 
 // ===== Refund (T-019) =====
@@ -1840,11 +1841,11 @@ func (s *Service) CompleteRefund(orderNo string) error {
 // stockHoldingStatuses 仍然占用着商品余量的订单状态。
 // 下单时扣减余量, 只要订单还处于这些状态, 这份余量就归它占用;
 // 一旦流转到 cancelled/refunded/completed, 余量必须归还。
-var stockHoldingStatuses = []string{"pending_payment", "paid", "provisioning", "active"}
+var stockHoldingStatuses = []string{"pending_payment", "paid", "provisioning", "active", "frozen"}
 
 // releaseStock 守卫式流转订单状态并归还商品余量, 二者在同一事务内完成。
 //
-// 返回 released 表示本次是否真的归还了余量。若订单已处于目标状态(或不在 from 列表中),
+// 返回 released 表示本次发生终态流转, 并归还实际占用量(可能为零)。若已处于目标状态(或不在 from 列表中),
 // 返回 false 且不做任何改动 —— 幂等, 重复调用不会把余量越加越多。
 //
 // 为什么必须同事务 + 条件 UPDATE: 关单定时任务、买家退款、运营改单三条路径可能同时命中
@@ -1873,7 +1874,15 @@ func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, 
 		return false, fmt.Errorf("order not found: %s", orderNo)
 	}
 
-	if err := s.repo.IncrProductStock(tx, o.ProductID, o.Quantity); err != nil {
+	if o.StockReserved == nil {
+		return false, fmt.Errorf("order %s requires stock reservation reconciliation", orderNo)
+	}
+	if *o.StockReserved > 0 {
+		if err := s.repo.IncrProductStock(tx, o.ProductID, *o.StockReserved); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.Exec("UPDATE orders SET stock_reserved=0 WHERE order_no=?", orderNo); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -1989,4 +1998,8 @@ func (s *Service) AdminUpdateOrderStatus(orderNo string, status string) error {
 		return s.FreezeOrder(orderNo)
 	}
 	return s.repo.UpdateOrderStatus(orderNo, status)
+}
+
+func (s *Service) GetTradingConfig() (trading.Config, error) {
+	return trading.ReadConfig(s.db)
 }
