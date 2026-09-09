@@ -2,7 +2,6 @@ package compute
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -180,15 +179,25 @@ type Attester interface {
 	Attest(targetType, targetID string, payload any) error
 }
 
+type CurrentLease struct {
+	OrderNo     string `json:"order_no"`
+	Duration    int    `json:"duration"`
+	PricingMode string `json:"pricing_mode"`
+}
+
 type BuyerOrderDetail struct {
-	Order    BuyerOrderDetailOrder    `json:"order"`
-	Product  BuyerOrderDetailProduct  `json:"product"`
-	Supplier BuyerOrderDetailSupplier `json:"supplier"`
-	Delivery *BuyerOrderDeliveryView  `json:"delivery"`
-	Actions  BuyerOrderActions        `json:"actions"`
+	CurrentLease          *CurrentLease            `json:"current_lease"`
+	PendingRenewalOrderNo string                   `json:"pending_renewal_order_no"`
+	Renewal               *Renewal                 `json:"renewal"`
+	Order                 BuyerOrderDetailOrder    `json:"order"`
+	Product               BuyerOrderDetailProduct  `json:"product"`
+	Supplier              BuyerOrderDetailSupplier `json:"supplier"`
+	Delivery              *BuyerOrderDeliveryView  `json:"delivery"`
+	Actions               BuyerOrderActions        `json:"actions"`
 }
 
 type BuyerOrderDetailOrder struct {
+	ParentOrderNo    string     `json:"parent_order_no"`
 	OrderNo          string     `json:"order_no"`
 	Status           string     `json:"status"`
 	Quantity         int        `json:"quantity"`
@@ -205,6 +214,7 @@ type BuyerOrderDetailOrder struct {
 }
 
 type BuyerOrderDetailProduct struct {
+	MinDuration       int     `json:"min_duration"`
 	ID                int64   `json:"id"`
 	ProductType       string  `json:"product_type"`
 	GPUModel          string  `json:"gpu_model"`
@@ -366,22 +376,44 @@ func (s *Service) BuildDeliveryAttestPayload(orderNo string) (blockchain.Deliver
 	if err != nil || o == nil {
 		return p, fmt.Errorf("order not found: %s", orderNo)
 	}
-	d, err := s.repo.GetDeliveryByOrder(o.ID)
+	var confirmedAt, startedAt *time.Time
+	renewal, err := GetRenewal(s.db, orderNo)
 	if err != nil {
 		return p, err
 	}
-	if d == nil || !d.ConfirmedByBuyer || d.BuyerConfirmedAt == nil {
+	if renewal != nil {
+		confirmedAt, startedAt = renewal.ConfirmedAt, o.LeaseStart
+	} else {
+		var history []struct {
+			StartedAt   *time.Time `db:"previous_lease_start_at"`
+			ConfirmedAt *time.Time `db:"previous_confirmed_at"`
+		}
+		if err := s.db.Select(&history, `SELECT previous_lease_start_at,previous_confirmed_at FROM order_renewals
+			WHERE parent_order_id=? AND previous_confirmed_at IS NOT NULL ORDER BY order_id LIMIT 1`, o.ID); err != nil {
+			return p, err
+		}
+		if len(history) > 0 {
+			confirmedAt, startedAt = history[0].ConfirmedAt, history[0].StartedAt
+		} else {
+			d, err := s.repo.GetDeliveryByOrder(o.ID)
+			if err != nil {
+				return p, err
+			}
+			if d != nil && d.ConfirmedByBuyer {
+				confirmedAt, startedAt = d.BuyerConfirmedAt, o.LeaseStart
+			}
+		}
+	}
+	if confirmedAt == nil {
 		return p, fmt.Errorf("delivery not confirmed for order %s", orderNo)
 	}
 	leaseStart := ""
-	if o.LeaseStart != nil {
-		leaseStart = blockchain.FormatTime(*o.LeaseStart)
+	if startedAt != nil {
+		leaseStart = blockchain.FormatTime(*startedAt)
 	}
 	return blockchain.DeliveryPayload{
-		OrderNo:      o.OrderNo,
-		OrderHash:    blockchain.ComputeHash(orderPayload),
-		ConfirmedAt:  blockchain.FormatTime(*d.BuyerConfirmedAt),
-		LeaseStartAt: leaseStart,
+		OrderNo: o.OrderNo, OrderHash: blockchain.ComputeHash(orderPayload),
+		ConfirmedAt: blockchain.FormatTime(*confirmedAt), LeaseStartAt: leaseStart,
 	}, nil
 }
 
@@ -1088,12 +1120,12 @@ func (s *Service) CanAccessOrder(userID int64, o *Order, isAdmin bool) (bool, er
 }
 
 func (s *Service) PayOrder(orderNo string) error {
-	return s.repo.UpdateOrderStatus(orderNo, "paid")
+	return s.AdminUpdateOrderStatus(orderNo, "paid")
 }
 
 // Provisioning: supplier confirms they're setting up
 func (s *Service) ProvisioningOrder(orderNo string) error {
-	return s.repo.UpdateOrderStatus(orderNo, "provisioning")
+	return s.AdminUpdateOrderStatus(orderNo, "provisioning")
 }
 
 // CompleteOrder 订单完成并归还余量 (REQ-A-043)。
@@ -1107,9 +1139,6 @@ func (s *Service) CancelOrder(orderNo string) error {
 	// 仅从「未消耗资源」的状态取消才归还库存。
 	released, err := s.releaseStock(orderNo, stockHoldingStatuses, "cancelled")
 	if err != nil {
-		return err
-	}
-	if err := s.revokeAccessByOrderNo(orderNo); err != nil {
 		return err
 	}
 	if released {
@@ -1126,43 +1155,42 @@ func (s *Service) FreezeOrder(orderNo string) error {
 		return err
 	}
 	defer tx.Rollback()
-	before, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
+	before, err := s.FreezeOrderTx(tx, orderNo)
 	if err != nil {
-		return err
-	}
-	if before == nil {
-		return fmt.Errorf("order not found")
-	}
-	if err := s.FreezeOrderTx(tx, orderNo); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if before.Status != "frozen" {
+	if before != "frozen" {
 		s.AttestOrderFreeze(orderNo)
 	}
 	return nil
 }
 
 // FreezeOrderTx lets alert resolution share the order and credential transaction.
-func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) error {
-	order, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
+func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) (string, error) {
+	order, _, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if order == nil {
-		return fmt.Errorf("order not found")
+		return "", fmt.Errorf("order not found")
 	}
 	switch order.Status {
 	case "pending_payment", "paid", "provisioning", "active", "frozen":
 	default:
-		return fmt.Errorf("order not active")
+		return "", fmt.Errorf("order not active")
 	}
 	if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "frozen"); err != nil {
-		return err
+		return "", err
 	}
-	return s.repo.RevokeAccessByOrderTx(tx, order.ID)
+	if renewal == nil {
+		if err := s.cancelPendingRenewalsTx(tx, order.ID); err != nil {
+			return "", err
+		}
+	}
+	return order.Status, s.repo.RevokeAccessByOrderTx(tx, order.ID)
 }
 
 // Call after a new freeze commits; retries must not emit another attestation.
@@ -1207,7 +1235,7 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			ComplianceAgreed: order.ComplianceAgreed, CreatedAt: order.CreatedAt, UpdatedAt: order.UpdatedAt,
 		},
 		Product: BuyerOrderDetailProduct{
-			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel,
+			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel, MinDuration: max(1, product.MinDuration),
 			CardCount: product.CardCount, MachineCount: product.MachineCount, TotalPflopsApprox: product.TotalPflopsApprox,
 			PowerCapacityKW: product.PowerCapacityKw, RackCount: product.RackCount, CPUSpec: product.CpuSpec,
 			MemorySpec: product.MemorySpec, StorageSpec: product.StorageSpec, BandwidthSpec: product.BandwidthSpec,
@@ -1230,6 +1258,40 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			AccessStatus: delivery.AccessStatus, AccessExpiresAt: delivery.AccessExpiresAt, RevokedAt: delivery.RevokedAt,
 			ConfirmedByBuyer: delivery.ConfirmedByBuyer, BuyerConfirmedAt: delivery.BuyerConfirmedAt,
 			CreatedAt: delivery.CreatedAt,
+		}
+	}
+	renewal, err := GetRenewal(s.db, orderNo)
+	if err != nil {
+		return nil, err
+	}
+	detail.Renewal = renewal
+	if renewal != nil {
+		detail.Order.ParentOrderNo = renewal.ParentOrderNo
+		detail.Product.PricingMode = renewal.PricingMode
+		parent, err := s.repo.GetOrderByID(renewal.ParentID)
+		if err != nil {
+			return nil, err
+		}
+		detail.Actions.CanRefund = order.Status == "completed" && unusedRenewal(parent, renewal)
+	} else {
+		lease, pricingMode, err := s.currentLeaseOrder(s.db, &order, product.PricingMode)
+		if err != nil {
+			return nil, err
+		}
+		if lease.ID != order.ID {
+			detail.CurrentLease = &CurrentLease{OrderNo: lease.OrderNo, Duration: lease.Duration, PricingMode: pricingMode}
+			detail.Actions.CanRefund = false
+		}
+		var pending []string
+		if err := s.db.Select(&pending, `SELECT o.order_no FROM order_renewals r JOIN orders o ON o.id=r.order_id WHERE r.parent_order_id=? AND o.status='pending_payment' ORDER BY o.id LIMIT 1`, order.ID); err != nil {
+			return nil, err
+		}
+		if len(pending) > 0 {
+			detail.PendingRenewalOrderNo = pending[0]
+		}
+		if len(pending) == 0 {
+			_, err := s.GetRenewalQuote(buyerID, orderNo, max(1, product.MinDuration))
+			detail.Actions.CanRenew = err == nil
 		}
 	}
 	return detail, nil
@@ -1313,7 +1375,21 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 }
 
 func (s *Service) ListSupplierOrders(supplierID int64, status string, page, pageSize int) ([]SupplierOrder, int64, map[string]int64, error) {
-	return s.repo.ListSupplierOrders(supplierID, status, page, pageSize)
+	list, total, counts, err := s.repo.ListSupplierOrders(supplierID, status, page, pageSize)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	// ponytail: one lease lookup per row (20 by default); use a bulk join if larger pages become common.
+	for i := range list {
+		lease, mode, err := s.currentLeaseOrder(s.db, &list[i].Order, list[i].PricingMode)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		if lease.ID != list[i].ID {
+			list[i].CurrentLease = &CurrentLease{OrderNo: lease.OrderNo, Duration: lease.Duration, PricingMode: mode}
+		}
+	}
+	return list, total, counts, nil
 }
 
 // ===== Delivery + 访问凭证 (T-017, C-06) =====
@@ -1396,7 +1472,15 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 		return nil, crypto.ErrKeyNotConfigured
 	}
 
-	o, err := s.repo.GetOrderByNo(orderNo)
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	o, _, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
+	if renewal != nil {
+		return nil, ErrRenewalConflict
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1439,9 +1523,13 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 
 	// 永久使用权无到期时间; 其余按租期换算, 到期后由 RevokeExpiredAccess 吊销。
 	// duration 是计费周期数, 必须走 LeaseEndAt 换算, 否则 monthly 订单的凭证会在几小时后就失效。
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
+	if err != nil {
+		return nil, err
+	}
 	var expiresAt *time.Time
-	if p.PricingMode != PricingPerpetual {
-		e := LeaseEndAt(time.Now(), p.PricingMode, o.Duration)
+	if pricingMode != PricingPerpetual {
+		e := LeaseEndAt(time.Now(), pricingMode, leaseOrder.Duration)
 		expiresAt = &e
 	}
 
@@ -1453,13 +1541,16 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 		AccessStatus:         AccessStatusGenerated,
 		AccessExpiresAt:      expiresAt,
 	}
-	if err := s.repo.SaveDeliveryWithAccess(d); err != nil {
+	if err := s.repo.SaveDeliveryWithAccessTx(tx, d); err != nil {
 		return nil, err
 	}
-	if err := s.repo.UpdateOrderStatus(orderNo, "provisioning"); err != nil {
+	if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "provisioning"); err != nil {
 		return nil, err
 	}
 
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	s.notify(o.BuyerID, "订单已交付",
 		fmt.Sprintf("您的订单 %s 已交付并生成访问凭证, 请前往订单详情确认签收。", orderNo),
 		"/console/buyer/orders/"+orderNo)
@@ -1495,7 +1586,15 @@ func validateDeliveryConfirmation(o *Order, d *OrderDelivery, buyerID int64) err
 // ConfirmDelivery 仅允许订单本人签收已生成凭证的 provisioning 订单。
 // 两次状态更新在同一事务内并带条件，防止并发退款/改单后又被覆盖为 active。
 func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
-	o, err := s.repo.GetOrderByNo(orderNo)
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	o, _, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
+	if renewal != nil {
+		return ErrRenewalConflict
+	}
 	if err != nil {
 		return err
 	}
@@ -1514,23 +1613,21 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		return fmt.Errorf("product not found")
 	}
 
-	now := time.Now()
-	var leaseEnd interface{}
-	if p.PricingMode != PricingPerpetual {
-		leaseEnd = LeaseEndAt(now, p.PricingMode, o.Duration)
-	}
-
-	tx, err := s.db.Beginx()
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	now := time.Now().Truncate(time.Second)
+	var leaseEnd interface{}
+	if pricingMode != PricingPerpetual {
+		leaseEnd = LeaseEndAt(now, pricingMode, leaseOrder.Duration)
+	}
 
 	result, err := tx.Exec(`UPDATE order_deliveries d
 		JOIN orders o ON o.id=d.order_id
-		SET d.confirmed_by_buyer=1, d.buyer_confirmed_at=?, d.access_status='delivered'
+		SET d.confirmed_by_buyer=1, d.buyer_confirmed_at=?, d.access_status='delivered', d.access_expires_at=?
 		WHERE d.order_id=? AND d.access_status='generated' AND d.confirmed_by_buyer=0
-		AND o.buyer_id=? AND o.status='provisioning'`, now, o.ID, buyerID)
+		AND o.buyer_id=? AND o.status='provisioning'`, now, leaseEnd, o.ID, buyerID)
 	if err != nil {
 		return err
 	}
@@ -1552,11 +1649,19 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		}
 		return fmt.Errorf(errOrderNotConfirmable)
 	}
+	if leaseOrder.ID != o.ID {
+		if _, err := tx.Exec("UPDATE orders SET lease_start_at=?,lease_end_at=? WHERE id=?", now, leaseEnd, leaseOrder.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE order_renewals SET confirmed_at=? WHERE order_id=?", now, leaseOrder.ID); err != nil {
+			return err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	// REQ-H-011: 买家签收后存证交付确认。买家/机房签名并入待 T-061, 当前平台见证签名。
-	s.attest("delivery", orderNo, func() (any, error) { return s.BuildDeliveryAttestPayload(orderNo) })
+	s.attest("delivery", leaseOrder.OrderNo, func() (any, error) { return s.BuildDeliveryAttestPayload(leaseOrder.OrderNo) })
 	return nil
 }
 
@@ -1791,21 +1896,17 @@ func (s *Service) ListResourceSyncs(operatorID int64, isAdmin bool, productID in
 	return s.repo.ListSnapshotsBySupplier(operatorID, page, pageSize)
 }
 
-// ===== Renewal (T-018) =====
-
-var ErrRenewalUnavailable = errors.New("续租暂未开放")
-
-// Renewal stays unavailable until parent lease extension and payment are atomic.
-func (s *Service) RenewOrder(buyerID int64, orderNo string, additionalDuration int) (*Order, error) {
-	return nil, ErrRenewalUnavailable
-}
-
 // ===== Refund (T-019) =====
 
 // RequestRefund 买家申请退款。必须校验订单归属:
 // 否则任意登录买家都能把他人正常使用中的订单打成 refunding 状态。
 func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
-	o, err := s.repo.GetOrderByNo(orderNo)
+	tx, err := s.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	o, parent, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
 	if err != nil {
 		return err
 	}
@@ -1815,19 +1916,41 @@ func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
 	if o.BuyerID != buyerID {
 		return fmt.Errorf("无权操作该订单: 订单不属于当前买家")
 	}
-	if o.Status != "active" && o.Status != "paid" && o.Status != "provisioning" {
-		return fmt.Errorf("invalid status transition")
+	if o.Status == "refunding" {
+		return nil
 	}
-	return s.repo.UpdateOrderStatus(orderNo, "refunding")
+	if renewal != nil {
+		if o.Status != "completed" || !unusedRenewal(parent, renewal) {
+			return ErrRenewalConflict
+		}
+		if err := s.cancelPendingRenewalsTx(tx, parent.ID); err != nil {
+			return err
+		}
+	} else {
+		lease, _, err := s.currentLeaseOrder(tx, o, "")
+		if err != nil {
+			return err
+		}
+		if lease.ID != o.ID {
+			return fmt.Errorf("%w，请在本次续租订单 %s 申请退款", ErrRenewalConflict, lease.OrderNo)
+		}
+		if o.Status != "active" && o.Status != "paid" && o.Status != "provisioning" {
+			return fmt.Errorf("invalid status transition")
+		}
+		if err := s.cancelPendingRenewalsTx(tx, o.ID); err != nil {
+			return err
+		}
+	}
+	if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "refunding"); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CompleteRefund 退款完成: 归还余量 + 吊销访问凭证 (C-06, REQ-A-012)。
 func (s *Service) CompleteRefund(orderNo string) error {
 	released, err := s.releaseStock(orderNo, []string{"refunding"}, "refunded")
 	if err != nil {
-		return err
-	}
-	if err := s.revokeAccessByOrderNo(orderNo); err != nil {
 		return err
 	}
 	if released {
@@ -1851,38 +1974,52 @@ var stockHoldingStatuses = []string{"pending_payment", "paid", "provisioning", "
 // 为什么必须同事务 + 条件 UPDATE: 关单定时任务、买家退款、运营改单三条路径可能同时命中
 // 同一笔订单。若先查状态再决定是否归还, 三者会各自读到「仍占用」并各归还一次, 余量凭空变多。
 func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, error) {
+	return s.releaseStockTxDeadline(orderNo, from, to, false)
+}
+
+func (s *Service) releaseStockTxDeadline(orderNo string, from []string, to string, expiredLeaseOnly bool) (bool, error) {
 	tx, err := s.db.Beginx()
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-
+	o, parent, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
+	if err != nil {
+		return false, err
+	}
+	if o == nil {
+		return false, nil
+	}
+	if expiredLeaseOnly && (o.LeaseEnd == nil || o.LeaseEnd.After(time.Now())) {
+		return false, nil
+	}
 	moved, err := s.repo.TransitionOrderStatusTx(tx, orderNo, from, to)
 	if err != nil {
 		return false, err
 	}
 	if !moved {
-		// 未发生流转: 可能已被其他路径处理, 或订单不存在/状态不允许。不归还, 直接提交空事务。
-		return false, tx.Commit()
+		return false, nil
 	}
-
-	o, err := s.repo.GetOrderForUpdateTx(tx, orderNo)
-	if err != nil {
-		return false, err
+	if renewal != nil && to == "completed" {
+		return false, ErrRenewalConflict
 	}
-	if o == nil {
-		return false, fmt.Errorf("order not found: %s", orderNo)
-	}
-
-	if o.StockReserved == nil {
-		return false, fmt.Errorf("order %s requires stock reservation reconciliation", orderNo)
-	}
-	if *o.StockReserved > 0 {
-		if err := s.repo.IncrProductStock(tx, o.ProductID, *o.StockReserved); err != nil {
+	if renewal != nil && renewal.AppliedAt != nil {
+		if to != "refunded" {
+			return false, ErrRenewalConflict
+		}
+		if err := s.refundRenewalTx(tx, parent, renewal); err != nil {
 			return false, err
 		}
 	}
-	if _, err := tx.Exec("UPDATE orders SET stock_reserved=0 WHERE order_no=?", orderNo); err != nil {
+	if err := s.returnReservedStockTx(tx, o); err != nil {
+		return false, err
+	}
+	if renewal == nil {
+		if err := s.cancelPendingRenewalsTx(tx, o.ID); err != nil {
+			return false, err
+		}
+	}
+	if err := s.repo.RevokeAccessByOrderTx(tx, o.ID); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
@@ -1927,7 +2064,7 @@ func (s *Service) CompleteExpiredLeases() (int, error) {
 	n := 0
 	var firstErr error
 	for _, no := range nos {
-		released, err := s.releaseStock(no, []string{"active"}, "completed")
+		released, err := s.releaseStockTxDeadline(no, []string{"active"}, "completed", true)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -1936,10 +2073,6 @@ func (s *Service) CompleteExpiredLeases() (int, error) {
 		}
 		if released {
 			n++
-			// 租期结束, 访问凭证同步失效 (C-06)。
-			if err := s.revokeAccessByOrderNo(no); err != nil && firstErr == nil {
-				firstErr = err
-			}
 		}
 	}
 	return n, firstErr
@@ -1968,14 +2101,19 @@ func (s *Service) ListAllProducts(status string, page, pageSize int) ([]Product,
 // AdminUpdateOrderStatus 运营改单。改为 cancelled/refunded 时同步归还余量并吊销访问凭证。
 // 归还走 releaseStock 的守卫式流转: 若订单已是终态, 不会重复归还。
 func (s *Service) AdminUpdateOrderStatus(orderNo string, status string) error {
+	renewal, err := GetRenewal(s.db, orderNo)
+	if err != nil {
+		return err
+	}
+	if renewal != nil && status != "cancelled" && status != "refunded" {
+		return ErrRenewalConflict
+	}
+
 	if status == "cancelled" || status == "refunded" {
 		// refunding 也允许直接改判为 refunded, 故来源状态需并入。
 		from := append(append([]string{}, stockHoldingStatuses...), "refunding")
 		released, err := s.releaseStock(orderNo, from, status)
 		if err != nil {
-			return err
-		}
-		if err := s.revokeAccessByOrderNo(orderNo); err != nil {
 			return err
 		}
 		if released {

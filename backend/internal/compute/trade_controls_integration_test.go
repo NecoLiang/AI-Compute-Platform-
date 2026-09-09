@@ -142,7 +142,7 @@ func TestTradeRenewalDoesNotCreateIncompleteOrders(t *testing.T) {
 	placed := tradeRequest(t, buyer, "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
 	db.MustExec("UPDATE orders SET status='active' WHERE order_no=?", no)
-	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+no+"/renew", map[string]int{"duration": 3}, 40900)
+	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+no+"/renew", map[string]int{"duration": 3}, 40001)
 	detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no, nil, 0).Data.(map[string]any)
 	if detail["actions"].(map[string]any)["can_renew"] != false {
 		t.Fatal("incomplete renewal must not be offered")

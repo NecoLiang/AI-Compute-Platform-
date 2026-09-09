@@ -194,13 +194,51 @@ components:
         page: { type: integer }
         page_size: { type: integer }
 
+    RenewalQuote:
+      type: object
+      required: [parent_order_no, mode, quantity, duration, pricing_mode, min_duration, max_duration, unit_price, total_amount, platform_fee, fee_rate, lease_end_at, renewed_until]
+      properties:
+        parent_order_no: { type: string }
+        mode: { type: string, enum: [extend, restart] }
+        quantity: { type: integer, minimum: 1 }
+        duration: { type: integer, minimum: 1 }
+        pricing_mode: { type: string, enum: [hourly, daily, weekly, monthly] }
+        min_duration: { type: integer, minimum: 1 }
+        max_duration: { type: integer, minimum: 1 }
+        unit_price: { type: integer, format: int64 }
+        total_amount: { type: integer, format: int64 }
+        platform_fee: { type: integer, format: int64 }
+        fee_rate: { type: integer, minimum: 0, maximum: 10000 }
+        lease_end_at: { type: string, format: date-time }
+        renewed_until: { type: string, format: date-time, nullable: true }
+    OrderRenewal:
+      type: object
+      nullable: true
+      properties:
+        parent_order_no: { type: string }
+        mode: { type: string, enum: [extend, restart] }
+        pricing_mode: { type: string }
+        lease_end_at: { type: string, format: date-time }
+        renewed_until: { type: string, format: date-time, nullable: true }
+        applied_at: { type: string, format: date-time, nullable: true }
+        confirmed_at: { type: string, format: date-time, nullable: true }
     BuyerOrderDetail:
       type: object
       required: [order, product, supplier, delivery, actions]
       properties:
+        current_lease:
+          type: object
+          nullable: true
+          properties:
+            order_no: { type: string }
+            duration: { type: integer, minimum: 1 }
+            pricing_mode: { type: string }
+        pending_renewal_order_no: { type: string }
+        renewal: { $ref: '#/components/schemas/OrderRenewal' }
         order:
           type: object
           properties:
+            parent_order_no: { type: string }
             order_no: { type: string, example: "ORD20260713143000123abc" }
             status: { type: string, enum: [pending_payment, paid, provisioning, active, completed, cancelled, refunding, refunded, frozen] }
             quantity: { type: integer }
@@ -218,6 +256,7 @@ components:
           type: object
           description: "当前关联商品资料；现有数据模型没有不可变的下单快照"
           properties:
+            min_duration: { type: integer, minimum: 1 }
             id: { type: integer }
             product_type: { type: string, enum: [card_rental, outright, center, colocation] }
             gpu_model: { type: string }
@@ -863,22 +902,62 @@ paths:
       responses:
         '200': { description: "成功 code=0；不可签收/重复签收 code=40900；非本人 code=40300" }
 
+  /orders/{id}/renewal-quote:
+    get:
+      tags: [算力撮合 Compute]
+      summary: 获取当前续租报价
+      description: 到期前 extend 延长当前租期；到期后 restart 需重新预留和交付，renewed_until 为 null。金额为分，原订单金额不变。
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: 原订单号 }
+        - { name: duration, in: query, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: 'code=0 返回报价；条件不满足 code=40900，参数/同意错误 code=40001；需同时检查 JSON code'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  code: { type: integer }
+                  message: { type: string }
+                  data: { $ref: '#/components/schemas/RenewalQuote' }
+
   /orders/{id}/renew:
     post:
       tags: [算力撮合 Compute]
-      summary: 续租暂未开放
-      description: 当前版本不创建续租订单、不改变库存或租期；订单 actions.can_renew 固定为 false。
+      summary: 创建关联原订单的续租订单
+      description: 同一 request_id 重试返回同一子订单。报价变化返回 40900；显式同意与子订单同事务记录。只有支付确认才应用租期，重复回调不重复生效。
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, description: 原订单号 }
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              required: [duration, request_id, expected_pricing_mode, compliance_agreed, compliance_version, expected_lease_end_at, expected_renewed_until, expected_total_amount, expected_platform_fee]
               properties:
-                duration: { type: integer }
+                duration: { type: integer, minimum: 1 }
+                request_id: { type: string, format: uuid }
+                expected_pricing_mode: { type: string, enum: [hourly, daily, weekly, monthly] }
+                compliance_agreed: { type: boolean, enum: [true] }
+                compliance_version: { type: string, example: '2026-09-06.1' }
+                expected_lease_end_at: { type: string, format: date-time }
+                expected_renewed_until: { type: string, format: date-time, nullable: true }
+                expected_total_amount: { type: integer, format: int64, minimum: 1 }
+                expected_platform_fee: { type: integer, format: int64, minimum: 0 }
       responses:
-        '200': { description: 'code=40900，续租暂未开放；JSON 解析失败时 code=40001' }
+        '200':
+          description: 'code=0 返回 order_no,total_amount,platform_fee；冲突 code=40900，未同意或旧版本 code=40001'
+
+  /orders/{id}/cancel:
+    post:
+      tags: [算力撮合 Compute]
+      summary: 买家取消自己的待支付订单
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string }, description: 订单号 }
+      responses:
+        '200': { description: 'code=0；重复取消不重复归还库存；已支付不可取消' }
 
   /orders/{id}/refund:
     post:

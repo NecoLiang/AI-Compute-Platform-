@@ -60,6 +60,12 @@ func setupSchedDB(t *testing.T) (*sqlx.DB, *Service) {
 		id BIGINT PRIMARY KEY AUTO_INCREMENT, order_no VARCHAR(64) NOT NULL UNIQUE,
 		product_id BIGINT NOT NULL, quantity INT NOT NULL, status VARCHAR(32) NOT NULL
 	)`)
+	renewalMigration, err := os.ReadFile("../../migrations/021_order_renewals.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.MustExec(string(renewalMigration))
+
 	t.Cleanup(func() {
 		db.MustExec("DROP DATABASE IF EXISTS " + schedTestDB)
 		db.Close()

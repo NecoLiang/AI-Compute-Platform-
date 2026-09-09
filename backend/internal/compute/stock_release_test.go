@@ -92,6 +92,12 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	)`)
 
+	renewalMigration, err := os.ReadFile("../../migrations/021_order_renewals.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.MustExec(string(renewalMigration))
+
 	t.Cleanup(func() {
 		db.Exec("DROP DATABASE IF EXISTS " + stockTestDB)
 		db.Close()
