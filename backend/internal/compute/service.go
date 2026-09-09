@@ -489,6 +489,12 @@ func (s *Service) GetSupplierApplications(userID int64) ([]SupplierQualification
 }
 
 func (s *Service) SubmitQualification(userID int64, qualType, certName, certNumber, certURL string, expiresAt *time.Time) (int64, error) {
+	if strings.TrimSpace(qualType) == "" || strings.TrimSpace(certName) == "" || len([]rune(qualType)) > 64 || len([]rune(certName)) > 128 || len([]rune(certNumber)) > 64 || len([]rune(certURL)) > 512 {
+		return 0, fmt.Errorf("请填写有效的资质类型和证照信息")
+	}
+	if qualType == "supplier_onboarding" {
+		return 0, fmt.Errorf("供给方入驻请使用入驻申请入口")
+	}
 	q := &SupplierQualification{
 		UserID:     userID,
 		QualType:   qualType,
@@ -1026,6 +1032,9 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	}
 	if p.Status != "active" {
 		return nil, fmt.Errorf("product not available")
+	}
+	if err := requireUnexpiredQualifications(s.db, p.SupplierID); err != nil {
+		return nil, err
 	}
 	// 节点探活联动: 供应方节点全部离线的商品拦截下单, 避免收了钱交付不出资源。
 	// unknown(未接入探活)不拦截, 存量商品不受影响。

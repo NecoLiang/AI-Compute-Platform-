@@ -247,6 +247,11 @@ func main() {
 	//   REQ-A-043 租期到期置完成并释放余量     —— 否则卡永远不回到可售池
 	stopJobs := make(chan struct{})
 	runJobs := func() {
+		if n, err := computeSvc.ProcessQualificationExpiries(); err != nil {
+			slog.Error("处理资质到期失败", "error", err)
+		} else if n > 0 {
+			slog.Info("已发送资质到期通知", "count", n)
+		}
 		if n, err := computeSvc.RevokeExpiredAccess(); err != nil {
 			slog.Error("吊销过期访问凭证失败", "error", err)
 		} else if n > 0 {

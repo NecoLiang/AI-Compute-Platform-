@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/middleware"
 	"tokenfactory/pkg/response"
@@ -296,18 +297,28 @@ func (h *Handler) GetSupplierApplications(c *gin.Context) {
 
 func (h *Handler) SubmitQualification(c *gin.Context) {
 	var req struct {
-		QualType   string `json:"qual_type"`
-		CertName   string `json:"cert_name"`
-		CertNumber string `json:"cert_number"`
-		CertURL    string `json:"cert_url"`
+		QualType   string  `json:"qual_type"`
+		CertName   string  `json:"cert_name"`
+		CertNumber string  `json:"cert_number"`
+		CertURL    string  `json:"cert_url"`
+		ExpiresAt  *string `json:"expires_at"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	id, err := h.svc.SubmitQualification(c.GetInt64("user_id"), req.QualType, req.CertName, req.CertNumber, req.CertURL, nil)
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		parsed, err := time.Parse(time.DateOnly, *req.ExpiresAt)
+		if err != nil {
+			response.Error(c, errcode.ParamInvalid, "有效期请使用 YYYY-MM-DD 格式的有效日期")
+			return
+		}
+		expiresAt = &parsed
+	}
+	id, err := h.svc.SubmitQualification(c.GetInt64("user_id"), req.QualType, req.CertName, req.CertNumber, req.CertURL, expiresAt)
 	if err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
 	response.Success(c, gin.H{"id": id})
@@ -614,7 +625,7 @@ func (h *Handler) GetQualificationDocument(c *gin.Context) {
 func (h *Handler) ApproveQualification(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err := h.svc.ApproveQualification(id, c.GetInt64("user_id"), c.ClientIP()); err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
 	response.Success(c, nil)

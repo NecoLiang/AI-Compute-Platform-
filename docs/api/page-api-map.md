@@ -95,7 +95,7 @@
 - `GET/POST /supplier-applications`
 
 ### `/console/supplier/qualifications` 资质 ✅
-- `GET/POST /supplier/qualifications`（FormData 上传证照）
+- `GET/POST /supplier/qualifications`（JSON 提交附件链接与可选 `expires_at` 日期；读取剩余天数、临期/过期状态）
 
 ### `products|centers|colocation` 发布与管理 ✅
 - `GET /supplier/products`、`GET /supplier/products/summary`、`POST /supplier/products`、`PUT /supplier/products/:id`(驳回重提)

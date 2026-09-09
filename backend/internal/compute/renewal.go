@@ -106,6 +106,9 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if product.Health == "offline" || product.PricingMode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
 		return nil, ErrRenewalConflict
 	}
+	if err := requireUnexpiredQualifications(tx, product.SupplierID); err != nil {
+		return nil, err
+	}
 	quantity, duration, err := ValidateRenewParams(&product, parent.Quantity, duration)
 	if err != nil {
 		return nil, err

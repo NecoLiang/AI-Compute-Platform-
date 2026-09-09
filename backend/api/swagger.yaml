@@ -1107,9 +1107,28 @@ paths:
     get:
       tags: [算力撮合 Compute]
       summary: 我的资质
+      description: 返回 superseded（是否已有有效新证照替代）、expires_at（可空时间戳）、expires_in_days（可空整数，数据库日历日差）及审核状态 pending/verified/rejected/expired。到期当天仍有效。
     post:
       tags: [算力撮合 Compute]
       summary: 提交资质
+      description: 新证照需重新审核。同一类型的较新有效已审核证照替代旧证照；过期冻结在售商品且不自动解冻。站内预警按资质、有效期、事件去重。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [qual_type, cert_name]
+              properties:
+                qual_type: { type: string, maxLength: 64 }
+                cert_name: { type: string, maxLength: 128 }
+                cert_number: { type: string, maxLength: 64 }
+                cert_url: { type: string, maxLength: 512 }
+                expires_at:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: YYYY-MM-DD，不能早于数据库当天；省略或 null 表示未提供到期日。
 
   /supplier/products:
     post:
