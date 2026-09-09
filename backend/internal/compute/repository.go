@@ -27,6 +27,7 @@ type SupplierQualification struct {
 	MetadataJSON   string                 `db:"metadata_json" json:"-"`
 	Application    *SupplierOnboardingReq `db:"-" json:"application,omitempty"`
 	ExpiresAt      *time.Time             `db:"expires_at" json:"expires_at"`
+	Superseded     bool                   `db:"superseded" json:"superseded"`
 	ExpiresInDays  *int                   `db:"expires_in_days" json:"expires_in_days"`
 	Status         string                 `db:"status" json:"status"`
 	RejectedReason string                 `db:"rejected_reason" json:"rejected_reason,omitempty"`
@@ -234,7 +235,7 @@ const qualificationColumns = `id, user_id, qual_type, cert_name,
 
 func (r *Repository) GetQualificationsByUser(userID int64) ([]SupplierQualification, error) {
 	var list []SupplierQualification
-	err := r.db.Select(&list, "SELECT "+qualificationColumns+" FROM supplier_qualifications WHERE user_id = ? ORDER BY created_at DESC", userID)
+	err := r.db.Select(&list, "SELECT "+qualificationColumns+", NOT ("+currentQualification+") AS superseded FROM supplier_qualifications q WHERE user_id = ? ORDER BY created_at DESC", userID)
 	hydrateApplications(list)
 	return list, err
 }
@@ -425,7 +426,7 @@ func (r *Repository) RequireTradingAccess(userID int64, role string) error {
 		return fmt.Errorf("无权进行交易，请先完成个人或企业认证")
 	}
 	if role == "supplier" {
-		if err := r.requireUnexpiredQualifications(userID); err != nil {
+		if err := requireUnexpiredQualifications(r.db, userID); err != nil {
 			return err
 		}
 	}
@@ -510,18 +511,29 @@ func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error
 }
 
 func (r *Repository) ReviewProduct(id int64, status, reason string) error {
-	result, err := r.db.Exec("UPDATE products SET status=?, rejected_reason=? WHERE id=? AND status='pending'", status, reason, id)
+	tx, err := r.db.Beginx()
 	if err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
+	defer tx.Rollback()
+	product, err := r.LockProductForUpdate(tx, id)
 	if err != nil {
 		return err
 	}
-	if n != 1 {
+	if product.Status != "pending" {
 		return fmt.Errorf("product review conflict")
 	}
-	return nil
+	// Recheck after acquiring the product lock: a sweep may have expired the
+	// certificate while approval waited. The sweep cannot miss an active row.
+	if status == "active" {
+		if err := requireUnexpiredQualifications(tx, product.SupplierID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec("UPDATE products SET status=?, rejected_reason=? WHERE id=?", status, reason, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) UpdateProductStatus(id int64, status string) error {

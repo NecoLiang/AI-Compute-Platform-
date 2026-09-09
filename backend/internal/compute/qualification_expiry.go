@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jmoiron/sqlx"
+
 	"tokenfactory/internal/notification"
 )
 
@@ -105,9 +107,9 @@ func (s *Service) processQualificationExpiry(id int64) (bool, error) {
 	return current, nil
 }
 
-func (r *Repository) requireUnexpiredQualifications(userID int64) error {
+func requireUnexpiredQualifications(db sqlx.Queryer, userID int64) error {
 	var expired bool
-	if err := r.db.Get(&expired, `SELECT EXISTS(SELECT 1 FROM supplier_qualifications q
+	if err := sqlx.Get(db, &expired, `SELECT EXISTS(SELECT 1 FROM supplier_qualifications q
         WHERE q.user_id=? AND q.status IN ('verified','expired') AND q.expires_at<CURRENT_DATE AND `+currentQualification+`)`, userID); err != nil {
 		return err
 	}

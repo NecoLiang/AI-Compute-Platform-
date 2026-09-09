@@ -1107,7 +1107,7 @@ paths:
     get:
       tags: [算力撮合 Compute]
       summary: 我的资质
-      description: 返回 expires_at（可空时间戳）、expires_in_days（可空整数，数据库日历日差）及审核状态 pending/verified/rejected/expired。到期当天仍有效。
+      description: 返回 superseded（是否已有有效新证照替代）、expires_at（可空时间戳）、expires_in_days（可空整数，数据库日历日差）及审核状态 pending/verified/rejected/expired。到期当天仍有效。
     post:
       tags: [算力撮合 Compute]
       summary: 提交资质

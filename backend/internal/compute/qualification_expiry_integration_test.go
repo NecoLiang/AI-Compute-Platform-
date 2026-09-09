@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"tokenfactory/internal/admin"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/notification"
 )
@@ -41,10 +42,10 @@ func TestQualificationSubmissionPreservesExpiry(t *testing.T) {
 func TestQualificationExpiryJob(t *testing.T) {
 	db := setupTradeDB(t)
 	seedTradeUsers(db)
-	supplier, admin := tradeRouter(db, 101), tradeRouter(db, 104)
+	supplier, adminRouter := tradeRouter(db, 101), tradeRouter(db, 104)
 	created := tradeRequest(t, supplier, "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	productID := int64(created.Data.(map[string]any)["id"].(float64))
-	tradeRequest(t, admin, "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", productID), nil, 0)
+	tradeRequest(t, adminRouter, "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", productID), nil, 0)
 	// Seed calendar boundaries; exercise the actual job and public read APIs.
 	for i, days := range []int{31, 30, 0, -1} {
 		db.MustExec("INSERT INTO supplier_qualifications (user_id,qual_type,cert_name,status,expires_at) VALUES (101,?,?, 'verified', DATE_ADD(CURRENT_DATE,INTERVAL ? DAY))", fmt.Sprintf("boundary-%d", i), fmt.Sprintf("License %d", days), days)
@@ -58,6 +59,22 @@ func TestQualificationExpiryJob(t *testing.T) {
 	list, total, _, _, err := ns.List(101, "system", 1, 100)
 	if err != nil || total != 3 {
 		t.Fatalf("notifications: total=%d err=%v", total, err)
+	}
+	audits, _, err := admin.NewService(admin.NewRepository(db)).ListAuditLogs(1, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := 0
+	for _, event := range audits {
+		if strings.HasPrefix(event.Action, "qualification_expir") {
+			events++
+			if event.TargetType != "supplier_qualification" || event.OperatorID != 0 || len(event.AfterVal) != 10 {
+				t.Fatalf("invalid expiry evidence: %+v", event)
+			}
+		}
+	}
+	if events != 3 {
+		t.Fatalf("missing expiry audit evidence: %d", events)
 	}
 	for _, n := range list {
 		if n.UserID != 101 || !strings.HasPrefix(n.Link, "/console/supplier/qualifications#qualification-") {
@@ -168,6 +185,13 @@ func TestQualificationExpiryRollbackAndReplacement(t *testing.T) {
 	tradeRequest(t, admin, "POST", reviewPath, nil, 40001)
 	db.MustExec("UPDATE supplier_qualifications SET expires_at=DATE_ADD(CURRENT_DATE,INTERVAL 30 DAY) WHERE id=?", replacementID)
 	tradeRequest(t, admin, "POST", reviewPath, nil, 0)
+	updated := tradeRequest(t, supplier, "GET", "/api/v1/supplier/qualifications", nil, 0)
+	for _, value := range updated.Data.([]any) {
+		q := value.(map[string]any)
+		if q["id"] != float64(replacementID) && q["superseded"] != true {
+			t.Fatalf("old certificate not superseded: %v", q)
+		}
+	}
 	tradeRequest(t, supplier, "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	if n, err := svc.ProcessQualificationExpiries(); err != nil || n != 1 {
 		t.Fatalf("replacement warning: %d %v", n, err)
@@ -178,5 +202,49 @@ func TestQualificationExpiryRollbackAndReplacement(t *testing.T) {
 		if p["id"] == float64(id) && p["status"] != "frozen" {
 			t.Fatalf("old product automatically unfrozen: %v", p)
 		}
+	}
+}
+
+func TestQualificationExpiryBlocksRenewalBeforeSweep(t *testing.T) {
+	db := setupTradeDB(t)
+	_, _, no, _ := activeRenewalOrder(t, db)
+	buyer := tradeRouter(db, 102)
+	quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
+	db.MustExec("UPDATE supplier_qualifications SET expires_at=DATE_SUB(CURRENT_DATE,INTERVAL 1 DAY) WHERE user_id=101")
+	tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no+"/renewal-quote?duration=2", nil, 40001)
+	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+no+"/renew", renewalInput(quote, "e77e2f1c-b18d-40ac-9545-6bd69d8bb53d"), 40001)
+}
+
+func TestQualificationExpiryRecheckedAfterProductReviewWait(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	supplier := tradeRouter(db, 101)
+	created := tradeRequest(t, supplier, "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
+	id := int64(created.Data.(map[string]any)["id"].(float64))
+	tx, err := db.Beginx()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	tx.MustExec("UPDATE products SET stock=stock WHERE id=?", id)
+	var connectionID int64
+	if err := tx.Get(&connectionID, "SELECT CONNECTION_ID()"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	svc := compute.NewService(compute.NewRepository(db), db)
+	go func() { done <- svc.ApproveProduct(id) }()
+	waitForRenewalLock(t, db, connectionID)
+	// Expiry changes while approval waits, as when the task runs across midnight.
+	db.MustExec("UPDATE supplier_qualifications SET expires_at=DATE_SUB(CURRENT_DATE,INTERVAL 1 DAY),status='expired' WHERE user_id=101")
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("stale qualification check allowed product approval")
+	}
+	products := tradeRequest(t, supplier, "GET", "/api/v1/supplier/products", nil, 0)
+	if products.Data.([]any)[0].(map[string]any)["status"] != "pending" {
+		t.Fatalf("expired supplier listed a product: %v", products.Data)
 	}
 }

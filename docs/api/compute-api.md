@@ -278,8 +278,8 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 ```
 
 - `expires_at` 可省略或为 `null`；提供时须为 `YYYY-MM-DD`，不能早于数据库当天日期。历史空值保留，不推测有效期。空字符串兼容为未提供。
-- GET 保留 `expires_at` 时间戳，新增可空整数 `expires_in_days`（数据库日历日期差）。审核状态仍为 `pending / verified / rejected / expired`；前端在 `verified` 且剩余 0–30 天时展示“即将到期”，负数展示“已过期”。到期当天仍有效。
-- 启动时及每 5 分钟扫描已审核资质。30 天内补发一次预警；过期后一次性更新为 `expired` 并冻结该供给方 `active / sold_out` 商品，不改动已有订单。提交商品、审核上架和新下单也检查过期资质，避免等待扫描时继续交易。
+- GET 保留 `expires_at` 时间戳，新增 `superseded`（已有较新有效同类型已审核证照，前端展示“已更新”）及可空整数 `expires_in_days`（数据库日历日期差）。审核状态仍为 `pending / verified / rejected / expired`；前端在 `verified` 且剩余 0–30 天时展示“即将到期”，负数展示“已过期”。到期当天仍有效。
+- 启动时及每 5 分钟扫描已审核资质。30 天内补发一次预警；过期后一次性更新为 `expired` 并冻结该供给方 `active / sold_out` 商品，不改动已有订单。提交商品、审核上架、新下单和续租报价/创建也检查过期资质，避免等待扫描时继续交易。
 - 更新通过提交同一 `qual_type` 的新证照并经审核完成；较新的有效已审核证照替代同类型旧证照。待审核、驳回或其他类型证照不能解除原类型过期限制。过期申请不能通过审核。旧商品不自动解冻；新证照审核通过后可重新发布商品。
 - 通知发给资质 `user_id`，类型为 `system`，链接 `/console/supplier/qualifications#qualification-{id}`，沿用通知查询/已读/删除接口。真实短信和邮件另见后端 Issue #16。
 - 状态、商品冻结、通知和 `audit_logs` 在同一事务提交；锁定资质后按 `target_type=supplier_qualification`、资质 ID、事件 `qualification_expiring / qualification_expired` 与有效期去重。`after_value` 保存有效期日期，系统操作者为空。修改后的有效期重新判断，删除通知不重发，失败回滚并在下一轮重试。
