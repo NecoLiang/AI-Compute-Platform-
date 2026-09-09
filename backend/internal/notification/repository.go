@@ -34,7 +34,12 @@ func NewRepository(db *sqlx.DB) *Repository {
 }
 
 func (r *Repository) Create(n *Notification) (int64, error) {
-	res, err := r.db.Exec(
+	return Create(r.db, n)
+}
+
+// Create accepts a database or transaction so durable business events can commit atomically.
+func Create(db sqlx.Ext, n *Notification) (int64, error) {
+	res, err := db.Exec(
 		"INSERT INTO notifications (user_id, type, title, content, link) VALUES (?,?,?,?,?)",
 		n.UserID, n.Type, n.Title, n.Content, n.Link,
 	)
