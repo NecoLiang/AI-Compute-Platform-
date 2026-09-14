@@ -744,8 +744,12 @@ func (h *Handler) AdminUpdateOrderStatus(c *gin.Context) {
 		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
-	if err := h.svc.AdminUpdateOrderStatus(order.OrderNo, req.Status); err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+	if order == nil {
+		response.Error(c, errcode.NotFound, "order not found")
+		return
+	}
+	if err := h.svc.AdminUpdateOrderStatus(c.GetInt64("user_id"), order.OrderNo, req.Status, c.ClientIP()); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
 	response.Success(c, nil)
