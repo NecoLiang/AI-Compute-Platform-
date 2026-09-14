@@ -1601,6 +1601,23 @@ paths:
       security: []
       description: 使用 X-Node-Key 认证；node_id、available_cards 必填，gpu_util_pct、vram_util_pct 可选。
 
+  /market/agent-search:
+    post:
+      tags: [算力市场 Compute]
+      summary: 智能选型
+      description: 需登录；query最多500个Unicode codepoint。模型解析条件，平台匹配商品。卡/台按同一商品的均一规格換算，预算遵守最低采购条件；模型未配置/失败为code50000，限流42900，无规则降级。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: {type: string, maxLength: 500}
+      responses:
+        '200': {description: 检查业务code；成功data包含relevant、analysis_steps、compute_estimate、requirement、matches、note。}
+
   # ==================== 健康检查 ====================
   /health:
     get:

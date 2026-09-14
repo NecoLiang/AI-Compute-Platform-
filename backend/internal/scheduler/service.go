@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"sort"
 	"time"
+
+	"tokenfactory/internal/compute"
 )
 
 const (
@@ -254,16 +256,11 @@ func (s *Service) Advise(orderNo string, requesterSupplierID int64) (*ScheduleAd
 	if needCards <= 0 {
 		return nil, fmt.Errorf("订单数量无效, 无法生成调度建议")
 	}
-	switch o.ProductType {
-	case "card_rental":
-	case "outright", "center":
-		if o.CardCount <= 0 || o.MachineCount <= 0 || o.CardCount%o.MachineCount != 0 {
-			return nil, fmt.Errorf("商品规格无法确定每台卡数, 请供应方核对总卡数与台数后再查询调度建议")
-		}
-		needCards *= o.CardCount / o.MachineCount
-	default:
-		return nil, fmt.Errorf("该商品不按 GPU 容量交付, 无法生成卡数调度建议")
+	cardsPerUnit, err := compute.CardsPerUnit(o.ProductType, o.CardCount, o.MachineCount)
+	if err != nil {
+		return nil, fmt.Errorf("%w, 无法生成调度建议", err)
 	}
+	needCards *= cardsPerUnit
 
 	nodes, err := s.repo.ListNodesByProduct(o.ProductID)
 	if err != nil {
