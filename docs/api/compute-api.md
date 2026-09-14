@@ -2,6 +2,8 @@
 
 **Base**: `http://localhost:8080/api/v1` | **Auth**: 标注 ✅ 的需 `Bearer <token>`
 
+**供给方名称口径（2026-09-15）**：公开市场接口（`GET /products`、`GET /products/:id`）与买家订单接口返回**脱敏名** `supplier_name`（如「北京***有限公司」，自营为「平台自营」，无企业认证为空串）；管理端 `/admin/products`、`/admin/orders`、`/admin/nodes` 返回**全名**。全名仅供给方本人与运营可见。
+
 ---
 
 ## GET /products · 商品列表（公开）
