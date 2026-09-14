@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -29,7 +30,7 @@ func (h *Handler) Verify(c *gin.Context) {
 	}
 	result, err := h.svc.Verify(c.Request.Context(), targetType, targetID)
 	if err != nil {
-		response.Success(c, &VerifyResult{Verified: false, Note: "查询失败"})
+		response.Error(c, errcode.InternalError, "存证查询失败")
 		return
 	}
 	response.Success(c, result)
@@ -37,8 +38,8 @@ func (h *Handler) Verify(c *gin.Context) {
 
 func (h *Handler) GetAttestation(c *gin.Context) {
 	att, err := h.svc.GetAttestation(c.Param("target_type"), c.Param("target_id"))
-	if err != nil || att == nil {
-		response.Success(c, nil)
+	if err != nil {
+		response.Error(c, errcode.InternalError, "存证查询失败")
 		return
 	}
 	response.Success(c, att)
@@ -47,7 +48,7 @@ func (h *Handler) GetAttestation(c *gin.Context) {
 func (h *Handler) RequeueFailed(c *gin.Context) {
 	n, err := h.svc.RequeueFailed()
 	if err != nil {
-		response.Success(c, gin.H{"requeued": 0, "error": "补推失败"})
+		response.Error(c, errcode.InternalError, "补推失败")
 		return
 	}
 	response.Success(c, gin.H{"requeued": n})
