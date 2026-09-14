@@ -14,8 +14,8 @@ package scheduler
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -250,11 +250,26 @@ func (s *Service) Advise(orderNo string, requesterSupplierID int64) (*ScheduleAd
 	if requesterSupplierID > 0 && owner != requesterSupplierID {
 		return nil, fmt.Errorf("订单不属于当前供应方")
 	}
+	needCards := o.Quantity
+	if needCards <= 0 {
+		return nil, fmt.Errorf("订单数量无效, 无法生成调度建议")
+	}
+	switch o.ProductType {
+	case "card_rental":
+	case "outright", "center":
+		if o.CardCount <= 0 || o.MachineCount <= 0 || o.CardCount%o.MachineCount != 0 {
+			return nil, fmt.Errorf("商品规格无法确定每台卡数, 请供应方核对总卡数与台数后再查询调度建议")
+		}
+		needCards *= o.CardCount / o.MachineCount
+	default:
+		return nil, fmt.Errorf("该商品不按 GPU 容量交付, 无法生成卡数调度建议")
+	}
+
 	nodes, err := s.repo.ListNodesByProduct(o.ProductID)
 	if err != nil {
 		return nil, err
 	}
-	advice := &ScheduleAdvice{OrderNo: o.OrderNo, ProductID: o.ProductID, NeedCards: o.Quantity, GeneratedAt: time.Now()}
+	advice := &ScheduleAdvice{OrderNo: o.OrderNo, ProductID: o.ProductID, NeedCards: needCards, GeneratedAt: time.Now()}
 	if len(nodes) == 0 {
 		advice.Summary = "该商品未注册算力节点, 无法给出调度建议; 请供应方先注册节点并接入心跳"
 		return advice, nil
@@ -264,10 +279,10 @@ func (s *Service) Advise(orderNo string, requesterSupplierID int64) (*ScheduleAd
 		if b, err := s.repo.HeartbeatCount24h(n.ID); err == nil {
 			beats = b
 		}
-		advice.Nodes = append(advice.Nodes, scoreNode(n, o.Quantity, beats))
+		advice.Nodes = append(advice.Nodes, scoreNode(n, needCards, beats))
 	}
 	sort.SliceStable(advice.Nodes, func(i, j int) bool { return advice.Nodes[i].Score > advice.Nodes[j].Score })
-	advice.Summary = summarize(advice.Nodes, o.Quantity)
+	advice.Summary = summarize(advice.Nodes, needCards)
 	return advice, nil
 }
 

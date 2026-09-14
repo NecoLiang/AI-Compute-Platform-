@@ -37,6 +37,8 @@ func setupSchedDB(t *testing.T) (*sqlx.DB, *Service) {
 	db.MustExec(`CREATE TABLE products (
 		id BIGINT PRIMARY KEY AUTO_INCREMENT,
 		supplier_id BIGINT NOT NULL,
+        product_type VARCHAR(32) NOT NULL DEFAULT 'card_rental',
+        card_count INT NULL DEFAULT 0, machine_count INT NULL,
 		health ENUM('unknown','healthy','degraded','offline') NOT NULL DEFAULT 'unknown'
 	)`)
 	db.MustExec(`CREATE TABLE supplier_nodes (

@@ -190,15 +190,18 @@ func (r *Repository) ProductSupplierID(productID int64) (int64, error) {
 
 // OrderForAdvice 调度建议所需的订单摘要。
 type OrderForAdvice struct {
-	OrderNo   string `db:"order_no"`
-	ProductID int64  `db:"product_id"`
-	Quantity  int    `db:"quantity"`
-	Status    string `db:"status"`
+	ProductType  string `db:"product_type"`
+	CardCount    int    `db:"card_count"`
+	MachineCount int    `db:"machine_count"`
+	OrderNo      string `db:"order_no"`
+	ProductID    int64  `db:"product_id"`
+	Quantity     int    `db:"quantity"`
+	Status       string `db:"status"`
 }
 
 func (r *Repository) GetOrderForAdvice(orderNo string) (*OrderForAdvice, error) {
 	var o OrderForAdvice
-	err := r.db.Get(&o, "SELECT order_no, product_id, quantity, status FROM orders WHERE order_no=?", orderNo)
+	err := r.db.Get(&o, `SELECT o.order_no, o.product_id, o.quantity, o.status, p.product_type, COALESCE(p.card_count,0) AS card_count, COALESCE(p.machine_count,0) AS machine_count FROM orders o JOIN products p ON p.id=o.product_id WHERE o.order_no=?`, orderNo)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
