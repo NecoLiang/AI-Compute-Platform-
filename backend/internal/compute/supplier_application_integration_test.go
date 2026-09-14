@@ -57,6 +57,19 @@ func TestSupplierApplicationLifecycleIsVisibleAndAuditable(t *testing.T) {
 	if !userHasRole(users.Data, 101, "supplier") {
 		t.Fatal("审核通过后 admin 用户列表未显示 supplier 角色")
 	}
+	// 入驻审核通过 = 自动完成企业认证: enterprises 由申请材料落库并置 verified,
+	// 供给方不需要再走实名页的企业认证入口。
+	var ent struct {
+		Name   string `db:"name"`
+		USCC   string `db:"uscc"`
+		Status string `db:"status"`
+	}
+	if err := db.Get(&ent, "SELECT name, uscc, status FROM enterprises WHERE user_id=101"); err != nil {
+		t.Fatalf("审核通过后应存在企业认证记录: %v", err)
+	}
+	if ent.Status != "verified" || ent.Name != "测试企业" || ent.USCC != "91310115MA1K4X2A7Q" {
+		t.Fatalf("企业认证应来自入驻材料且为 verified: %+v", ent)
+	}
 	audits := callJSON(t, router, http.MethodGet, "/api/v1/admin/audit-logs?page=1&page_size=20", nil)
 	if !hasAudit(audits.Data, "approve_qualification", "supplier_qualification", qualificationID) {
 		t.Fatal("审核通过后审计日志不可读")
@@ -211,7 +224,7 @@ func setupSupplierApplicationTestDB(t *testing.T) *sqlx.DB {
 		`CREATE TABLE users (id BIGINT PRIMARY KEY, phone VARCHAR(20) NOT NULL, email VARCHAR(128), password_hash VARCHAR(256) NOT NULL, status ENUM('active','frozen') DEFAULT 'active', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`,
 		`CREATE TABLE user_roles (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL, role ENUM('buyer','supplier','vendor','funder','operator','admin') NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY user_role (user_id, role))`,
 		`CREATE TABLE user_kyc (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL UNIQUE, status ENUM('pending','verified','rejected') DEFAULT 'pending')`,
-		`CREATE TABLE enterprises (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, uscc VARCHAR(32) NOT NULL, status ENUM('pending','verified','rejected') DEFAULT 'pending')`,
+		`CREATE TABLE enterprises (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL UNIQUE, name VARCHAR(128) NOT NULL, uscc VARCHAR(32) NOT NULL, legal_person VARCHAR(64), rejected_reason VARCHAR(256), status ENUM('pending','verified','rejected') DEFAULT 'pending')`,
 		`CREATE TABLE supplier_qualifications (id BIGINT PRIMARY KEY AUTO_INCREMENT, user_id BIGINT NOT NULL, qual_type VARCHAR(64) NOT NULL, cert_name VARCHAR(128) NOT NULL, cert_number VARCHAR(64), cert_url VARCHAR(512), metadata_json TEXT, license_file_name VARCHAR(255), license_content_type VARCHAR(128), license_blob MEDIUMBLOB, expires_at DATE, status ENUM('pending','verified','rejected','expired') DEFAULT 'pending', rejected_reason VARCHAR(256), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`,
 		`CREATE TABLE audit_logs (id BIGINT PRIMARY KEY AUTO_INCREMENT, operator_id BIGINT, action VARCHAR(64) NOT NULL, target_type VARCHAR(32), target_id BIGINT, before_value TEXT, after_value TEXT, ip VARCHAR(45), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`,
 	} {

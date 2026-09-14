@@ -371,6 +371,24 @@ func (r *Repository) ReviewQualification(id int64, status, reason string, operat
 		if _, err := tx.Exec("INSERT IGNORE INTO user_roles (user_id, role) VALUES (?, 'supplier')", q.UserID); err != nil {
 			return err
 		}
+		// 入驻材料(公司名/统一社会信用代码/法人/执照)即企业认证材料, 管理员审核通过
+		// 即视为完成企业认证 —— 同事务落 enterprises, 供给方无需再走实名页重复认证。
+		// 材料不全的历史申请跳过, 不造脏数据(此时准入仍会要求补企业认证)。
+		var app SupplierOnboardingReq
+		if q.MetadataJSON != "" {
+			if err := json.Unmarshal([]byte(q.MetadataJSON), &app); err == nil {
+				name, uscc := strings.TrimSpace(app.CompanyName), strings.TrimSpace(app.CreditCode)
+				if name != "" && uscc != "" {
+					if _, err := tx.Exec(`INSERT INTO enterprises (user_id, name, uscc, legal_person, status)
+						VALUES (?,?,?,?,'verified')
+						ON DUPLICATE KEY UPDATE name=VALUES(name), uscc=VALUES(uscc),
+							legal_person=VALUES(legal_person), status='verified', rejected_reason=NULL`,
+						q.UserID, name, uscc, strings.TrimSpace(app.Representative)); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	}
 	action := "approve_qualification"
 	after := status
