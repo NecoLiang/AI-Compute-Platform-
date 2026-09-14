@@ -171,9 +171,16 @@ func (h *Handler) GetProduct(c *gin.Context) {
 		response.Error(c, errcode.NotFound, "商品不存在")
 		return
 	}
+	// 公开详情附带脱敏供给方名称: 买家可感知主体地域与资质, 不暴露全名(信息隔离)。
+	supplierName, err := h.svc.SupplierDisplayName(p.SupplierID, p.SelfOperated)
+	if err != nil {
+		supplierName = ""
+	}
+	p.SupplierName = supplierName
 	response.Success(c, gin.H{
-		"product": productToJSON(p),
-		"credit":  credit,
+		"product":       productToJSON(p),
+		"credit":        credit,
+		"supplier_name": supplierName,
 	})
 }
 

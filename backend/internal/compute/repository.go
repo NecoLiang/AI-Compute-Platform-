@@ -66,6 +66,9 @@ type Product struct {
 	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
 	Health           string    `db:"health" json:"health"`
 	SelfOperated     bool      `db:"self_operated" json:"self_operated"`
+	// SupplierName 供给方展示名。公开市场查询填充(service 层脱敏后输出),
+	// 供给方自查/内部查询不选取该列(omitempty 隐藏)。
+	SupplierName string `db:"supplier_name" json:"supplier_name,omitempty"`
 	ComplianceAgreed bool      `db:"compliance_agreed" json:"compliance_agreed"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
@@ -720,7 +723,9 @@ func (r *Repository) ListProducts(f ProductFilter) ([]Product, int64, error) {
 	}
 	offset := (f.Page - 1) * f.PageSize
 
-	query := fmt.Sprintf("SELECT %s FROM products %s %s LIMIT ? OFFSET ?", productColumns, where, f.orderBy())
+	query := fmt.Sprintf(`SELECT %s, CASE WHEN COALESCE(self_operated,0)=1 THEN '平台自营'
+		ELSE COALESCE((SELECT e.name FROM enterprises e WHERE e.user_id=products.supplier_id),'') END AS supplier_name
+		FROM products %s %s LIMIT ? OFFSET ?`, productColumns, where, f.orderBy())
 	args = append(args, f.PageSize, offset)
 	var list []Product
 	err := r.db.Select(&list, query, args...)
@@ -1137,7 +1142,24 @@ func (r *Repository) FindCreditScore(supplierID int64) (*CreditScore, error) {
 }
 
 // All orders (admin)
-func (r *Repository) ListAllOrders(status string, page, pageSize int) ([]Order, int64, error) {
+// AdminOrder 运营订单列表行: 订单 + 供给方公司名(全名, 仅 admin 组可见)。
+type AdminOrder struct {
+	Order
+	SupplierName string `db:"supplier_name" json:"supplier_name"`
+}
+
+// AdminProduct 运营商品列表行: 商品 + 供给方公司名(全名, 仅 admin 组可见)。
+type AdminProduct struct {
+	Product
+	SupplierName string `db:"supplier_name" json:"supplier_name"`
+}
+
+// supplierNameByProductExpr 以子查询取供给方公司名, 免去给整段列清单加表前缀。
+const supplierNameByProductExpr = `(SELECT CASE WHEN COALESCE(p2.self_operated,0)=1 THEN '平台自营'
+	ELSE COALESCE(e2.name,'') END FROM products p2 LEFT JOIN enterprises e2 ON e2.user_id=p2.supplier_id
+	WHERE p2.id=orders.product_id) AS supplier_name`
+
+func (r *Repository) ListAllOrders(status string, page, pageSize int) ([]AdminOrder, int64, error) {
 	where := ""
 	args := []interface{}{}
 	if status != "" {
@@ -1152,15 +1174,15 @@ func (r *Repository) ListAllOrders(status string, page, pageSize int) ([]Order, 
 	if pageSize <= 0 {
 		pageSize = 20
 	}
-	query := fmt.Sprintf("SELECT %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?", orderColumns, where)
+	query := fmt.Sprintf("SELECT %s, %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?", orderColumns, supplierNameByProductExpr, where)
 	args = append(args, pageSize, (page-1)*pageSize)
-	var list []Order
+	var list []AdminOrder
 	err := r.db.Select(&list, query, args...)
 	return list, total, err
 }
 
 // Admin products
-func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Product, int64, error) {
+func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]AdminProduct, int64, error) {
 	where := ""
 	args := []interface{}{}
 	if status != "" {
@@ -1175,11 +1197,23 @@ func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Produ
 	if pageSize <= 0 {
 		pageSize = 20
 	}
-	query := fmt.Sprintf("SELECT %s FROM products %s ORDER BY created_at DESC LIMIT ? OFFSET ?", productColumns, where)
+	query := fmt.Sprintf(`SELECT %s, CASE WHEN COALESCE(self_operated,0)=1 THEN '平台自营'
+		ELSE COALESCE((SELECT e.name FROM enterprises e WHERE e.user_id=products.supplier_id),'') END AS supplier_name
+		FROM products %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, productColumns, where)
 	args = append(args, pageSize, (page-1)*pageSize)
-	var list []Product
+	var list []AdminProduct
 	err := r.db.Select(&list, query, args...)
 	return list, total, err
+}
+
+// SupplierCompanyName 供给方公司名(自营返回"平台自营", 无企业认证返回空串)。
+func (r *Repository) SupplierCompanyName(supplierID int64, selfOperated bool) (string, error) {
+	if selfOperated {
+		return "平台自营", nil
+	}
+	var name string
+	err := r.db.Get(&name, "SELECT COALESCE((SELECT name FROM enterprises WHERE user_id=?),'')", supplierID)
+	return name, err
 }
 
 // ErrToCode 把 service 层错误映射成业务错误码。

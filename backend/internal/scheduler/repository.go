@@ -21,6 +21,8 @@ type Node struct {
 	GPUUtilPct      *int       `db:"gpu_util_pct" json:"gpu_util_pct"`
 	VRAMUtilPct     *int       `db:"vram_util_pct" json:"vram_util_pct"`
 	LastHeartbeatAt *time.Time `db:"last_heartbeat_at" json:"last_heartbeat_at"`
+	// SupplierName 供给方公司名, 仅 ListAllNodes(运营视角)填充; 供给方自查列表不带。
+	SupplierName string `db:"supplier_name" json:"supplier_name,omitempty"`
 	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
 }
@@ -78,7 +80,9 @@ func (r *Repository) ListAllNodes(status string, page, pageSize int) ([]Node, in
 	}
 	var list []Node
 	args = append(args, pageSize, (page-1)*pageSize)
-	err := r.db.Select(&list, "SELECT "+nodeColumns+" FROM supplier_nodes "+where+" ORDER BY id DESC LIMIT ? OFFSET ?", args...)
+	err := r.db.Select(&list, "SELECT "+nodeColumns+`,
+		COALESCE((SELECT e.name FROM enterprises e WHERE e.user_id=supplier_nodes.supplier_id),'') AS supplier_name
+		FROM supplier_nodes `+where+" ORDER BY id DESC LIMIT ? OFFSET ?", args...)
 	return list, total, err
 }
 

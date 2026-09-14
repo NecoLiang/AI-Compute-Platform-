@@ -292,6 +292,15 @@ func (s *Service) SetCredentialKey(hexKey string) error {
 	return nil
 }
 
+// SupplierDisplayName 买家/公开视角的供给方展示名(脱敏)。
+func (s *Service) SupplierDisplayName(supplierID int64, selfOperated bool) (string, error) {
+	name, err := s.repo.SupplierCompanyName(supplierID, selfOperated)
+	if err != nil {
+		return "", err
+	}
+	return MaskCompanyName(name), nil
+}
+
 // ===== 区块链存证埋点 (T-059, docs/14) =====
 
 // SetAttester 装配存证挂钩(供 main.go 调用)。
@@ -1210,7 +1219,12 @@ func (s *Service) AttestOrderFreeze(orderNo string) {
 }
 
 func (s *Service) ListBuyerOrders(f OrderListFilter) ([]BuyerOrder, int64, error) {
-	return s.repo.ListBuyerOrders(f)
+	list, total, err := s.repo.ListBuyerOrders(f)
+	// 信息隔离: 买家只看脱敏后的供给方名称(北京***有限公司), 全名仅供给方本人与运营可见。
+	for i := range list {
+		list[i].SupplierName = MaskCompanyName(list[i].SupplierName)
+	}
+	return list, total, err
 }
 
 func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrderDetail, error) {
@@ -1252,7 +1266,8 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			SelfOperated: product.SelfOperated,
 		},
 		Supplier: BuyerOrderDetailSupplier{
-			Name: buyerOrder.SupplierName, SelfOperated: product.SelfOperated,
+			// 信息隔离: 买家视角一律脱敏。
+			Name: MaskCompanyName(buyerOrder.SupplierName), SelfOperated: product.SelfOperated,
 		},
 		Actions: buyerOrderActions(&order, product, delivery),
 	}
@@ -2099,11 +2114,11 @@ func (s *Service) GetCreditScore(supplierID int64) (*CreditScore, error) {
 
 // ===== Admin =====
 
-func (s *Service) ListAllOrders(status string, page, pageSize int) ([]Order, int64, error) {
+func (s *Service) ListAllOrders(status string, page, pageSize int) ([]AdminOrder, int64, error) {
 	return s.repo.ListAllOrders(status, page, pageSize)
 }
 
-func (s *Service) ListAllProducts(status string, page, pageSize int) ([]Product, int64, error) {
+func (s *Service) ListAllProducts(status string, page, pageSize int) ([]AdminProduct, int64, error) {
 	return s.repo.ListAllProducts(status, page, pageSize)
 }
 
