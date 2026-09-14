@@ -19,9 +19,9 @@ func (f fakeLister) ListProducts(_ compute.ProductFilter) ([]compute.Product, in
 
 func sampleProducts() []compute.Product {
 	return []compute.Product{
-		{ID: 1, GpuModel: "A100-80G", Stock: 16, UnitPrice: 1200000, Region: "华北-廊坊", PricingMode: "monthly"},
-		{ID: 2, GpuModel: "RTX 4090", Stock: 64, UnitPrice: 180000, Region: "华东-上海", PricingMode: "monthly"},
-		{ID: 3, GpuModel: "H100", Stock: 2, UnitPrice: 3800000, Region: "华北-廊坊", PricingMode: "monthly"},
+		{ID: 1, ProductType: compute.ProductTypeCardRental, GpuModel: "A100-80G", Stock: 16, UnitPrice: 1200000, Region: "华北-廊坊", PricingMode: "monthly"},
+		{ID: 2, ProductType: compute.ProductTypeCardRental, GpuModel: "RTX 4090", Stock: 64, UnitPrice: 180000, Region: "华东-上海", PricingMode: "monthly"},
+		{ID: 3, ProductType: compute.ProductTypeCardRental, GpuModel: "H100", Stock: 2, UnitPrice: 3800000, Region: "华北-廊坊", PricingMode: "monthly"},
 	}
 }
 
