@@ -354,6 +354,11 @@ func seedTradeUsers(db *sqlx.DB) {
 	db.MustExec(`INSERT INTO user_roles (user_id,role) VALUES (101,'supplier'),(101,'buyer'),(102,'buyer'),(103,'buyer'),(104,'admin')`)
 	db.MustExec(`INSERT INTO enterprises (user_id,name,uscc,status) VALUES (101,'Test supplier','TEST101','verified'),(102,'Test buyer','TEST102','verified')`)
 	db.MustExec(`INSERT INTO supplier_qualifications (user_id,qual_type,cert_name,status) VALUES (101,'idc','Test license','verified')`)
+	// 105: 供给方角色 + 个人实名 + 资质, 但无企业认证 —— 供给方准入要求企业主体, 应被拒。
+	db.MustExec(`INSERT INTO users (id,phone,password_hash) VALUES (105,'18800001105','')`)
+	db.MustExec(`INSERT INTO user_roles (user_id,role) VALUES (105,'supplier'),(105,'buyer')`)
+	db.MustExec(`INSERT INTO user_kyc (user_id,real_name,id_card,status) VALUES (105,'个人供给','110101199001010011','verified')`)
+	db.MustExec(`INSERT INTO supplier_qualifications (user_id,qual_type,cert_name,status) VALUES (105,'idc','Personal license','verified')`)
 }
 
 func tradeProductInput() map[string]any {
@@ -365,6 +370,8 @@ func tradeProductInput() map[string]any {
 func TestTradeAdmissionRejectsWrongRoleUnverifiedAndMissingConsent(t *testing.T) {
 	db := setupTradeDB(t)
 	seedTradeUsers(db)
+	// 供给方必须企业认证: 仅个人实名(即使有资质)不得上架商品。
+	tradeRequest(t, tradeRouter(db, 105), "POST", "/api/v1/supplier/products", tradeProductInput(), 40300)
 	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
 	id := int64(created.Data.(map[string]any)["id"].(float64))
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)

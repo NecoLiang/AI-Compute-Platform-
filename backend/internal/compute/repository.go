@@ -407,23 +407,29 @@ func hydrateApplication(q *SupplierQualification) {
 // Products
 func (r *Repository) RequireTradingAccess(userID int64, role string) error {
 	var access struct {
-		Role      bool `db:"has_role"`
-		Verified  bool `db:"verified"`
-		Qualified bool `db:"qualified"`
+		Role       bool `db:"has_role"`
+		Verified   bool `db:"verified"`
+		Enterprise bool `db:"enterprise_verified"`
+		Qualified  bool `db:"qualified"`
 	}
 	err := r.db.Get(&access, `SELECT
 		EXISTS(SELECT 1 FROM users u JOIN user_roles r ON r.user_id=u.id
 			WHERE u.id=? AND u.status='active' AND r.role=?) AS has_role,
 		(EXISTS(SELECT 1 FROM user_kyc WHERE user_id=? AND status='verified') OR
 		 EXISTS(SELECT 1 FROM enterprises WHERE user_id=? AND status='verified')) AS verified,
+		EXISTS(SELECT 1 FROM enterprises WHERE user_id=? AND status='verified') AS enterprise_verified,
 		EXISTS(SELECT 1 FROM supplier_qualifications WHERE user_id=? AND status='verified'
 			AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)) AS qualified`,
-		userID, role, userID, userID, userID)
+		userID, role, userID, userID, userID, userID)
 	if err != nil {
 		return err
 	}
 	if !access.Role {
 		return fmt.Errorf("无权进行此操作，请使用有效的%s账号", map[string]string{"buyer": "买家", "supplier": "供给方"}[role])
+	}
+	// 供给方必须以企业主体经营: 个人实名不能替代企业认证(上架/交付的责任主体是企业)。
+	if role == "supplier" && !access.Enterprise {
+		return fmt.Errorf("无权进行此操作，供给方必须完成企业认证后方可上架与履约（个人实名不能替代）")
 	}
 	if !access.Verified {
 		return fmt.Errorf("无权进行交易，请先完成个人或企业认证")
