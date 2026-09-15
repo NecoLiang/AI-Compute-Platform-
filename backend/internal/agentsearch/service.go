@@ -322,6 +322,7 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 		}
 
 		if score >= minMatchScore {
+			p.SupplierName = compute.MaskCompanyName(p.SupplierName)
 			matches = append(matches, Match{Product: p, Score: score, Reasons: reasons})
 		}
 	}
