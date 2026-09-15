@@ -62,3 +62,14 @@ curl -X POST http://localhost:8080/api/v1/node/heartbeat \
 - 商品卡片/详情页展示 `health` 徽章（healthy 绿 / degraded 黄 / offline 灰+禁止下单 / unknown 不展示）；
 - 供应方工作台节点列表：状态灯 + 最近心跳时间 + 可用/总卡数；
 - 交付页嵌入 schedule-advice：推荐节点高亮，`reasons` 直接展示。
+
+
+## 订单计量与前端入口（2026-09-14）
+
+- `card_rental` 的订单数量就是所需卡数。`outright`/`center` 按台交易，所需卡数 = 订单台数 ×（商品总卡数 / 商品总台数）。按同一商品的均一配置换算；缺少正数规格或不能整除时返回 `40001`，不猜测每台卡数，不推荐可能不足容量的节点。`colocation` 不提供 GPU 卡数建议。
+- `/console/supplier/nodes`：当前供应方节点列表、注册、删除。注册响应的 `node` 为刚创建的对象，客户端只使用返回的 id；状态、心跳与时间从列表重新读取。GET 列表可能返回 `data:null`，表示无节点。列表不会提供 node_key 或 node_key_hash。
+- 注册密钥仅在当前成功弹窗中暂存，默认遮挡，可主动显示/复制；关闭、离开或切换账户后不再展示，不进入 Query/Mutation data 或浏览器持久化存储。注册 BFF 响应为 `Cache-Control:no-store`。请求期间阻止重复注册；请求失败保留表单，先核对列表再重试。
+- 供应方订单详情与回填交付凭证面板展示按订单查询的建议；`/admin/nodes` 为 operator/admin 的节点状态筛选、分页和订单建议查询入口。服务端继续执行角色与商品归属校验。
+- `GET /admin/nodes` 返回 `data:{list,total,page,page_size}`；`list:null` 是空页。`ScheduleAdvice.nodes:null` 表示没有节点。非零业务码/HTTP 失败不能显示为空记录或推荐成功。
+- 状态和心跳时间读取后端；页面每 30 秒刷新节点列表。建议在打开交付面板或显式刷新时读取，展示生成时间。推荐不分配资源、不启动实例，不改变交付状态。
+- 节点侧按现有 `POST /node/heartbeat` 与 `X-Node-Key` 契约接入；UI 不代替节点发送心跳。删除会使节点密钥失效并重新计算商品健康度。操作测试只针对隔离数据库，生产节点、真实资源编排和生产发布仍需分别验收。

@@ -72,11 +72,7 @@ func (c *LLMClient) ChatJSON(ctx context.Context, system, user string) (string, 
 		return "", err
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		msg := string(raw)
-		if len(msg) > 300 {
-			msg = msg[:300]
-		}
-		return "", fmt.Errorf("模型网关返回 %d: %s", res.StatusCode, msg)
+		return "", fmt.Errorf("模型网关返回 %d", res.StatusCode)
 	}
 	var parsed struct {
 		Choices []struct {
