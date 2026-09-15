@@ -1554,6 +1554,7 @@ paths:
     get:
       tags: [区块链存证 Blockchain]
       summary: 链上存证验证
+      description: 原始业务数据重算和链上比对均通过才 verified=true。无 source 时为 false。数据库错误返回 HTTP 200、code 50000。
       security: []
       parameters:
         - { name: type, in: query, required: true, schema: { type: string }, example: "order" }
@@ -1565,9 +1566,19 @@ paths:
     get:
       tags: [区块链存证 Blockchain]
       summary: 查询存证记录
+      description: 无记录返回 code 0 且 data 为 null 或省略；数据库错误返回 code 50000，不作空记录处理。
+      security: []
       parameters:
         - { name: target_type, in: path, required: true, schema: { type: string } }
         - { name: target_id, in: path, required: true, schema: { type: string } }
+
+  /admin/blockchain/requeue-failed:
+    post:
+      tags: [区块链存证 Blockchain]
+      summary: 重新排队全部失败存证
+      description: 仅 operator/admin。返回 requeued 数量，零条合法；数据库错误为 HTTP 200、code 50000。重新排队不代表上链成功。
+      responses:
+        '200': { description: "检查业务 code；成功时 data.requeued 为重新排队数量" }
 
   # ==================== 健康检查 ====================
   /health:
