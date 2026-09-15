@@ -106,6 +106,9 @@ func TestAdminOrderCapabilitiesAndTerminalStates(t *testing.T) {
 	db.MustExec("UPDATE orders SET status='pending_payment', stock_reserved=NULL WHERE order_no=?", no)
 	tradeRequest(t, operator, "PATCH", "/api/v1/admin/orders/"+no+"/status", map[string]string{"status": "cancelled"}, 40001)
 	list := tradeRequest(t, operator, "GET", "/api/v1/admin/orders", nil, 0).Data.(map[string]any)["list"].([]any)
+	if list[0].(map[string]any)["supplier_name"] != "Test supplier" {
+		t.Fatal("admin order list must retain supplier names alongside allowed actions")
+	}
 	actions := list[0].(map[string]any)["allowed_actions"].([]any)
 	if len(actions) != 1 || actions[0] != "frozen" {
 		t.Fatalf("unknown historical stock must not allow cancellation: %v", actions)
