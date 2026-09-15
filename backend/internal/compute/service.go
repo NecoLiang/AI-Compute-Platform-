@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -1137,15 +1138,6 @@ func (s *Service) CanAccessOrder(userID int64, o *Order, isAdmin bool) (bool, er
 	return p.SupplierID == userID, nil
 }
 
-func (s *Service) PayOrder(orderNo string) error {
-	return s.AdminUpdateOrderStatus(orderNo, "paid")
-}
-
-// Provisioning: supplier confirms they're setting up
-func (s *Service) ProvisioningOrder(orderNo string) error {
-	return s.AdminUpdateOrderStatus(orderNo, "provisioning")
-}
-
 // CompleteOrder 订单完成并归还余量 (REQ-A-043)。
 func (s *Service) CompleteOrder(orderNo string) error {
 	_, err := s.releaseStock(orderNo, stockHoldingStatuses, "completed")
@@ -2114,52 +2106,99 @@ func (s *Service) GetCreditScore(supplierID int64) (*CreditScore, error) {
 
 // ===== Admin =====
 
+func adminOrderActions(order *Order) []string {
+	actions := make([]string, 0, 2)
+	switch order.Status {
+	case "pending_payment", "paid", "provisioning", "active", "frozen":
+		if order.StockReserved != nil {
+			actions = append(actions, "cancelled")
+		}
+		if order.Status != "frozen" {
+			actions = append(actions, "frozen")
+		}
+	}
+	return actions
+}
+
 func (s *Service) ListAllOrders(status string, page, pageSize int) ([]AdminOrder, int64, error) {
-	return s.repo.ListAllOrders(status, page, pageSize)
+	orders, total, err := s.repo.ListAllOrders(status, page, pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range orders {
+		orders[i].AllowedActions = adminOrderActions(&orders[i].Order)
+	}
+	return orders, total, nil
 }
 
 func (s *Service) ListAllProducts(status string, page, pageSize int) ([]AdminProduct, int64, error) {
 	return s.repo.ListAllProducts(status, page, pageSize)
 }
 
-// AdminUpdateOrderStatus 运营改单。改为 cancelled/refunded 时同步归还余量并吊销访问凭证。
-// 归还走 releaseStock 的守卫式流转: 若订单已是终态, 不会重复归还。
-func (s *Service) AdminUpdateOrderStatus(orderNo string, status string) error {
-	renewal, err := GetRenewal(s.db, orderNo)
+// AdminUpdateOrderStatus never substitutes for payment, delivery or refund events.
+// The order family, inventory, credentials and operator audit commit together.
+func (s *Service) AdminUpdateOrderStatus(operatorID int64, orderNo, status, ip string) error {
+	if operatorID <= 0 {
+		return fmt.Errorf("无权操作订单")
+	}
+	if status != "cancelled" && status != "frozen" {
+		return fmt.Errorf("运营仅支持关闭订单或冻结订单")
+	}
+	tx, err := s.db.Beginx()
 	if err != nil {
 		return err
 	}
-	if renewal != nil && status != "cancelled" && status != "refunded" {
-		return ErrRenewalConflict
+	defer tx.Rollback()
+	order, _, renewal, err := s.repo.LockOrderFamilyTx(tx, orderNo)
+	if err != nil {
+		return err
 	}
-
-	if status == "cancelled" || status == "refunded" {
-		// refunding 也允许直接改判为 refunded, 故来源状态需并入。
-		from := append(append([]string{}, stockHoldingStatuses...), "refunding")
-		released, err := s.releaseStock(orderNo, from, status)
-		if err != nil {
+	if order == nil {
+		return fmt.Errorf("order not found")
+	}
+	if order.Status == status {
+		return nil
+	}
+	if status == "cancelled" && order.StockReserved == nil {
+		return fmt.Errorf("历史订单库存占用尚未核对，无法关闭")
+	}
+	if !slices.Contains(adminOrderActions(order), status) {
+		return fmt.Errorf("order not active")
+	}
+	if status == "frozen" {
+		if _, err := s.FreezeOrderTx(tx, orderNo); err != nil {
 			return err
 		}
-		if released {
-			if status == "refunded" {
-				s.notifyOrderEvent(orderNo, "退款已完成", fmt.Sprintf("您的订单 %s 退款已完成, 占用资源已释放。", orderNo))
-			} else {
-				s.notifyOrderEvent(orderNo, "订单已取消", fmt.Sprintf("您的订单 %s 已取消, 占用资源已释放。", orderNo))
+	} else {
+		if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "cancelled"); err != nil {
+			return err
+		}
+		if err := s.returnReservedStockTx(tx, order); err != nil {
+			return err
+		}
+		if renewal == nil {
+			if err := s.cancelPendingRenewalsTx(tx, order.ID); err != nil {
+				return err
 			}
 		}
-		return nil
-	}
-	if status == "completed" {
-		if _, err := s.releaseStock(orderNo, stockHoldingStatuses, status); err != nil {
+		if err := s.repo.RevokeAccessByOrderTx(tx, order.ID); err != nil {
 			return err
 		}
-		return nil
 	}
-	// 冻结走 FreezeOrder: 吊销凭证(C-06) + 违规强制留痕(REQ-H-003), 不能只改状态。
+	if _, err := tx.Exec(`INSERT INTO audit_logs
+		(operator_id,action,target_type,target_id,before_value,after_value,ip)
+		VALUES (?,'update_order_status','order',?,?,?,?)`, operatorID, order.ID, order.Status, status, ip); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 	if status == "frozen" {
-		return s.FreezeOrder(orderNo)
+		s.AttestOrderFreeze(orderNo)
+	} else {
+		s.notifyOrderEvent(orderNo, "订单已取消", fmt.Sprintf("您的订单 %s 已取消, 占用资源已释放。", orderNo))
 	}
-	return s.repo.UpdateOrderStatus(orderNo, status)
+	return nil
 }
 
 func (s *Service) GetTradingConfig() (trading.Config, error) {

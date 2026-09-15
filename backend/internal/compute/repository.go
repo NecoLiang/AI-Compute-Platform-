@@ -64,11 +64,11 @@ type Product struct {
 	RejectedReason    string  `db:"rejected_reason" json:"rejected_reason"`
 	// Health 节点探活聚合的健康度(unknown/healthy/degraded/offline), 由 scheduler 模块维护。
 	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
-	Health           string    `db:"health" json:"health"`
-	SelfOperated     bool      `db:"self_operated" json:"self_operated"`
+	Health       string `db:"health" json:"health"`
+	SelfOperated bool   `db:"self_operated" json:"self_operated"`
 	// SupplierName 供给方展示名。公开市场查询填充(service 层脱敏后输出),
 	// 供给方自查/内部查询不选取该列(omitempty 隐藏)。
-	SupplierName string `db:"supplier_name" json:"supplier_name,omitempty"`
+	SupplierName     string    `db:"supplier_name" json:"supplier_name,omitempty"`
 	ComplianceAgreed bool      `db:"compliance_agreed" json:"compliance_agreed"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
@@ -1169,7 +1169,8 @@ func (r *Repository) FindCreditScore(supplierID int64) (*CreditScore, error) {
 // AdminOrder 运营订单列表行: 订单 + 供给方公司名(全名, 仅 admin 组可见)。
 type AdminOrder struct {
 	Order
-	SupplierName string `db:"supplier_name" json:"supplier_name"`
+	AllowedActions []string `db:"-" json:"allowed_actions"`
+	SupplierName   string   `db:"supplier_name" json:"supplier_name"`
 }
 
 // AdminProduct 运营商品列表行: 商品 + 供给方公司名(全名, 仅 admin 组可见)。

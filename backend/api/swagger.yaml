@@ -1378,14 +1378,24 @@ paths:
     get:
       tags: [运营管理 Admin]
       summary: 全平台订单
+      description: 每条订单含 allowed_actions 数组，仅包含当前允许的 cancelled 或 frozen；空数组表示当前无可用处置操作。历史库存占用未知时不开放取消。
 
   /admin/orders/{id}/status:
     patch:
       tags: [运营管理 Admin]
       summary: 订单干预
-      description: 支持数字订单 ID 或业务订单号。取消订单会释放库存并吊销访问凭证，重复取消不会重复释放库存。
+      description: 支持数字订单 ID 或业务订单号。仅可关闭待支付、已支付、交付中、使用中或冻结中的订单，或冻结活动订单；关闭不会自动退款；不允许直接设置支付、签收、完成或退款状态。状态、实际库存占用、平台凭证与运营审计同事务提交，重复同一操作不重复释放或写审计。状态冲突返回 40900，未知历史库存取消返回 40001，不存在返回 40400。
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, description: 数字订单 ID 或业务订单号 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [cancelled, frozen] }
 
   /admin/invoices:
     get:
