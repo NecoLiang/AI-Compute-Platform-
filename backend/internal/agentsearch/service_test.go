@@ -19,9 +19,9 @@ func (f fakeLister) ListProducts(_ compute.ProductFilter) ([]compute.Product, in
 
 func sampleProducts() []compute.Product {
 	return []compute.Product{
-		{ID: 1, GpuModel: "A100-80G", Stock: 16, UnitPrice: 1200000, Region: "华北-廊坊", PricingMode: "monthly"},
-		{ID: 2, GpuModel: "RTX 4090", Stock: 64, UnitPrice: 180000, Region: "华东-上海", PricingMode: "monthly"},
-		{ID: 3, GpuModel: "H100", Stock: 2, UnitPrice: 3800000, Region: "华北-廊坊", PricingMode: "monthly"},
+		{ID: 1, ProductType: compute.ProductTypeCardRental, GpuModel: "A100-80G", Stock: 16, UnitPrice: 1200000, Region: "华北-廊坊", PricingMode: "monthly"},
+		{ID: 2, ProductType: compute.ProductTypeCardRental, GpuModel: "RTX 4090", Stock: 64, UnitPrice: 180000, Region: "华东-上海", PricingMode: "monthly"},
+		{ID: 3, ProductType: compute.ProductTypeCardRental, GpuModel: "H100", Stock: 2, UnitPrice: 3800000, Region: "华北-廊坊", PricingMode: "monthly"},
 	}
 }
 
@@ -49,7 +49,10 @@ func TestSearch_EndToEnd(t *testing.T) {
 		"budget_fen_max":20000000,"region":"华北",
 		"analysis_steps":[{"title":"识别任务类型","detail":"7B 模型微调, 需要大显存"},
 		{"title":"算力推定","detail":"约需 124GB 显存, 建议 8 卡 A100-80G"}]}`
-	svc := NewService(fakeLLM(t, parsed), fakeLister{sampleProducts()})
+	products := sampleProducts()
+	const supplierName = "北京集成供应科技有限公司"
+	products[0].SupplierName = supplierName
+	svc := NewService(fakeLLM(t, parsed), fakeLister{products})
 
 	res, err := svc.Search(context.Background(), 1, "我要微调一个7B模型, 预算每月20万")
 	if err != nil {
@@ -63,6 +66,16 @@ func TestSearch_EndToEnd(t *testing.T) {
 	}
 	if len(res.Matches) == 0 || res.Matches[0].Product.ID != 1 {
 		t.Fatalf("应匹配到 A100-80G 商品: %+v", res.Matches)
+	}
+	encoded, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), supplierName) || res.Matches[0].Product.SupplierName != compute.MaskCompanyName(supplierName) {
+		t.Fatal("intelligent search must mask supplier names in its public result")
+	}
+	if products[0].SupplierName != supplierName {
+		t.Fatal("response masking must not mutate source products")
 	}
 	top := res.Matches[0]
 	// 型号40 + 库存20 + 预算(8卡*1月*12000元=9.6万 ≤ 20万)20 + 地域10 + 计费10 = 100

@@ -318,7 +318,7 @@ func TestRenewalRequiresCurrentQuoteAndConsentAndCannotBeFulfilledByAdminStatus(
 	created := tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", renewalInput(quote, "a9a2234b-f1e5-44a8-9725-b6f25866de35"), 0).Data.(map[string]any)
 	no := created["order_no"].(string)
 	for _, status := range []string{"paid", "provisioning", "active", "completed"} {
-		if err := service.AdminUpdateOrderStatus(no, status); err == nil {
+		if err := service.AdminUpdateOrderStatus(104, no, status, ""); err == nil {
 			t.Fatalf("admin bypassed payment with %s", status)
 		}
 	}

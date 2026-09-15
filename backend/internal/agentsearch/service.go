@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"math"
 	"sort"
 	"strings"
@@ -191,12 +190,11 @@ func (s *Service) Search(ctx context.Context, userID int64, query string) (*Sear
 	}
 	var req parsedRequirement
 	if err := json.Unmarshal([]byte(stripCodeFence(content)), &req); err != nil {
-		raw := content
-		if len(raw) > 300 {
-			raw = raw[:300]
-		}
-		slog.Error("需求解析结果不合法", "error", err, "raw", raw)
 		return nil, fmt.Errorf("需求解析结果不合法: %w", err)
+	}
+
+	if req.CardCount < 0 || req.CardCount >= float64(math.MaxInt) || req.RawEstimate.MinCards < 0 || req.RawEstimate.MinCards >= float64(math.MaxInt) || req.DurationHint < 0 || req.DurationHint >= float64(math.MaxInt) || req.BudgetFenMax < 0 || req.BudgetFenMax >= float64(math.MaxInt64) {
+		return nil, fmt.Errorf("需求解析数值超出可核对范围")
 	}
 
 	est := req.estimate()
@@ -229,7 +227,9 @@ func (s *Service) Search(ctx context.Context, userID int64, query string) (*Sear
 }
 
 // matchProducts 确定性匹配打分。满分 100:
-//   型号 40 / 数量与库存 20 / 预算 20 / 地域 10 / 计费模式 10。
+//
+//	型号 40 / 数量与库存 20 / 预算 20 / 地域 10 / 计费模式 10。
+//
 // 每一分都有对应的 reason, 打分透明可解释 —— 这也是"智能"可信的前提。
 func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 	matches := make([]Match, 0, len(products))
@@ -248,30 +248,64 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 		}
 
 		need := req.needCards()
-		if need <= 0 {
-			score += 10
-		} else if p.Stock >= need {
-			score += 20
-			reasons = append(reasons, fmt.Sprintf("库存 %d 可满足算力推定的 %d 卡需求", p.Stock, need))
-		} else if p.Stock > 0 {
-			score += 5
-			reasons = append(reasons, fmt.Sprintf("库存 %d 不足 %d 卡, 可部分满足", p.Stock, need))
+		qty := max(1, p.MinOrder)
+		unit := "卡"
+		if p.ProductType != compute.ProductTypeCardRental {
+			unit = "台"
+		}
+		machines := 0
+		if p.MachineCount != nil {
+			machines = *p.MachineCount
+		}
+		perUnit, capacityErr := compute.CardsPerUnit(p.ProductType, p.CardCount, machines)
+		capacityKnown := capacityErr == nil
+		if !capacityKnown {
+			reasons = append(reasons, capacityErr.Error()+", 无法按卡核对库存")
+		} else if need > 0 {
+			qty = max(qty, 1+(need-1)/perUnit)
+		}
+
+		if capacityKnown {
+			if need <= 0 {
+				score += 10
+			} else if p.Stock >= qty {
+				score += 20
+				reasons = append(reasons, fmt.Sprintf("库存 %d%s 可满足 %d 卡需求, 需采购 %d%s", p.Stock, unit, need, qty, unit))
+			} else if p.Stock > 0 {
+				score += 5
+				reasons = append(reasons, fmt.Sprintf("库存 %d%s 不足 %d 卡需求所需的 %d%s, 可部分满足", p.Stock, unit, need, qty, unit))
+			} else {
+				reasons = append(reasons, "暂无可售库存")
+			}
 		}
 
 		if req.BudgetFenMax > 0 {
-			qty, dur := need, int(math.Round(req.DurationHint))
-			if qty <= 0 {
-				qty = 1
-			}
-			if dur <= 0 {
-				dur = 1
-			}
-			est := p.UnitPrice * int64(qty) * int64(dur)
-			if est <= int64(math.Round(req.BudgetFenMax)) {
-				score += 20
-				reasons = append(reasons, fmt.Sprintf("预估费用 %.2f 元在预算内", float64(est)/100))
-			} else {
-				reasons = append(reasons, fmt.Sprintf("预估费用 %.2f 元可能超出预算", float64(est)/100))
+			switch {
+			case !capacityKnown:
+				reasons = append(reasons, "规格不足, 无法估算满足需求的费用")
+			case p.PriceNegotiable || p.ProductType == compute.ProductTypeColocation:
+				reasons = append(reasons, "商品需询价, 暂无法核对预算")
+			case req.PricingMode != "" && p.PricingMode != req.PricingMode:
+				reasons = append(reasons, "计费方式与需求不同, 请按商品计费周期核对预算")
+			default:
+				dur := max(1, p.MinDuration, int(math.Round(req.DurationHint)))
+				q, d, err := compute.ValidateRenewParams(&p, qty, dur)
+				if err != nil {
+					reasons = append(reasons, "采购条件无法满足: "+err.Error())
+					break
+				}
+				est, _, err := compute.CalcOrderAmount(p.UnitPrice, q, d, 0)
+				if err != nil {
+					reasons = append(reasons, "预估费用暂不可确定: "+err.Error())
+					break
+				}
+				reasons = append(reasons, fmt.Sprintf("按 %d%s、%d%s及商品最低采购条件估算", q, unit, d, compute.DurationUnit(p.PricingMode)))
+				if est <= int64(math.Round(req.BudgetFenMax)) {
+					score += 20
+					reasons = append(reasons, fmt.Sprintf("预估费用 %.2f 元在预算内", float64(est)/100))
+				} else {
+					reasons = append(reasons, fmt.Sprintf("预估费用 %.2f 元可能超出预算", float64(est)/100))
+				}
 			}
 		} else {
 			score += 10
@@ -288,6 +322,7 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 		}
 
 		if score >= minMatchScore {
+			p.SupplierName = compute.MaskCompanyName(p.SupplierName)
 			matches = append(matches, Match{Product: p, Score: score, Reasons: reasons})
 		}
 	}

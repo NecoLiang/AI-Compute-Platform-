@@ -21,7 +21,7 @@ import (
 // OrderPayload 订单创建存证 (REQ-H-010)。
 type OrderPayload struct {
 	OrderNo        string `json:"order_no"`
-	BuyerIDHash    string `json:"buyer_id_hash"`    // 不上链明文 ID, 满足选择性披露
+	BuyerIDHash    string `json:"buyer_id_hash"` // 不上链明文 ID, 满足选择性披露
 	SupplierIDHash string `json:"supplier_id_hash"`
 	Spec           string `json:"spec"` // 规格摘要, 只含下单后不可变的列
 	TotalAmountFen int64  `json:"total_amount_fen"`
@@ -38,7 +38,7 @@ type DeliveryPayload struct {
 
 // ViolationPayload 风控违规存证 (REQ-H-014)。
 // 风控规则引擎(T-055)未落地前, 违规类型/结论没有持久化表, 载荷无法从库中重算,
-// 验证时只能做「入库 hash ↔ 链上 hash」比对; 引擎落地后应补 source 注册。
+// 验证时不能确认原始数据一致性; 引擎落地后应补 source 注册。
 type ViolationPayload struct {
 	TargetNo   string `json:"target_no"`
 	Violation  string `json:"violation"`
@@ -99,7 +99,7 @@ func NewService(repo *Repository, bsn *BSNClient, signSeedHex string) (*Service,
 }
 
 // RegisterSource 注册「从业务库重建载荷」的取数函数, Verify 用它重算 hash (REQ-H-030)。
-// 未注册的 target_type 验证时退化为入库 hash 与链上比对。
+// 未注册的 target_type 无法核对原始业务数据, 验证不会成功。
 func (s *Service) RegisterSource(targetType string, fn SourceFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -173,21 +173,22 @@ func (s *Service) Verify(ctx context.Context, targetType, targetID string) (*Ver
 	}
 
 	// 1. 重算业务数据 hash。重算不一致说明库内业务数据在存证后被改动, 直接判 false。
-	hashToCheck := att.DataHash
-	if fn := s.source(targetType); fn != nil {
-		payload, err := fn(targetID)
-		if err != nil {
-			res.Note = "业务数据读取失败: " + err.Error()
-			return res, nil
-		}
-		recomputed := ComputeHash(payload)
-		match := recomputed == att.DataHash
-		res.DBHashMatch = &match
-		if !match {
-			res.Note = "业务数据与存证 hash 不一致: 数据在存证后被改动过"
-			return res, nil
-		}
-		hashToCheck = recomputed
+	fn := s.source(targetType)
+	if fn == nil {
+		res.Note = "无法核对原始业务数据, 暂不能确认存证"
+		return res, nil
+	}
+	payload, err := fn(targetID)
+	if err != nil {
+		res.Note = "业务数据读取失败"
+		return res, nil
+	}
+	recomputed := ComputeHash(payload)
+	match := recomputed == att.DataHash
+	res.DBHashMatch = &match
+	if !match {
+		res.Note = "业务数据与存证 hash 不一致: 数据在存证后被改动过"
+		return res, nil
 	}
 
 	// 2. 链上比对。
@@ -199,7 +200,7 @@ func (s *Service) Verify(ctx context.Context, targetType, targetID string) (*Ver
 		res.Note = "存证尚未上链 (status=" + att.ChainStatus + ")"
 		return res, nil
 	}
-	exists, txID, err := s.bsn.VerifyHash(ctx, *att.ChainTxID, hashToCheck)
+	exists, txID, err := s.bsn.VerifyHash(ctx, *att.ChainTxID, recomputed)
 	if err != nil {
 		res.Note = "链上查询失败: " + err.Error()
 		return res, nil

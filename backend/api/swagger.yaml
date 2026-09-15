@@ -1378,14 +1378,24 @@ paths:
     get:
       tags: [运营管理 Admin]
       summary: 全平台订单
+      description: 每条订单含 allowed_actions 数组，仅包含当前允许的 cancelled 或 frozen；空数组表示当前无可用处置操作。历史库存占用未知时不开放取消。
 
   /admin/orders/{id}/status:
     patch:
       tags: [运营管理 Admin]
       summary: 订单干预
-      description: 支持数字订单 ID 或业务订单号。取消订单会释放库存并吊销访问凭证，重复取消不会重复释放库存。
+      description: 支持数字订单 ID 或业务订单号。仅可关闭待支付、已支付、交付中、使用中或冻结中的订单，或冻结活动订单；关闭不会自动退款；不允许直接设置支付、签收、完成或退款状态。状态、实际库存占用、平台凭证与运营审计同事务提交，重复同一操作不重复释放或写审计。状态冲突返回 40900，未知历史库存取消返回 40001，不存在返回 40400。
       parameters:
         - { name: id, in: path, required: true, schema: { type: string }, description: 数字订单 ID 或业务订单号 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [cancelled, frozen] }
 
   /admin/invoices:
     get:
@@ -1544,6 +1554,7 @@ paths:
     get:
       tags: [区块链存证 Blockchain]
       summary: 链上存证验证
+      description: 原始业务数据重算和链上比对均通过才 verified=true。无 source 时为 false。数据库错误返回 HTTP 200、code 50000。
       security: []
       parameters:
         - { name: type, in: query, required: true, schema: { type: string }, example: "order" }
@@ -1555,9 +1566,77 @@ paths:
     get:
       tags: [区块链存证 Blockchain]
       summary: 查询存证记录
+      description: 无记录返回 code 0 且 data 为 null 或省略；数据库错误返回 code 50000，不作空记录处理。
+      security: []
       parameters:
         - { name: target_type, in: path, required: true, schema: { type: string } }
         - { name: target_id, in: path, required: true, schema: { type: string } }
+
+  /admin/blockchain/requeue-failed:
+    post:
+      tags: [区块链存证 Blockchain]
+      summary: 重新排队全部失败存证
+      description: 仅 operator/admin。返回 requeued 数量，零条合法；数据库错误为 HTTP 200、code 50000。重新排队不代表上链成功。
+      responses:
+        '200': { description: "检查业务 code；成功时 data.requeued 为重新排队数量" }
+  # ==================== 节点与调度 ====================
+  /supplier/nodes:
+    get:
+      tags: [供应方 Supplier]
+      summary: 当前供应方的节点列表
+      description: 仅 supplier；data 为节点数组或 null，不含节点密钥。
+    post:
+      tags: [供应方 Supplier]
+      summary: 注册当前供应方商品的节点
+      description: product_id、node_name、total_cards 必填；node_key 明文仅返回一次。
+  /supplier/nodes/{id}:
+    delete:
+      tags: [供应方 Supplier]
+      summary: 删除当前供应方节点并失效其密钥
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+  /supplier/schedule-advice:
+    get:
+      tags: [供应方 Supplier]
+      summary: 按订单查询调度建议
+      description: 仅商品所属 supplier；按卡/按台换算 need_cards，缺少可确定规格返回 code 40001。推荐不执行资源编排。
+      parameters:
+        - { name: order_no, in: query, required: true, schema: { type: string } }
+  /admin/nodes:
+    get:
+      tags: [运营管理 Admin]
+      summary: 节点分页列表
+      description: 仅 operator/admin。支持 status、page、page_size，data 含 list 和 total。
+  /admin/schedule-advice:
+    get:
+      tags: [运营管理 Admin]
+      summary: 按订单查询调度建议
+      description: 仅 operator/admin；容量不足、无节点与规格不足均不会推荐成功。
+      parameters:
+        - { name: order_no, in: query, required: true, schema: { type: string } }
+  /node/heartbeat:
+    post:
+      tags: [供应方 Supplier]
+      summary: 接收机器节点心跳
+      security: []
+      description: 使用 X-Node-Key 认证；node_id、available_cards 必填，gpu_util_pct、vram_util_pct 可选。
+
+  /market/agent-search:
+    post:
+      tags: [算力市场 Compute]
+      summary: 智能选型
+      description: 需登录；query最多500个Unicode codepoint。模型解析条件，平台匹配商品。卡/台按同一商品的均一规格換算，预算遵守最低采购条件；模型未配置/失败为code50000，限流42900，无规则降级。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: {type: string, maxLength: 500}
+      responses:
+        '200': {description: 检查业务code；成功data包含relevant、analysis_steps、compute_estimate、requirement、matches、note。}
 
   # ==================== 健康检查 ====================
   /health:

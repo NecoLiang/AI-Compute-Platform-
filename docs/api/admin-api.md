@@ -31,12 +31,19 @@ curl -X POST http://localhost:8080/api/v1/admin/audits/qualifications/1/reject \
 ## 订单管理
 
 ### GET /admin/orders · 全平台订单
+
+每条订单新增 `allowed_actions`，只包含当前允许的 `cancelled` / `frozen` 操作；没有可用操作时返回 `[]`。历史 `stock_reserved=NULL` 的订单不开放取消，需先核对真实库存占用。页面以服务端能力为准，提交时服务端仍会在行锁内重新校验。
 ```
 curl "http://localhost:8080/api/v1/admin/orders?status=active&page=1&page_size=20" \
   -H "Authorization: Bearer <token>"
 ```
 
 ### PATCH /admin/orders/:id/status · 订单干预
+
+- 仅接受 `cancelled`（关闭尚未终结的订单）和 `frozen`（冻结待支付、已支付、交付中或使用中的订单）。不接受直接设置支付、签收、完成或退款状态；这些状态必须来自对应业务流程。
+- 关闭允许 `pending_payment/paid/provisioning/active/frozen`，不自动退款；退款申请中及终态不允许关闭。关闭只释放该订单已记录的实际库存占用；冻结保留占用、吊销平台访问凭证，并取消待支付续租。状态、库存、凭证与运营审计在同一事务提交；重复同一操作不会重复写审计或释放库存。
+- 不支持的目标状态返回 `40001`，已变化或不可处置的状态返回 `40900`，不存在的订单返回 `40400`。历史库存未核对时关闭返回 `40001` 和明确原因；数据库或审计失败返回 `50000` 并回滚。
+- 原路退款尚未接入，此接口不能替代资金渠道退款，也不能证明机房侧已撤销实际访问。
 ```
 curl -X PATCH http://localhost:8080/api/v1/admin/orders/ORD001/status \
   -H "Authorization: Bearer <token>" \

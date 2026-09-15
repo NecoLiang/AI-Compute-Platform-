@@ -2,8 +2,8 @@
 
 **Base**: `http://localhost:8080/api/v1` | **Auth**: 两个查询接口均为**公开**（第三方独立查验是存证的意义所在）；补推接口需 operator/admin
 
-> ✅ **已接入 BSN 文昌链并在生产实链运行**（2026-08-30 验收）。存证走链原生 record 模块，
-> 浏览器 https://wenchangexplorer.bsnbase.com
+> 历史验收记录（2026-08-30）记载 BSN 文昌链接入；不代表当前环境已配置或可用。
+> 当前环境的链路状态以运行配置和实时查验为准。
 
 **口径**
 
@@ -14,8 +14,7 @@
   - `order` 下单成功（REQ-H-010）
   - `delivery` 买家确认签收（REQ-H-011）
   - `violation` 订单冻结/风控处置（REQ-H-014，运营不可跳过）
-- 异步上链（REQ-H-020）：业务毫秒级返回，worker 每 30s 批量推链。**业务动作后 ≤1 分钟**
-  存证从 `pending` 变 `confirmed` 并回写链上交易 hash。
+- 异步上链（REQ-H-020）：业务毫秒级返回，worker 每 30s 批量推链；成功后从 `pending` 变 `confirmed` 并回写交易 hash。链路未配置或故障时不能保证确认时间。
 - `verified:true` 的唯一条件：**业务库重算 hash 一致 && 链上存在该 hash**。
   未上链、数据被改动、链路故障一律如实返回 `false`（绝不虚报），前端按状态区分展示。
 
@@ -32,7 +31,7 @@ curl "http://localhost:8080/api/v1/blockchain/verify?type=order&id=ORD20260830xx
 | type | string | ✅ | order / delivery / violation |
 | id | string | ✅ | 订单号（order/delivery/violation 均以订单号为主键） |
 
-**验证通过**（生产真实响应结构）
+**验证通过**（响应结构示例）
 ```json
 {"code":0,"data":{
   "verified":true,
@@ -68,7 +67,7 @@ curl http://localhost:8080/api/v1/blockchain/attestations/order/ORD20260830xxxxx
 ```
 
 返回平台库的存证行：`data_hash`、`signers`（平台见证签名，Ed25519）、`chain_tx_id`、
-`chain_status`、`attempts`、`created_at`、`confirmed_at`。无记录返回 `data:null`。
+`chain_status`、`attempts`、`last_error`、`created_at`、`confirmed_at`。无记录返回 `code:0`，`data` 可能省略或为 `null`。
 
 ---
 
@@ -77,3 +76,13 @@ curl http://localhost:8080/api/v1/blockchain/attestations/order/ORD20260830xxxxx
 链路长时间故障（重试 ×3 耗尽进死信）恢复后调用，把 `failed` 全部重置回 `pending` 待 worker 补推。
 
 **响应**: `{"code":0,"data":{"requeued":2}}`
+
+
+## 错误与查验边界（2026-09-14）
+
+- 三个接口都必须同时检查 HTTP 状态和 JSON `code`。数据库查询/更新错误使用现有错误信封：HTTP 200、`code:50000`、`message`，不返回成功 `data`；不能当作无记录或零条补推。
+- 未注册原始业务数据 source 时，`verified:false` 且省略 `db_hash_match`。当前路由只注册 `order`/`delivery`；`violation` 可以读取记录，但在补齐可重建业务数据前不会通过完整查验。
+- 业务数据读取失败或链路不可用均为 `verified:false`，通过 `note` 说明未完成阶段。`confirmed` 仅是存储的上链状态，不等于实时查验通过。
+- 前端仅在 `verified:true`、`db_hash_match:true`、`chain_status:confirmed` 且摘要和交易编号完整时显示查验通过。平台见证签名不等于买卖双方电子签署。
+- 补推影响全平台所有 `failed` 记录；重复调用只更新当时仍为 `failed` 的记录，零条是合法结果。UI 要求全局范围确认并在请求期间阻止重复点击；返回只代表重新排队，不代表已上链。
+- 前端入口：`/attestations/verify`（公开）、买家订单详情的存证时间线、`/admin/attestations`（operator/admin）。先发布后端错误契约，再开放前端入口。本次验证使用独立本地数据库和既有 fake-chain；未调用生产链。
