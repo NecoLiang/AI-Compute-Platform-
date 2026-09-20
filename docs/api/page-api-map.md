@@ -38,6 +38,10 @@
 - 响应字段渲染规则：`verified=true` → 绿色⛓「已上链可查验」+ `chain_timestamp` + `verify_url`「去区块链浏览器查验」外链按钮；`chain_status=pending` →「上链中」；`db_hash_match=false` → 红色告警「数据与存证不一致」；`note` 为兜底文案
 - `GET /blockchain/attestations/:target_type/:target_id`（公开）：原始存证记录（`data_hash`/`signers`/`chain_tx_id`/`confirmed_at`），详见 [blockchain-api.md](blockchain-api.md)
 
+### `/leasing` `/broker/equipment` `/broker/construction` 三板块留资页 ✅（2026-09-20 上线）
+- `POST /leads`（公开，同源 /api/v1 直连）——字段与枚举档位见 [intermediary-api.md](intermediary-api.md)；融资租赁页 `company_name` 必填并展示持牌资方合规声明
+- 提交成功返回 `{id}`，页面显示登记编号；运营在 `/admin/crm` 看到企业/来源/预算期限/需求全量信息
+
 ### `/(portal)/terms|privacy|resource-listing-rules|resource-usage-rules` 协议页 ✅
 - 静态正文，无后端接口；版本号 `2026-09-06.1` 随表单提交（见 [legal-consent-api.md](legal-consent-api.md)）
 

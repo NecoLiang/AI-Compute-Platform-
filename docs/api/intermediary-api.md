@@ -22,9 +22,13 @@ curl -X POST http://localhost:8080/api/v1/leads \
 | contact_name | string | 联系人 |
 | contact_phone | string | 电话 |
 | contact_email | string | 邮箱(可选) |
-| description | string | 需求描述 |
-| amount_range | string | 预算范围(可选) |
-| term | string | 期限(可选) |
+| company_name | string | 企业名称(≤128 字；**finance_lease 必填**，其余可选) |
+| description | string | 需求描述(可选, ≤2000 字；意向方案以「【意向方案】…」前缀并入) |
+| amount_range | string | 预算/金额范围(可选, 前端为枚举档位) |
+| term | string | 期限(可选, 前端为枚举档位) |
+| source | string | 线索来源(≤32, 如 leasing_page / equipment_page / construction_page) |
+
+> 公开留资接口有 **IP 限流：10 次/小时**，超限返回 42900。
 
 ---
 
