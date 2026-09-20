@@ -46,7 +46,9 @@ func (h *Handler) allowLeadRate(ip string) bool {
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc, rateHits: map[string][]time.Time{}} }
 
-func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
+// RegisterAuthenticatedRoutes 留资接口挂登录组(AuthRequired):
+// 未登录先去登录, 同时以账号为主体限流, 遏制恶意刷留资。
+func (h *Handler) RegisterAuthenticatedRoutes(r *gin.RouterGroup) {
 	r.POST("/leads", h.CreateLead)
 	r.POST("/finance/lease/contact", h.CreateFinanceLead)
 }
@@ -64,7 +66,7 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 }
 
 func (h *Handler) CreateLead(c *gin.Context) {
-	if !h.allowLeadRate(c.ClientIP()) {
+	if !h.allowLeadRate("u:" + strconv.FormatInt(c.GetInt64("user_id"), 10)) {
 		response.Error(c, errcode.TooManyRequests, "提交过于频繁, 请稍后再试")
 		return
 	}
@@ -77,7 +79,7 @@ func (h *Handler) CreateLead(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, "请从算力商品详情提交询价")
 		return
 	}
-	id, err := h.svc.CreateLead(req)
+	id, err := h.svc.CreateLead(c.GetInt64("user_id"), req)
 	if err != nil {
 		response.Error(c, errcode.InternalError, err.Error())
 		return
@@ -86,7 +88,7 @@ func (h *Handler) CreateLead(c *gin.Context) {
 }
 
 func (h *Handler) CreateFinanceLead(c *gin.Context) {
-	if !h.allowLeadRate(c.ClientIP()) {
+	if !h.allowLeadRate("u:" + strconv.FormatInt(c.GetInt64("user_id"), 10)) {
 		response.Error(c, errcode.TooManyRequests, "提交过于频繁, 请稍后再试")
 		return
 	}
@@ -96,7 +98,7 @@ func (h *Handler) CreateFinanceLead(c *gin.Context) {
 		return
 	}
 	req.Type = "finance_lease"
-	id, err := h.svc.CreateLead(req)
+	id, err := h.svc.CreateLead(c.GetInt64("user_id"), req)
 	if err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return

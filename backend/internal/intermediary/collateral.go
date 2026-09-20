@@ -479,7 +479,9 @@ func NewCollateralHandler(svc *CollateralService) *CollateralHandler {
 	return &CollateralHandler{svc: svc}
 }
 
-func (h *CollateralHandler) RegisterPublicRoutes(r *gin.RouterGroup) {
+// RegisterAuthenticatedRoutes 中登网登记查询需登录(Q-CR-06):
+// 承租人名称/统一社会信用代码属敏感商业信息, 不对匿名开放。
+func (h *CollateralHandler) RegisterAuthenticatedRoutes(r *gin.RouterGroup) {
 	r.GET("/collateral-registrations", h.Query)
 }
 

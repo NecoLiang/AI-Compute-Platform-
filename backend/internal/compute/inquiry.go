@@ -45,7 +45,8 @@ func (s *Service) CreateProductInquiry(buyerID, productID int64, req ProductInqu
 		return 0, fmt.Errorf("该商品支持在线下单，请前往确认订单")
 	}
 	return intermediary.NewRepository(s.db).CreateLead(&intermediary.Lead{
-		Type: "compute", ContactName: req.ContactName, ContactPhone: req.ContactPhone,
+		Type: "compute", CreatedBy: &buyerID, Source: "product_inquiry",
+		ContactName: req.ContactName, ContactPhone: req.ContactPhone,
 		Description: fmt.Sprintf("商品 #%d · %s · %s · 供给方 #%d · 买家 #%d\n%s", p.ID, p.ProductType, p.Region, p.SupplierID, buyerID, req.Message),
 	})
 }

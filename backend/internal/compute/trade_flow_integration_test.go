@@ -84,7 +84,7 @@ func tradeRouter(db *sqlx.DB, id int64) *gin.Engine {
 	h.RegisterPublicRoutes(g)
 	h.RegisterAdminRoutes(g)
 	intermediary.NewHandler(intermediary.NewService(intermediary.NewRepository(db))).RegisterAdminRoutes(g)
-	intermediary.NewHandler(intermediary.NewService(intermediary.NewRepository(db))).RegisterPublicRoutes(g)
+	intermediary.NewHandler(intermediary.NewService(intermediary.NewRepository(db))).RegisterAuthenticatedRoutes(g)
 	payment.NewHandler(payment.NewService(payment.NewRepository(db), db)).RegisterBuyerRoutes(g)
 	return r
 }

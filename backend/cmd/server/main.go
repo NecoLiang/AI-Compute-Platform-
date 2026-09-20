@@ -174,9 +174,8 @@ func main() {
 	public := r.Group("/api/v1")
 	authHandler.RegisterPublicRoutes(public)
 	compute.NewHandler(computeSvc).RegisterPublicRoutes(public)
-	intermediary.NewHandler(intermediarySvc).RegisterPublicRoutes(public)
+
 	equipment.NewHandler(equipmentSvc).RegisterPublicRoutes(public)
-	intermediary.NewCollateralHandler(collateralSvc).RegisterPublicRoutes(public)
 	blockchain.NewHandler(blockchainSvc).RegisterRoutes(public)
 	scheduler.NewHandler(schedulerSvc).RegisterNodeRoutes(public)
 	catalog.NewHandler(catalogSvc).RegisterPublicRoutes(public)
@@ -186,6 +185,9 @@ func main() {
 	protected.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))
 	authHandler.RegisterProtectedRoutes(protected)
 	user.NewHandler(userSvc).RegisterRoutes(protected)
+	// 留资与中登网查询需登录: 防匿名刷留资, 敏感登记信息不对游客开放 (Q-CR-06)。
+	intermediary.NewHandler(intermediarySvc).RegisterAuthenticatedRoutes(protected)
+	intermediary.NewCollateralHandler(collateralSvc).RegisterAuthenticatedRoutes(protected)
 	compute.NewHandler(computeSvc).RegisterAuthenticatedRoutes(protected)
 
 	// Buyer API

@@ -20,6 +20,7 @@ type Lead struct {
 	AmountRange  string    `db:"amount_range" json:"amount_range"`
 	Term         string    `db:"term" json:"term"`
 	Source       string    `db:"source" json:"source"`
+	CreatedBy    *int64    `db:"created_by" json:"created_by"`
 	Status       string    `db:"status" json:"status"`
 	AssigneeID   *int64    `db:"assignee_id" json:"assignee_id"`
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
@@ -40,8 +41,8 @@ func NewRepository(db *sqlx.DB) *Repository { return &Repository{db: db} }
 
 func (r *Repository) CreateLead(l *Lead) (int64, error) {
 	res, err := r.db.Exec(
-		"INSERT INTO leads (type, contact_name, contact_phone, contact_email, company_name, description, amount_range, term, source, status) VALUES (?,?,?,?,?,?,?,?,?,?)",
-		l.Type, l.ContactName, l.ContactPhone, l.ContactEmail, l.CompanyName, l.Description, l.AmountRange, l.Term, l.Source, "new",
+		"INSERT INTO leads (type, contact_name, contact_phone, contact_email, company_name, description, amount_range, term, source, created_by, status) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+		l.Type, l.ContactName, l.ContactPhone, l.ContactEmail, l.CompanyName, l.Description, l.AmountRange, l.Term, l.Source, l.CreatedBy, "new",
 	)
 	if err != nil {
 		return 0, err
@@ -87,7 +88,7 @@ func (r *Repository) ListLeads(assigneeID int64, status string, page, pageSize i
 		COALESCE(contact_email, '') AS contact_email, COALESCE(company_name, '') AS company_name,
 		COALESCE(description, '') AS description,
 		COALESCE(amount_range, '') AS amount_range, COALESCE(term, '') AS term,
-		COALESCE(source, '') AS source,
+		COALESCE(source, '') AS source, created_by,
 		COALESCE(status, 'new') AS status, assignee_id, created_at
 		FROM leads `+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
 	return list, total, err
@@ -155,7 +156,7 @@ var leadPhone = regexp.MustCompile(`^\+?[0-9 -]{6,20}$`)
 // validLeadTypes 公开留资允许的类型白名单; compute 线索只能由商品询价接口内部产生。
 var validLeadTypes = map[string]bool{"equipment": true, "construction": true, "finance_lease": true}
 
-func (s *Service) CreateLead(req CreateLeadReq) (int64, error) {
+func (s *Service) CreateLead(userID int64, req CreateLeadReq) (int64, error) {
 	if !validLeadTypes[req.Type] {
 		return 0, errors.New("线索类型不正确")
 	}
@@ -182,10 +183,14 @@ func (s *Service) CreateLead(req CreateLeadReq) (int64, error) {
 	if len(req.Source) > 32 {
 		req.Source = req.Source[:32]
 	}
+	var createdBy *int64
+	if userID > 0 {
+		createdBy = &userID
+	}
 	return s.repo.CreateLead(&Lead{
 		Type: req.Type, ContactName: req.ContactName, ContactPhone: req.ContactPhone,
 		ContactEmail: req.ContactEmail, CompanyName: req.CompanyName, Description: req.Description,
-		AmountRange: req.AmountRange, Term: req.Term, Source: req.Source,
+		AmountRange: req.AmountRange, Term: req.Term, Source: req.Source, CreatedBy: createdBy,
 	})
 }
 
