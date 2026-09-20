@@ -2,6 +2,8 @@ package intermediary
 
 import (
 	"errors"
+	"sync"
+	"time"
 	"strconv"
 
 	"tokenfactory/pkg/errcode"
@@ -10,9 +12,39 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type Handler struct{ svc *Service }
+type Handler struct {
+	svc *Service
 
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+	// 公开留资接口的 IP 限流: 无鉴权、写数据库, 不限流等于开放刷库入口。
+	rateMu   sync.Mutex
+	rateHits map[string][]time.Time
+}
+
+const leadRatePerHour = 10
+
+// allowLeadRate 每 IP 每小时限 leadRatePerHour 次留资提交。
+func (h *Handler) allowLeadRate(ip string) bool {
+	h.rateMu.Lock()
+	defer h.rateMu.Unlock()
+	if h.rateHits == nil {
+		h.rateHits = map[string][]time.Time{}
+	}
+	cutoff := time.Now().Add(-time.Hour)
+	kept := h.rateHits[ip][:0]
+	for _, t := range h.rateHits[ip] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= leadRatePerHour {
+		h.rateHits[ip] = kept
+		return false
+	}
+	h.rateHits[ip] = append(kept, time.Now())
+	return true
+}
+
+func NewHandler(svc *Service) *Handler { return &Handler{svc: svc, rateHits: map[string][]time.Time{}} }
 
 func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
 	r.POST("/leads", h.CreateLead)
@@ -32,6 +64,10 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 }
 
 func (h *Handler) CreateLead(c *gin.Context) {
+	if !h.allowLeadRate(c.ClientIP()) {
+		response.Error(c, errcode.TooManyRequests, "提交过于频繁, 请稍后再试")
+		return
+	}
 	var req CreateLeadReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())
@@ -50,6 +86,10 @@ func (h *Handler) CreateLead(c *gin.Context) {
 }
 
 func (h *Handler) CreateFinanceLead(c *gin.Context) {
+	if !h.allowLeadRate(c.ClientIP()) {
+		response.Error(c, errcode.TooManyRequests, "提交过于频繁, 请稍后再试")
+		return
+	}
 	var req CreateLeadReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())

@@ -15,9 +15,11 @@ type Lead struct {
 	ContactName  string    `db:"contact_name" json:"contact_name"`
 	ContactPhone string    `db:"contact_phone" json:"contact_phone"`
 	ContactEmail string    `db:"contact_email" json:"contact_email"`
+	CompanyName  string    `db:"company_name" json:"company_name"`
 	Description  string    `db:"description" json:"description"`
 	AmountRange  string    `db:"amount_range" json:"amount_range"`
 	Term         string    `db:"term" json:"term"`
+	Source       string    `db:"source" json:"source"`
 	Status       string    `db:"status" json:"status"`
 	AssigneeID   *int64    `db:"assignee_id" json:"assignee_id"`
 	CreatedAt    time.Time `db:"created_at" json:"created_at"`
@@ -38,8 +40,8 @@ func NewRepository(db *sqlx.DB) *Repository { return &Repository{db: db} }
 
 func (r *Repository) CreateLead(l *Lead) (int64, error) {
 	res, err := r.db.Exec(
-		"INSERT INTO leads (type, contact_name, contact_phone, contact_email, description, amount_range, term, status) VALUES (?,?,?,?,?,?,?,?)",
-		l.Type, l.ContactName, l.ContactPhone, l.ContactEmail, l.Description, l.AmountRange, l.Term, "new",
+		"INSERT INTO leads (type, contact_name, contact_phone, contact_email, company_name, description, amount_range, term, source, status) VALUES (?,?,?,?,?,?,?,?,?,?)",
+		l.Type, l.ContactName, l.ContactPhone, l.ContactEmail, l.CompanyName, l.Description, l.AmountRange, l.Term, l.Source, "new",
 	)
 	if err != nil {
 		return 0, err
@@ -82,8 +84,10 @@ func (r *Repository) ListLeads(assigneeID int64, status string, page, pageSize i
 	var list []Lead
 	err := r.db.Select(&list, `SELECT id, type,
 		COALESCE(contact_name, '') AS contact_name, COALESCE(contact_phone, '') AS contact_phone,
-		COALESCE(contact_email, '') AS contact_email, COALESCE(description, '') AS description,
+		COALESCE(contact_email, '') AS contact_email, COALESCE(company_name, '') AS company_name,
+		COALESCE(description, '') AS description,
 		COALESCE(amount_range, '') AS amount_range, COALESCE(term, '') AS term,
+		COALESCE(source, '') AS source,
 		COALESCE(status, 'new') AS status, assignee_id, created_at
 		FROM leads `+where+" ORDER BY created_at DESC LIMIT ? OFFSET ?", append(args, pageSize, (page-1)*pageSize)...)
 	return list, total, err
@@ -139,9 +143,11 @@ type CreateLeadReq struct {
 	ContactName  string `json:"contact_name"`
 	ContactPhone string `json:"contact_phone"`
 	ContactEmail string `json:"contact_email"`
+	CompanyName  string `json:"company_name"`
 	Description  string `json:"description"`
 	AmountRange  string `json:"amount_range"`
 	Term         string `json:"term"`
+	Source       string `json:"source"`
 }
 
 var leadPhone = regexp.MustCompile(`^\+?[0-9 -]{6,20}$`)
@@ -165,10 +171,21 @@ func (s *Service) CreateLead(req CreateLeadReq) (int64, error) {
 	if len([]rune(req.Description)) > 2000 {
 		return 0, errors.New("需求描述过长(≤2000字)")
 	}
+	req.CompanyName = strings.TrimSpace(req.CompanyName)
+	if len([]rune(req.CompanyName)) > 128 {
+		return 0, errors.New("企业名称过长(≤128字)")
+	}
+	// 融资租赁按设计要求必须以企业主体登记(线稿留资卡: 公司全称必填)。
+	if req.Type == "finance_lease" && req.CompanyName == "" {
+		return 0, errors.New("请填写企业名称")
+	}
+	if len(req.Source) > 32 {
+		req.Source = req.Source[:32]
+	}
 	return s.repo.CreateLead(&Lead{
 		Type: req.Type, ContactName: req.ContactName, ContactPhone: req.ContactPhone,
-		ContactEmail: req.ContactEmail, Description: req.Description,
-		AmountRange: req.AmountRange, Term: req.Term,
+		ContactEmail: req.ContactEmail, CompanyName: req.CompanyName, Description: req.Description,
+		AmountRange: req.AmountRange, Term: req.Term, Source: req.Source,
 	})
 }
 
