@@ -8,7 +8,7 @@
 
 ---
 
-## POST /leads · 创建线索（公开）
+## POST /leads · 创建线索 ✅（需登录，2026-09-20 起）
 
 ```
 curl -X POST http://localhost:8080/api/v1/leads \
@@ -28,11 +28,12 @@ curl -X POST http://localhost:8080/api/v1/leads \
 | term | string | 期限(可选, 前端为枚举档位) |
 | source | string | 线索来源(≤32, 如 leasing_page / equipment_page / construction_page) |
 
-> 公开留资接口有 **IP 限流：10 次/小时**，超限返回 42900。
+> 留资接口 **需登录**（未登录 40100），按**账号限流 10 次/小时**（42900），提交记录 `created_by`。
+> 中登网查询 `GET /collateral-registrations` 同日起也**需登录**（承租人信息不对匿名开放，闭合 Q-CR-06）。
 
 ---
 
-## POST /finance/lease/contact · 融资租赁留资（公开）
+## POST /finance/lease/contact · 融资租赁留资 ✅（需登录）
 
 同 `/leads`，type 自动设为 `finance_lease`。
 
