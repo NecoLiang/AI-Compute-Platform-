@@ -55,6 +55,17 @@ password_login_is_public() {
 		http://127.0.0.1:8080/api/v1/auth/login >/dev/null 2>&1
 }
 
+# 2026-09-21 接口收口: 商品读接口要求登录。匿名访问必须得到 401 ——
+# 既证明路由存活, 也证明鉴权生效; 2xx(未收口)或连接失败/404 均判定失败。
+product_api_requires_auth() {
+	output=$(docker exec "$1" wget -q -O /dev/null \
+		'http://127.0.0.1:8080/api/v1/products?page=1&page_size=1' 2>&1) && return 1
+	case "$output" in
+		*" 401 "*|*"401 Unauthorized"*) return 0 ;;
+		*) echo "$output" >&2; return 1 ;;
+	esac
+}
+
 trap cleanup EXIT INT TERM
 
 docker run -d \
@@ -93,9 +104,9 @@ if [ "${health:-}" != "healthy" ]; then
 	exit 1
 fi
 
-if ! docker exec "$candidate" wget -q -O /dev/null 'http://127.0.0.1:8080/api/v1/products?page=1&page_size=1'; then
+if ! product_api_requires_auth "$candidate"; then
 	docker logs --tail 100 "$candidate" >&2 || true
-	echo "candidate product API check failed" >&2
+	echo "candidate product API auth check failed (expected 401 for anonymous)" >&2
 	exit 1
 fi
 
@@ -131,8 +142,9 @@ if ! docker exec wanxiang-backend wget -q -O /dev/null http://127.0.0.1:8080/hea
 	exit 1
 fi
 
-if ! docker exec wanxiang-backend wget -q -O /dev/null 'http://127.0.0.1:8080/api/v1/products?page=1&page_size=1'; then
+if ! product_api_requires_auth wanxiang-backend; then
 	docker logs --tail 100 wanxiang-backend >&2 || true
+	echo "deployed backend product API auth check failed (expected 401 for anonymous)" >&2
 	rollback
 	exit 1
 fi
