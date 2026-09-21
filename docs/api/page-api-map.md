@@ -15,8 +15,12 @@
 
 ## 一、公开页面
 
-### `/market` 算力市场列表 ✅
-- `GET /products` — 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|perpetual)` `available_hours` `price_min/price_max`(分) `card_count_min` `sort` `page` `page_size`
+> ⚠️ **2026-09-21 接口收口**：后端仅保留三类公开接口——认证入口（`/auth/*`）、区块链存证第三方查验（`/blockchain/*`）、节点心跳（`/node/*`，自有签名）。
+> 业务数据读接口（`GET /products*`、`/trading-config`、`/gpu-catalog`、`/equipments*`）一律需登录，防匿名爬取；
+> 浏览器统一经鉴权 BFF **`GET /api/market-proxy/<path>`**（白名单代理，401 自动 refresh）取数，市场页面均为客户端取数、不再 SSR 直连。
+
+### `/market` 算力市场列表 ✅（浏览需登录：middleware + 后端 AuthRequired 双层）
+- `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|perpetual)` `available_hours` `price_min/price_max`(分) `card_count_min` `sort` `page` `page_size`
 - 商品卡片关键字段：`gpu_model` `card_count` `stock` `unit_price`(分/卡·周期) `pricing_mode` `region` `self_operated` **`health`**(unknown/healthy/degraded/offline —— offline 应显示「暂不可下单」灰态，unknown 不显示徽章)
 - 🆕 **智能选型入口**（页面待做）：`POST /market/agent-search`（需登录），入参 `{query: string ≤500字}`；响应字段：
   - `relevant` false 时只渲染 `reject_reason`
@@ -26,9 +30,9 @@
   - `note` 无匹配时的提示文案
   - 错误码：42900 限流(10 次/分)、50000 网关异常；详见 [agent-search-api.md](agent-search-api.md)
 
-### `/market/[productId]` 商品详情 ✅
+### `/market/[productId]` 商品详情 ✅（需登录，客户端经 `/api/market-proxy/products/:id` 取数）
 - `GET /products/:id` — 全字段见 compute-api.md；注意 `machine_count`/`total_pflops_approx`/`power_capacity_kw`/`rack_count` 可为 `null`（colocation/center 专属字段）
-- `GET /gpu-catalog?q=<gpu_model>` 可选：用型号库补充展示显存/算力/安可徽章
+- `GET /gpu-catalog?q=<gpu_model>`（需登录，经 `/api/market-proxy/gpu-catalog`）可选：用型号库补充展示显存/算力/安可徽章
 
 ### `/market/[productId]/inquiry` 询单 ✅
 - `POST /products/:id/inquiries`
@@ -38,9 +42,22 @@
 - 响应字段渲染规则：`verified=true` → 绿色⛓「已上链可查验」+ `chain_timestamp` + `verify_url`「去区块链浏览器查验」外链按钮；`chain_status=pending` →「上链中」；`db_hash_match=false` → 红色告警「数据与存证不一致」；`note` 为兜底文案
 - `GET /blockchain/attestations/:target_type/:target_id`（公开）：原始存证记录（`data_hash`/`signers`/`chain_tx_id`/`confirmed_at`），详见 [blockchain-api.md](blockchain-api.md)
 
-### `/leasing` `/broker/equipment` `/broker/construction` 三板块留资页 ✅（2026-09-20 上线）
-- `POST /leads`（公开，同源 /api/v1 直连）——字段与枚举档位见 [intermediary-api.md](intermediary-api.md)；融资租赁页 `company_name` 必填并展示持牌资方合规声明
+### `/leasing` `/broker/equipment` `/broker/construction` 三板块留资页 ✅（2026-09-20 上线，2026-09-21 改为登录后访问）
+- `POST /leads`（需登录，经 BFF `/api/leads` 代理）——字段与枚举档位见 [intermediary-api.md](intermediary-api.md)；融资租赁页 `company_name` 必填并展示持牌资方合规声明
 - 提交成功返回 `{id}`，页面显示登记编号；运营在 `/admin/crm` 看到企业/来源/预算期限/需求全量信息
+- `/broker/equipment` 已重设计为「设备整包销售」板块页（场景选择 + 留资 + 供应方入驻引导），并跳转独立设备市场
+
+### `/equipment-market` 设备市场 ✅（2026-09-21 上线，与 `/market` 平级；浏览需登录：middleware + 后端 AuthRequired 双层）
+- `GET /equipments`、`GET /equipments/:id`（**需登录**，前端经 BFF `GET /api/equipments` 客户端取数）：筛选 `equipment_type/condition_type/region/price_min/price_max(分)/sort/page/page_size`
+- **买家侧脱敏**：列表/详情不下发 `vendor_id`，只有 `vendor_name`（脱敏企业名，如「北京\*\*\*有限公司」，`pkg/masking.MaskCompanyName`，与算力市场同口径）
+- `POST /equipments/:id/inquiries`（需登录，BFF `/api/equipments/:id/inquiries`）：`{quantity, contact_name, contact_phone, message}`；后端同时把询价镜像为 `type=equipment / source=equipment_market` 的 CRM 线索
+- 设备为**询价撮合**，`online_payment_supported=false`，不接在线支付
+
+### `/console/supplier/equipments`（含 `/new`、`/[id]/edit`）设备商品管理 ✅（供给方）
+- 平台只有**供应方/采购方/运营方**三种业务角色；`vendor` 为 v1.0 需求稿「设备厂商」遗留枚举，无入驻通道、已不参与鉴权（后端 vendor 路由组现为 `RBAC("supplier")`，前端 `/console/vendor/*` 路由已移除）
+- `GET/POST /vendor/equipments`、`PUT /vendor/equipments/:id`（修改重提）、`PATCH /vendor/equipments/:id/offline`、`GET /vendor/equipments/inquiries`（BFF `/api/vendor/equipments*`）
+- **审核闭环**（迁移 `024_equipment_review`）：发布/修改重提 → `pending` → 运营在 `/admin/reviews?tab=equipments` 审核；驳回原因落库 `rejected_reason`（1–256 字必填），供应方在列表与编辑页可见；仅 `draft`（草稿/被驳回）可编辑，重提清空原因并重新进入审核；通过时清空原因
+- 运营端：`GET /admin/equipments`、`POST /admin/equipments/:id/approve|reject`（审核中心新增「设备上架」tab，经 `/api/admin/[...path]` 透传）
 
 ### `/(portal)/terms|privacy|resource-listing-rules|resource-usage-rules` 协议页 ✅
 - 静态正文，无后端接口；版本号 `2026-09-06.1` 随表单提交（见 [legal-consent-api.md](legal-consent-api.md)）
@@ -67,7 +84,7 @@
 ## 三、买家控制台 `/console/buyer/*`
 
 ### `/checkout` 下单 ✅
-- `GET /trading-config`（交易开关、动态费率；错误时不可下单）；`GET /products/:id`（回显）+ `POST /orders` `{product_id, quantity, duration(周期数), compliance_agreed:true, compliance_version}`
+- `GET /trading-config`（需登录，经 `/api/market-proxy/trading-config`；交易开关、动态费率；错误时不可下单）；`GET /products/:id`（回显，同上经代理）+ `POST /orders` `{product_id, quantity, duration(周期数), compliance_agreed:true, compliance_version}`
 - 下单被拦截的两种业务错误要区分展示：库存不足 / 「供应方算力节点已全部离线」(health=offline)
 
 ### `/console/buyer/orders` + `[orderId]` 订单 ✅
@@ -148,7 +165,7 @@
 ## 六、暂无后端支撑的页面（前端占位，勿接假数据上生产）
 
 - `/console/funder`、`/admin/tokens`（Token 工厂板块，后端未排期）
-- `/console/vendor`：后端已有设备市场接口（`/equipments*`、`/vendor/equipments*`、`/vendor/leads`、`/leads/:id/quote|close`、`/commissions`），前端整块未接 ⬜
+- 居间线索跟进界面（`/vendor/leads`、`/leads/:id/quote|close`、`/commissions`，现属 supplier 权限）仍未接 ⬜；vendor 角色已从鉴权与前端路由中退役（DB 枚举保留兼容）
 - `/console/supplier/analytics`：无专用统计接口，可先用 settlements/summary + orders 拼
 
 ---

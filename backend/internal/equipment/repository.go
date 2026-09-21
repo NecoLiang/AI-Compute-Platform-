@@ -30,8 +30,12 @@ type EquipmentProduct struct {
 	Description     string    `db:"description" json:"description"`
 	Images          *string   `db:"images" json:"images"`
 	Status          string    `db:"status" json:"status"`
+	RejectedReason  string    `db:"rejected_reason" json:"rejected_reason"`
 	CreatedAt       time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt       time.Time `db:"updated_at" json:"updated_at"`
+	// VendorName 供应方企业名, 仅由带 enterprises JOIN 的买家侧查询填充(SELECT * 路径下为空);
+	// 对买家输出前必须经 masking.MaskCompanyName 脱敏。
+	VendorName string `db:"vendor_name" json:"-"`
 }
 
 type EquipmentInquiry struct {
@@ -100,6 +104,49 @@ func (r *Repository) UpdateProductStatus(id int64, status string) error {
 	return nil
 }
 
+// ReviewProduct 运营审核落库: 通过时清空驳回原因, 驳回时记录原因供供应方修改重提参考。
+func (r *Repository) ReviewProduct(id int64, status, reason string) error {
+	res, err := r.db.Exec("UPDATE equipment_products SET status=?, rejected_reason=? WHERE id=?", status, reason, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrProductNotFound
+	}
+	return nil
+}
+
+// ResubmitProduct 供应方修改重提: 仅草稿/被驳回(draft)可改, 重提后回 pending 重新审核并清空驳回原因。
+// 与算力商品 ResubmitProduct 同口径, WHERE 同时锁 vendor_id 防越权。
+func (r *Repository) ResubmitProduct(id int64, p *EquipmentProduct) error {
+	res, err := r.db.Exec(`UPDATE equipment_products SET title=?, equipment_type=?, brand=?, model=?,
+		condition_type=?, manufacture_year=?, usage_desc=?, quantity=?, unit_price=?, price_negotiable=?,
+		region=?, description=?, images=?, status='pending', rejected_reason=''
+		WHERE id=? AND vendor_id=? AND status='draft'`,
+		p.Title, p.EquipmentType, p.Brand, p.Model, p.ConditionType, p.ManufactureYear, p.UsageDesc,
+		p.Quantity, p.UnitPrice, p.PriceNegotiable, p.Region, p.Description, p.Images, id, p.VendorID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		// 区分"不存在/不属于本人"与"状态不允许": 前者按不存在处理(防枚举), 后者给出明确提示。
+		var status string
+		if err := r.db.Get(&status, "SELECT status FROM equipment_products WHERE id=? AND vendor_id=?", id, p.VendorID); err != nil {
+			return ErrProductNotFound
+		}
+		return invalid("status", "只有草稿/被驳回(draft)状态的商品可以修改重提")
+	}
+	return nil
+}
+
 // UpdateVendorProductStatus 限定 vendor 只能改自己的商品, 防越权。
 func (r *Repository) UpdateVendorProductStatus(id, vendorID int64, status string) error {
 	res, err := r.db.Exec("UPDATE equipment_products SET status=? WHERE id=? AND vendor_id=?", status, id, vendorID)
@@ -142,28 +189,29 @@ func (f *ProductFilter) Normalize() {
 	}
 }
 
+// buildWhere 列名带 p. 前缀: 买家侧查询 JOIN enterprises 后, status 等列名会歧义。
 func (f *ProductFilter) buildWhere(base string) (string, []interface{}) {
 	where := base
 	args := []interface{}{}
 	if f.EquipmentType != "" {
-		where += " AND equipment_type=?"
+		where += " AND p.equipment_type=?"
 		args = append(args, f.EquipmentType)
 	}
 	if f.ConditionType != "" {
-		where += " AND condition_type=?"
+		where += " AND p.condition_type=?"
 		args = append(args, f.ConditionType)
 	}
 	if f.Region != "" {
-		where += " AND region=?"
+		where += " AND p.region=?"
 		args = append(args, f.Region)
 	}
 	// 面议商品 unit_price=0, 落入价格区间筛选时应被排除
 	if f.PriceMin > 0 {
-		where += " AND price_negotiable=0 AND unit_price >= ?"
+		where += " AND p.price_negotiable=0 AND p.unit_price >= ?"
 		args = append(args, f.PriceMin)
 	}
 	if f.PriceMax > 0 {
-		where += " AND price_negotiable=0 AND unit_price <= ?"
+		where += " AND p.price_negotiable=0 AND p.unit_price <= ?"
 		args = append(args, f.PriceMax)
 	}
 	return where, args
@@ -172,28 +220,46 @@ func (f *ProductFilter) buildWhere(base string) (string, []interface{}) {
 func (f *ProductFilter) orderBy() string {
 	switch f.Sort {
 	case "price_asc":
-		return "ORDER BY unit_price ASC"
+		return "ORDER BY p.unit_price ASC"
 	case "price_desc":
-		return "ORDER BY unit_price DESC"
+		return "ORDER BY p.unit_price DESC"
 	default:
-		return "ORDER BY created_at DESC"
+		return "ORDER BY p.created_at DESC"
 	}
 }
 
+// vendorNameJoin 买家侧查询带出供应方企业名(与算力市场 supplier_name 同口径), 输出前由 handler 脱敏。
+const vendorNameJoin = `SELECT p.*, COALESCE(e.name,'') AS vendor_name
+	FROM equipment_products p
+	LEFT JOIN enterprises e ON e.user_id=p.vendor_id AND e.status='verified'`
+
 func (r *Repository) ListProducts(f ProductFilter) ([]EquipmentProduct, int64, error) {
 	f.Normalize()
-	where, args := f.buildWhere("WHERE status='active'")
+	where, args := f.buildWhere("WHERE p.status='active'")
 
 	var total int64
-	if err := r.db.Get(&total, "SELECT COUNT(*) FROM equipment_products "+where, args...); err != nil {
+	if err := r.db.Get(&total, "SELECT COUNT(*) FROM equipment_products p "+where, args...); err != nil {
 		return nil, 0, err
 	}
 
-	query := fmt.Sprintf("SELECT * FROM equipment_products %s %s LIMIT ? OFFSET ?", where, f.orderBy())
+	query := fmt.Sprintf("%s %s %s LIMIT ? OFFSET ?", vendorNameJoin, where, f.orderBy())
 	args = append(args, f.PageSize, (f.Page-1)*f.PageSize)
 	var list []EquipmentProduct
 	err := r.db.Select(&list, query, args...)
 	return list, total, err
+}
+
+// GetProductWithVendor 买家侧详情: 附带供应方企业名(输出前脱敏)。
+func (r *Repository) GetProductWithVendor(id int64) (*EquipmentProduct, error) {
+	var p EquipmentProduct
+	err := r.db.Get(&p, vendorNameJoin+" WHERE p.id = ?", id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
 }
 
 func (r *Repository) GetProductsByVendor(vendorID int64, status string, page, pageSize int) ([]EquipmentProduct, int64, error) {

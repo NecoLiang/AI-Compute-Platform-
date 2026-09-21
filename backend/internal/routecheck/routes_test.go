@@ -55,11 +55,8 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 
 	public := r.Group("/api/v1")
 	authH.RegisterPublicRoutes(public)
-	computeH.RegisterPublicRoutes(public)
-	equipmentH.RegisterPublicRoutes(public)
 	blockchainH.RegisterRoutes(public)
 	schedulerH.RegisterNodeRoutes(public)
-	catalogH.RegisterPublicRoutes(public)
 
 	protected := r.Group("/api/v1")
 	authH.RegisterProtectedRoutes(protected)
@@ -67,6 +64,9 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	intermediaryH.RegisterAuthenticatedRoutes(protected)
 	collateralH.RegisterAuthenticatedRoutes(protected)
 	computeH.RegisterAuthenticatedRoutes(protected)
+	computeH.RegisterMarketRoutes(protected)
+	equipmentH.RegisterMarketRoutes(protected)
+	catalogH.RegisterCatalogRoutes(protected)
 
 	buyer := r.Group("/api/v1")
 	computeH.RegisterBuyerRoutes(buyer)

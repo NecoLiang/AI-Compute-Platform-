@@ -3,8 +3,12 @@ package equipment
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"strings"
 	"time"
+
+	"tokenfactory/internal/intermediary"
 )
 
 // ===== Validation =====
@@ -34,7 +38,12 @@ const (
 	MaxRegionLen    = 32
 	MaxContactName  = 64
 	MaxContactPhone = 20
+	// MaxInquiryMessageLen 与 CRM 线索 description(≤2000) 同口径, 保证询价可完整镜像为线索。
+	MaxInquiryMessageLen = 2000
 )
+
+// inquiryPhone 与 intermediary 留资口径一致, 保证询价镜像成 CRM 线索时不因号码格式被拒。
+var inquiryPhone = regexp.MustCompile(`^\+?[0-9 -]{6,20}$`)
 
 var validEquipmentTypes = map[string]bool{
 	"gpu_server": true, "storage": true, "network": true,
@@ -165,8 +174,11 @@ func ValidateCreateInquiry(req CreateInquiryReq) error {
 	if phone == "" {
 		return invalid("contact_phone", "联系电话不能为空")
 	}
-	if len(phone) > MaxContactPhone {
-		return invalid("contact_phone", fmt.Sprintf("联系电话不能超过 %d 个字符", MaxContactPhone))
+	if len(phone) > MaxContactPhone || !inquiryPhone.MatchString(phone) {
+		return invalid("contact_phone", "请填写有效的联系电话")
+	}
+	if len([]rune(req.Message)) > MaxInquiryMessageLen {
+		return invalid("message", fmt.Sprintf("留言不能超过 %d 个字符", MaxInquiryMessageLen))
 	}
 	if req.Quantity <= 0 {
 		return invalid("quantity", "询价数量必须大于 0")
@@ -197,36 +209,44 @@ func NormalizeStatusFilter(status string) string {
 
 // ===== Service =====
 
+// LeadRecorder 把设备询价镜像为 CRM 线索(leads 表), 使询价进入
+// 运营认领→报价→成交→佣金 的既有居间跟进流水线(与算力询价同口径)。
+type LeadRecorder interface {
+	CreateLead(l *intermediary.Lead) (int64, error)
+}
+
 type Service struct {
-	repo *Repository
+	repo  *Repository
+	leads LeadRecorder
 	// now 可注入, 便于测试年份边界; 生产环境为 time.Now。
 	now func() time.Time
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo, now: time.Now}
+// NewService leads 可为 nil(仅测试场景): 此时询价只落 equipment_inquiries, 不镜像线索。
+func NewService(repo *Repository, leads LeadRecorder) *Service {
+	return &Service{repo: repo, leads: leads, now: time.Now}
 }
 
-// CreateProduct 发布设备商品。发布后状态为 pending, 需运营审核才 active(与算力商品一致)。
-func (s *Service) CreateProduct(vendorID int64, req CreateProductReq) (int64, error) {
+// buildProduct 校验并组装商品实体, 发布与修改重提共用。
+func (s *Service) buildProduct(vendorID int64, req CreateProductReq) (*EquipmentProduct, error) {
 	if vendorID <= 0 {
-		return 0, invalid("vendor_id", "未识别到发布人身份")
+		return nil, invalid("vendor_id", "未识别到发布人身份")
 	}
 	if err := ValidateCreateProduct(req, s.now().Year()); err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	var imagesJSON *string
 	if len(req.Images) > 0 {
 		b, err := json.Marshal(req.Images)
 		if err != nil {
-			return 0, invalid("images", "图片列表格式不合法")
+			return nil, invalid("images", "图片列表格式不合法")
 		}
 		str := string(b)
 		imagesJSON = &str
 	}
 
-	p := &EquipmentProduct{
+	return &EquipmentProduct{
 		VendorID:        vendorID,
 		Title:           strings.TrimSpace(req.Title),
 		EquipmentType:   req.EquipmentType,
@@ -241,12 +261,29 @@ func (s *Service) CreateProduct(vendorID int64, req CreateProductReq) (int64, er
 		Region:          req.Region,
 		Description:     req.Description,
 		Images:          imagesJSON,
+	}, nil
+}
+
+// CreateProduct 发布设备商品。发布后状态为 pending, 需运营审核才 active(与算力商品一致)。
+func (s *Service) CreateProduct(vendorID int64, req CreateProductReq) (int64, error) {
+	p, err := s.buildProduct(vendorID, req)
+	if err != nil {
+		return 0, err
 	}
 	return s.repo.CreateProduct(p)
 }
 
+// UpdateProduct 供应方修改重提: 仅 draft(草稿/被驳回)可改, 每次重提都回到 pending 由运营重新审核。
+func (s *Service) UpdateProduct(vendorID, id int64, req CreateProductReq) error {
+	p, err := s.buildProduct(vendorID, req)
+	if err != nil {
+		return err
+	}
+	return s.repo.ResubmitProduct(id, p)
+}
+
 func (s *Service) GetProduct(id int64) (*EquipmentProduct, error) {
-	p, err := s.repo.GetProductByID(id)
+	p, err := s.repo.GetProductWithVendor(id)
 	if err != nil { return nil, err }
 	// 公开详情只放行在售: 与算力商品口径一致, 防止枚举 id 读取草稿/驳回/下架条目。
 	if p == nil || p.Status != "active" { return nil, ErrProductNotFound }
@@ -271,7 +308,19 @@ func (s *Service) ListAllProducts(status string, page, pageSize int) ([]Equipmen
 	return s.repo.ListAllProducts(NormalizeStatusFilter(status), page, pageSize)
 }
 
-// ApproveProduct 运营审核通过, pending -> active。
+// MaxRejectReasonLen 与 rejected_reason VARCHAR(256) 对齐。
+const MaxRejectReasonLen = 256
+
+// ValidateRejectReason 驳回必须给出可执行的原因, 供应方据此修改重提。
+func ValidateRejectReason(reason string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len([]rune(reason)) > MaxRejectReasonLen {
+		return "", invalid("reason", fmt.Sprintf("请填写 1–%d 字的驳回原因", MaxRejectReasonLen))
+	}
+	return reason, nil
+}
+
+// ApproveProduct 运营审核通过, pending -> active, 同时清空历史驳回原因。
 func (s *Service) ApproveProduct(id int64) error {
 	p, err := s.repo.GetProductByID(id)
 	if err != nil { return err }
@@ -279,18 +328,23 @@ func (s *Service) ApproveProduct(id int64) error {
 	if p.Status != "pending" {
 		return invalid("status", "只有待审核(pending)的商品可以审核通过")
 	}
-	return s.repo.UpdateProductStatus(id, "active")
+	return s.repo.ReviewProduct(id, "active", "")
 }
 
-// RejectProduct 运营审核驳回, pending -> draft(回到厂商草稿箱可修改后重提)。
-func (s *Service) RejectProduct(id int64) error {
+// RejectProduct 运营审核驳回, pending -> draft(回到供应方草稿箱, 修改重提后再次进入审核)。
+// 驳回原因落库, 供应方可见。
+func (s *Service) RejectProduct(id int64, reason string) error {
+	reason, err := ValidateRejectReason(reason)
+	if err != nil {
+		return err
+	}
 	p, err := s.repo.GetProductByID(id)
 	if err != nil { return err }
 	if p == nil { return ErrProductNotFound }
 	if p.Status != "pending" {
 		return invalid("status", "只有待审核(pending)的商品可以驳回")
 	}
-	return s.repo.UpdateProductStatus(id, "draft")
+	return s.repo.ReviewProduct(id, "draft", reason)
 }
 
 // CreateInquiry 买家提交询价。设备不接在线支付, 询价即撮合线索。
@@ -308,7 +362,7 @@ func (s *Service) CreateInquiry(buyerID, equipmentID int64, req CreateInquiryReq
 	if err := ValidateInquiryQuantity(req.Quantity, p.Quantity); err != nil {
 		return 0, err
 	}
-	return s.repo.CreateInquiry(&EquipmentInquiry{
+	inquiryID, err := s.repo.CreateInquiry(&EquipmentInquiry{
 		EquipmentID:  equipmentID,
 		BuyerID:      buyerID,
 		Quantity:     req.Quantity,
@@ -316,6 +370,26 @@ func (s *Service) CreateInquiry(buyerID, equipmentID int64, req CreateInquiryReq
 		ContactPhone: strings.TrimSpace(req.ContactPhone),
 		Message:      req.Message,
 	})
+	if err != nil {
+		return 0, err
+	}
+	// 询价镜像为 equipment 线索: 失败不影响询价本身(厂商侧仍可见), 只记录日志由运营补录。
+	if s.leads != nil {
+		description := fmt.Sprintf("设备商品 #%d · %s · %s · 询价数量 %d · 供应方 #%d · 买家 #%d\n%s",
+			p.ID, p.Title, p.Region, req.Quantity, p.VendorID, buyerID, strings.TrimSpace(req.Message))
+		if runes := []rune(description); len(runes) > MaxInquiryMessageLen {
+			description = string(runes[:MaxInquiryMessageLen])
+		}
+		if _, leadErr := s.leads.CreateLead(&intermediary.Lead{
+			Type: "equipment", CreatedBy: &buyerID, Source: "equipment_market",
+			ContactName:  strings.TrimSpace(req.ContactName),
+			ContactPhone: strings.TrimSpace(req.ContactPhone),
+			Description:  description,
+		}); leadErr != nil {
+			slog.Error("mirror equipment inquiry to CRM lead", "inquiry_id", inquiryID, "error", leadErr)
+		}
+	}
+	return inquiryID, nil
 }
 
 func (s *Service) ListBuyerInquiries(buyerID int64, page, pageSize int) ([]EquipmentInquiry, int64, error) {

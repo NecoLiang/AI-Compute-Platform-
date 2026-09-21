@@ -26,7 +26,10 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
+// RegisterMarketRoutes 算力市场浏览与交易配置。
+// 2026-09-21 起注册到需登录路由组: 商品/价格/库存是核心业务数据, 接口层收口防匿名爬取,
+// 与前端 /market 的 middleware 门禁构成双层(前端经 BFF /api/market-proxy 代理取数)。
+func (h *Handler) RegisterMarketRoutes(r *gin.RouterGroup) {
 	r.GET("/products", h.ListProducts)
 	r.GET("/trading-config", h.GetTradingConfig)
 	r.GET("/products/:id", h.GetProduct)

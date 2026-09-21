@@ -276,3 +276,20 @@ func TestErrToCodeMapping(t *testing.T) {
 	assert.Equal(t, 40001, ErrToCode(invalid("quantity", "数量必须大于 0")))
 	assert.Equal(t, 0, ErrToCode(nil))
 }
+
+// 驳回必须给出可执行原因(落库供供应方修改重提), 空白与超长一律拒绝
+func TestValidateRejectReason(t *testing.T) {
+	reason, err := ValidateRejectReason("  二手设备未填写检测结论  ")
+	assert.NoError(t, err)
+	assert.Equal(t, "二手设备未填写检测结论", reason)
+
+	_, err = ValidateRejectReason("   ")
+	assert.Error(t, err)
+
+	long := make([]rune, MaxRejectReasonLen+1)
+	for i := range long {
+		long[i] = '长'
+	}
+	_, err = ValidateRejectReason(string(long))
+	assert.Error(t, err)
+}

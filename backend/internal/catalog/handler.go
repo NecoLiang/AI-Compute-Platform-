@@ -13,8 +13,9 @@ type Handler struct{ svc *Service }
 
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
-// RegisterPublicRoutes 型号下拉是发布/搜索页的公共基础数据, 不要求登录。
-func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
+// RegisterCatalogRoutes 型号下拉是发布/搜索页的基础数据。
+// 2026-09-21 起全部业务读接口收口到登录后(防匿名爬取), 消费方(市场筛选/发布表单)均在登录场景。
+func (h *Handler) RegisterCatalogRoutes(r *gin.RouterGroup) {
 	r.GET("/gpu-catalog", h.PublicList)
 }
 

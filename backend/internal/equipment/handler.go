@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"tokenfactory/pkg/errcode"
+	"tokenfactory/pkg/masking"
 	"tokenfactory/pkg/response"
 
 	"github.com/gin-gonic/gin"
@@ -17,7 +18,9 @@ func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }
 
-func (h *Handler) RegisterPublicRoutes(r *gin.RouterGroup) {
+// RegisterMarketRoutes 设备市场浏览: 注册到需登录的路由组——
+// 与算力市场同口径, 市场列表/详情仅对登录用户开放(前端 middleware + 后端 AuthRequired 双层)。
+func (h *Handler) RegisterMarketRoutes(r *gin.RouterGroup) {
 	r.GET("/equipments", h.ListEquipments)
 	r.GET("/equipments/:id", h.GetEquipment)
 }
@@ -32,6 +35,7 @@ func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
 func (h *Handler) RegisterVendorRoutes(r *gin.RouterGroup) {
 	r.GET("/vendor/equipments", h.MyEquipments)
 	r.POST("/vendor/equipments", h.CreateEquipment)
+	r.PUT("/vendor/equipments/:id", h.UpdateEquipment)
 	r.PATCH("/vendor/equipments/:id/offline", h.OfflineEquipment)
 	r.GET("/vendor/equipments/inquiries", h.VendorInquiries)
 }
@@ -61,7 +65,7 @@ func (h *Handler) ListEquipments(c *gin.Context) {
 	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
 	result := make([]gin.H, 0, len(list))
 	for i := range list {
-		result = append(result, productToJSON(&list[i]))
+		result = append(result, buyerProductJSON(&list[i]))
 	}
 	response.SuccessPage(c, result, total, f.Page, f.PageSize)
 }
@@ -71,7 +75,7 @@ func (h *Handler) GetEquipment(c *gin.Context) {
 	if err != nil || id <= 0 { response.Error(c, errcode.ParamInvalid, "设备ID不合法"); return }
 	p, err := h.svc.GetProduct(id)
 	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
-	response.Success(c, productToJSON(p))
+	response.Success(c, buyerProductJSON(p))
 }
 
 // ---- Buyer ----
@@ -107,7 +111,7 @@ func (h *Handler) MyEquipments(c *gin.Context) {
 	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
 	result := make([]gin.H, 0, len(list))
 	for i := range list {
-		result = append(result, productToJSON(&list[i]))
+		result = append(result, vendorProductJSON(&list[i]))
 	}
 	response.SuccessPage(c, result, total, page, pageSize)
 }
@@ -117,6 +121,18 @@ func (h *Handler) CreateEquipment(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
 	id, err := h.svc.CreateProduct(c.GetInt64("user_id"), req)
 	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
+	response.Success(c, gin.H{"id": id, "status": "pending"})
+}
+
+// UpdateEquipment 供应方修改重提: 仅 draft(草稿/被驳回)可改, 重提后回 pending 重新审核。
+func (h *Handler) UpdateEquipment(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 { response.Error(c, errcode.ParamInvalid, "设备ID不合法"); return }
+	var req CreateProductReq
+	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
+	if err := h.svc.UpdateProduct(c.GetInt64("user_id"), id, req); err != nil {
+		response.Error(c, ErrToCode(err), err.Error()); return
+	}
 	response.Success(c, gin.H{"id": id, "status": "pending"})
 }
 
@@ -146,7 +162,7 @@ func (h *Handler) AdminListEquipments(c *gin.Context) {
 	if err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
 	result := make([]gin.H, 0, len(list))
 	for i := range list {
-		result = append(result, productToJSON(&list[i]))
+		result = append(result, vendorProductJSON(&list[i]))
 	}
 	response.SuccessPage(c, result, total, page, pageSize)
 }
@@ -165,20 +181,18 @@ func (h *Handler) RejectEquipment(c *gin.Context) {
 		Reason string `json:"reason" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil { response.Error(c, errcode.ParamInvalid, err.Error()); return }
-	if err := h.svc.RejectProduct(id); err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
-	// NOTE: equipment_products 表没有 rejected_reason 字段, 驳回原因当前不落库。
-	// 若需要留痕, 需在后续迁移中加列 (或复用 audit_logs 由运营侧统一写入)。
+	if err := h.svc.RejectProduct(id, req.Reason); err != nil { response.Error(c, ErrToCode(err), err.Error()); return }
 	response.Success(c, nil)
 }
 
-func productToJSON(p *EquipmentProduct) gin.H {
+func baseProductJSON(p *EquipmentProduct) gin.H {
 	var images []string
 	if p.Images != nil && *p.Images != "" {
 		// 忽略解析失败: 老数据/脏数据不应导致整个列表 500
 		_ = json.Unmarshal([]byte(*p.Images), &images)
 	}
 	return gin.H{
-		"id": p.ID, "vendor_id": p.VendorID, "title": p.Title,
+		"id": p.ID, "title": p.Title,
 		"equipment_type": p.EquipmentType, "brand": p.Brand, "model": p.Model,
 		"condition_type": p.ConditionType, "manufacture_year": p.ManufactureYear,
 		"usage_desc": p.UsageDesc, "quantity": p.Quantity,
@@ -189,4 +203,19 @@ func productToJSON(p *EquipmentProduct) gin.H {
 		"online_payment_supported": false,
 		"trade_mode":               "inquiry_only",
 	}
+}
+
+// buyerProductJSON 买家侧信息隔离: 不下发 vendor_id, 供应方企业名脱敏(北京***有限公司)。
+func buyerProductJSON(p *EquipmentProduct) gin.H {
+	j := baseProductJSON(p)
+	j["vendor_name"] = masking.MaskCompanyName(p.VendorName)
+	return j
+}
+
+// vendorProductJSON 供应方本人与运营端视角: 含 vendor_id 与驳回原因。
+func vendorProductJSON(p *EquipmentProduct) gin.H {
+	j := baseProductJSON(p)
+	j["vendor_id"] = p.VendorID
+	j["rejected_reason"] = p.RejectedReason
+	return j
 }

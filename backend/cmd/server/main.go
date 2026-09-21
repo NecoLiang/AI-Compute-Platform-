@@ -94,7 +94,7 @@ func main() {
 	intermediaryRepo := intermediary.NewRepository(sqlDB)
 	intermediarySvc := intermediary.NewService(intermediaryRepo)
 	equipmentRepo := equipment.NewRepository(sqlDB)
-	equipmentSvc := equipment.NewService(equipmentRepo)
+	equipmentSvc := equipment.NewService(equipmentRepo, intermediaryRepo)
 	invoiceRepo := invoice.NewRepository(sqlDB)
 	invoiceSvc := invoice.NewService(invoiceRepo, sqlDB)
 	ticketRepo := ticket.NewRepository(sqlDB)
@@ -169,16 +169,14 @@ func main() {
 		response.Success(c, gin.H{"status": "ok"})
 	})
 
-	// Public API
+	// Public API —— 只保留三类无法要求用户登录的入口:
+	// ① 注册/登录等认证入口; ② 区块链存证第三方查验(产品承诺"不依赖平台自说自话");
+	// ③ 节点心跳(机器上报, 走自有签名)。业务数据读接口一律收口到登录后, 防匿名爬取。
 	authHandler := auth.NewHandler(authSvc, capVerifier)
 	public := r.Group("/api/v1")
 	authHandler.RegisterPublicRoutes(public)
-	compute.NewHandler(computeSvc).RegisterPublicRoutes(public)
-
-	equipment.NewHandler(equipmentSvc).RegisterPublicRoutes(public)
 	blockchain.NewHandler(blockchainSvc).RegisterRoutes(public)
 	scheduler.NewHandler(schedulerSvc).RegisterNodeRoutes(public)
-	catalog.NewHandler(catalogSvc).RegisterPublicRoutes(public)
 
 	// Authenticated API
 	protected := r.Group("/api/v1")
@@ -189,6 +187,10 @@ func main() {
 	intermediary.NewHandler(intermediarySvc).RegisterAuthenticatedRoutes(protected)
 	intermediary.NewCollateralHandler(collateralSvc).RegisterAuthenticatedRoutes(protected)
 	compute.NewHandler(computeSvc).RegisterAuthenticatedRoutes(protected)
+	// 市场浏览(算力/设备)与基础数据需登录: 与前端 middleware 门禁双层, 接口层防匿名爬取
+	compute.NewHandler(computeSvc).RegisterMarketRoutes(protected)
+	equipment.NewHandler(equipmentSvc).RegisterMarketRoutes(protected)
+	catalog.NewHandler(catalogSvc).RegisterCatalogRoutes(protected)
 
 	// Buyer API
 	buyer := r.Group("/api/v1")
@@ -214,8 +216,11 @@ func main() {
 	scheduler.NewHandler(schedulerSvc).RegisterSupplierRoutes(supplier)
 
 	// Vendor API
+	// 平台实际只有三种业务角色(供应方 supplier / 采购方 buyer / 运营方 operator|admin)。
+	// vendor 是 v1.0 需求稿"设备厂商"的遗留枚举, 无入驻通道也不再参与鉴权——
+	// 设备发布/居间线索跟进统一归 supplier。
 	vendor := r.Group("/api/v1")
-	vendor.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo), mw.RBAC("vendor"))
+	vendor.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo), mw.RBAC("supplier"))
 	intermediary.NewHandler(intermediarySvc).RegisterVendorRoutes(vendor)
 	equipment.NewHandler(equipmentSvc).RegisterVendorRoutes(vendor)
 
