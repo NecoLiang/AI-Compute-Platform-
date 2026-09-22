@@ -124,7 +124,7 @@ func (h *Handler) CreateEquipment(c *gin.Context) {
 	response.Success(c, gin.H{"id": id, "status": "pending"})
 }
 
-// UpdateEquipment 供应方修改重提: 仅 draft(草稿/被驳回)可改, 重提后回 pending 重新审核。
+// UpdateEquipment 供应方修改重提: draft(草稿/被驳回)与 offline(已下架)可改, 重提后回 pending 重新审核。
 func (h *Handler) UpdateEquipment(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 { response.Error(c, errcode.ParamInvalid, "设备ID不合法"); return }

@@ -911,6 +911,14 @@ func (s *Service) OfflineProduct(id int64) error {
 	return s.repo.UpdateProductStatus(id, "offline")
 }
 
+// SupplierOfflineProduct 供给方主动下架自己的商品(区别于运营下架的 OfflineProduct)。
+func (s *Service) SupplierOfflineProduct(supplierID, id int64) error {
+	if supplierID <= 0 {
+		return fmt.Errorf("未识别到操作人身份")
+	}
+	return s.repo.SupplierOfflineProduct(id, supplierID)
+}
+
 // ===== Orders (T-015, T-016) =====
 
 type PlaceOrderReq struct {

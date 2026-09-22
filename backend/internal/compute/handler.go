@@ -47,6 +47,7 @@ func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
 	r.GET("/supplier/products/summary", h.GetMyProductsGrouped)
 	r.POST("/supplier/products", h.CreateProduct)
 	r.PUT("/supplier/products/:id", h.ResubmitProduct)
+	r.PATCH("/supplier/products/:id/offline", h.SupplierOfflineProduct)
 	r.GET("/supplier/orders", h.ListSupplierOrders)
 	r.GET("/supplier/resource-syncs", h.ListResourceSyncs)
 	r.POST("/supplier/resource-syncs/passive", h.PassiveResourceSync)
@@ -698,6 +699,20 @@ func (h *Handler) ResubmitProduct(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"id": id})
+}
+
+// SupplierOfflineProduct 供给方主动下架自己的商品; 下架后可修改并重提(重新审核)。
+func (h *Handler) SupplierOfflineProduct(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, "商品编号无效")
+		return
+	}
+	if err := h.svc.SupplierOfflineProduct(c.GetInt64("user_id"), id); err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, nil)
 }
 
 func (h *Handler) OfflineProduct(c *gin.Context) {

@@ -44,7 +44,7 @@
 
 ### `/leasing` `/broker/equipment` `/broker/construction` 三板块留资页 ✅（2026-09-20 上线，2026-09-21 改为登录后访问）
 - `POST /leads`（需登录，经 BFF `/api/leads` 代理）——字段与枚举档位见 [intermediary-api.md](intermediary-api.md)；融资租赁页 `company_name` 必填并展示持牌资方合规声明
-- 提交成功返回 `{id}`，页面显示登记编号；运营在 `/admin/crm` 看到企业/来源/预算期限/需求全量信息
+- 提交成功返回 `{id}`（页面不展示编号，只提示平台将联系）；运营在 `/admin/crm` 看到企业/来源/预算期限/需求全量信息（列表精简，点「详情」弹窗看全量）
 - `/broker/equipment` 已重设计为「设备整包销售」板块页（场景选择 + 留资 + 供应方入驻引导），并跳转独立设备市场
 
 ### `/equipment-market` 设备市场 ✅（2026-09-21 上线，与 `/market` 平级；浏览需登录：middleware + 后端 AuthRequired 双层）
@@ -119,7 +119,7 @@
 - `GET/POST /supplier/qualifications`（JSON 提交附件链接与可选 `expires_at` 日期；读取剩余天数、临期/过期状态）
 
 ### `products|centers|colocation` 发布与管理 ✅
-- `GET /supplier/products`、`GET /supplier/products/summary`、`POST /supplier/products`、`PUT /supplier/products/:id`(驳回重提)
+- `GET /supplier/products`、`GET /supplier/products/summary`、`POST /supplier/products`、`PUT /supplier/products/:id`(驳回/下架后修改重提，重提回 pending 重新审核)、`PATCH /supplier/products/:id/offline`(供给方主动下架，在售/待审核可下)——设备商品同口径（`/vendor/equipments*`）
 - 发布必带 `compliance_agreed:true, compliance_version`；型号下拉 `GET /gpu-catalog`（字段见 [gpu-catalog-api.md](gpu-catalog-api.md)，`secure_certified=true` 展示「安可认证」徽章）
 - 被驳回商品展示 `rejected_reason`
 
@@ -149,7 +149,7 @@
 |---|---|---|
 | `/admin/reviews` | `GET /admin/audits/qualifications[?status=all]`、`POST .../:id/approve\|reject`、`GET .../:id/document`(文件)、`POST /admin/audits/products/:id/approve\|reject` | ✅ |
 | `/admin/products` | `GET /admin/products?status`、`PATCH /admin/products/:id/offline` | ✅ |
-| `/admin/orders` | `GET /admin/orders`、`PATCH /admin/orders/:id/status`（改 frozen 会自动吊销凭证+违规上链存证） | ✅ |
+| `/admin/orders` | `GET /admin/orders`（2026-09-22 起下发 `buyer_name`(企业名/手机号)、`product_gpu_model`、`product_type`，列表用可读名称替代 UID/#id）、`PATCH /admin/orders/:id/status`（改 frozen 会自动吊销凭证+违规上链存证） | ✅ |
 | `/admin/finance` | `GET /admin/payment/list`、`GET /admin/invoices?status`、`POST /admin/invoices/:id/issue`(FormData: pdf+tax_invoice_no)、`POST /admin/invoices/:id/reject`；`GET /admin/payment/reconcile` ⬜ | ✅ |
 | `/admin/tickets` | `GET /admin/tickets`、`POST /admin/tickets/:id/claim\|resolve\|close`；`GET /admin/tickets/:id` + `POST .../messages` ⬜（详情/回复待接） | ✅ |
 | `/admin/crm` | `GET /admin/leads`、`POST /admin/leads/:id/assign` | ✅ |

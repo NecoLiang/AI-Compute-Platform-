@@ -273,7 +273,7 @@ func (s *Service) CreateProduct(vendorID int64, req CreateProductReq) (int64, er
 	return s.repo.CreateProduct(p)
 }
 
-// UpdateProduct 供应方修改重提: 仅 draft(草稿/被驳回)可改, 每次重提都回到 pending 由运营重新审核。
+// UpdateProduct 供应方修改重提: draft(草稿/被驳回)与 offline(已下架)可改, 每次重提都回到 pending 由运营重新审核。
 func (s *Service) UpdateProduct(vendorID, id int64, req CreateProductReq) error {
 	p, err := s.buildProduct(vendorID, req)
 	if err != nil {

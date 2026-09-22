@@ -505,6 +505,29 @@ func (r *Repository) GetProductByID(id int64) (*Product, error) {
 	return &p, nil
 }
 
+// SupplierOfflineProduct 供给方主动下架自己的商品(在售/待审核均可);
+// 下架后可修改并重新提交, 重提回 pending 重新审核。WHERE 锁 supplier_id 防越权。
+func (r *Repository) SupplierOfflineProduct(id, supplierID int64) error {
+	res, err := r.db.Exec(
+		"UPDATE products SET status='offline' WHERE id=? AND supplier_id=? AND status IN ('active','pending')",
+		id, supplierID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		var status string
+		if err := r.db.Get(&status, "SELECT status FROM products WHERE id=? AND supplier_id=?", id, supplierID); err != nil {
+			return fmt.Errorf("product not found")
+		}
+		return fmt.Errorf("只有在售或待审核的商品可以下架")
+	}
+	return nil
+}
+
 func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error {
 	tx, err := r.db.Beginx()
 	if err != nil {
@@ -516,7 +539,7 @@ func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error
 		memory_spec=?, storage_spec=?, bandwidth_spec=?, delivery_mode=?, pricing_mode=?, unit_price=?,
 		price_negotiable=?, available_hours=?, stock=?, min_order=?, min_duration=?, region=?,
 		compliance_agreed=?, status='pending', rejected_reason=''
-		WHERE id=? AND supplier_id=? AND status='draft'`,
+		WHERE id=? AND supplier_id=? AND status IN ('draft','offline')`,
 		p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
 		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
 		nullString(p.DeliveryMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours,
@@ -1166,11 +1189,14 @@ func (r *Repository) FindCreditScore(supplierID int64) (*CreditScore, error) {
 }
 
 // All orders (admin)
-// AdminOrder 运营订单列表行: 订单 + 供给方公司名(全名, 仅 admin 组可见)。
+// AdminOrder 运营订单列表行: 订单 + 供给方公司名/买家标识/商品标识(全量, 仅 admin 组可见)。
 type AdminOrder struct {
 	Order
-	AllowedActions []string `db:"-" json:"allowed_actions"`
-	SupplierName   string   `db:"supplier_name" json:"supplier_name"`
+	AllowedActions  []string `db:"-" json:"allowed_actions"`
+	SupplierName    string   `db:"supplier_name" json:"supplier_name"`
+	BuyerName       string   `db:"buyer_name" json:"buyer_name"`
+	ProductGpuModel string   `db:"product_gpu_model" json:"product_gpu_model"`
+	ProductType     string   `db:"product_type" json:"product_type"`
 }
 
 // AdminProduct 运营商品列表行: 商品 + 供给方公司名(全名, 仅 admin 组可见)。
@@ -1183,6 +1209,15 @@ type AdminProduct struct {
 const supplierNameByProductExpr = `(SELECT CASE WHEN COALESCE(p2.self_operated,0)=1 THEN '平台自营'
 	ELSE COALESCE(e2.name,'') END FROM products p2 LEFT JOIN enterprises e2 ON e2.user_id=p2.supplier_id
 	WHERE p2.id=orders.product_id) AS supplier_name`
+
+// adminOrderIdentityExpr 运营订单列表的买家与商品标识:
+// 买家显示已认证企业名, 无企业认证时回退手机号(运营内部可见全量, 不脱敏);
+// 商品带出 gpu_model 与 product_type, 由前端拼装可读名称, 替代 UID-x / #id 式展示。
+const adminOrderIdentityExpr = `(SELECT COALESCE(NULLIF(e3.name,''), u3.phone, '') FROM users u3
+	LEFT JOIN enterprises e3 ON e3.user_id=u3.id AND e3.status='verified'
+	WHERE u3.id=orders.buyer_id) AS buyer_name,
+	(SELECT COALESCE(p3.gpu_model,'') FROM products p3 WHERE p3.id=orders.product_id) AS product_gpu_model,
+	(SELECT COALESCE(p3.product_type,'') FROM products p3 WHERE p3.id=orders.product_id) AS product_type`
 
 func (r *Repository) ListAllOrders(status string, page, pageSize int) ([]AdminOrder, int64, error) {
 	where := ""
@@ -1199,7 +1234,8 @@ func (r *Repository) ListAllOrders(status string, page, pageSize int) ([]AdminOr
 	if pageSize <= 0 {
 		pageSize = 20
 	}
-	query := fmt.Sprintf("SELECT %s, %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?", orderColumns, supplierNameByProductExpr, where)
+	query := fmt.Sprintf("SELECT %s, %s, %s FROM orders %s ORDER BY created_at DESC LIMIT ? OFFSET ?",
+		orderColumns, supplierNameByProductExpr, adminOrderIdentityExpr, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []AdminOrder
 	err := r.db.Select(&list, query, args...)

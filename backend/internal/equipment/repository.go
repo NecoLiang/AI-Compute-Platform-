@@ -120,13 +120,13 @@ func (r *Repository) ReviewProduct(id int64, status, reason string) error {
 	return nil
 }
 
-// ResubmitProduct 供应方修改重提: 仅草稿/被驳回(draft)可改, 重提后回 pending 重新审核并清空驳回原因。
-// 与算力商品 ResubmitProduct 同口径, WHERE 同时锁 vendor_id 防越权。
+// ResubmitProduct 供应方修改重提: 草稿/被驳回(draft)与已下架(offline)可改,
+// 重提后回 pending 重新审核并清空驳回原因。与算力商品同口径, WHERE 同时锁 vendor_id 防越权。
 func (r *Repository) ResubmitProduct(id int64, p *EquipmentProduct) error {
 	res, err := r.db.Exec(`UPDATE equipment_products SET title=?, equipment_type=?, brand=?, model=?,
 		condition_type=?, manufacture_year=?, usage_desc=?, quantity=?, unit_price=?, price_negotiable=?,
 		region=?, description=?, images=?, status='pending', rejected_reason=''
-		WHERE id=? AND vendor_id=? AND status='draft'`,
+		WHERE id=? AND vendor_id=? AND status IN ('draft','offline')`,
 		p.Title, p.EquipmentType, p.Brand, p.Model, p.ConditionType, p.ManufactureYear, p.UsageDesc,
 		p.Quantity, p.UnitPrice, p.PriceNegotiable, p.Region, p.Description, p.Images, id, p.VendorID)
 	if err != nil {
@@ -142,7 +142,7 @@ func (r *Repository) ResubmitProduct(id int64, p *EquipmentProduct) error {
 		if err := r.db.Get(&status, "SELECT status FROM equipment_products WHERE id=? AND vendor_id=?", id, p.VendorID); err != nil {
 			return ErrProductNotFound
 		}
-		return invalid("status", "只有草稿/被驳回(draft)状态的商品可以修改重提")
+		return invalid("status", "只有草稿/被驳回或已下架的商品可以修改重提, 在售商品请先下架")
 	}
 	return nil
 }
