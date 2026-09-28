@@ -42,27 +42,7 @@ func (c *LLMClient) Configured() bool {
 
 // ChatJSON 单轮对话, 要求模型输出 JSON, 返回助手消息原文。
 func (c *LLMClient) ChatJSON(ctx context.Context, system, user string) (string, error) {
-	if !c.Configured() {
-		return "", ErrAINotConfigured
-	}
-	reqBody, _ := json.Marshal(map[string]any{
-		"model": c.cfg.Model,
-		"messages": []map[string]string{
-			{"role": "system", "content": system},
-			{"role": "user", "content": user},
-		},
-		"temperature":     0.2,
-		"response_format": map[string]string{"type": "json_object"},
-	})
-	u := strings.TrimSuffix(c.cfg.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
-
-	res, err := c.http.Do(req)
+	res, err := c.openChat(ctx, system, user, false)
 	if err != nil {
 		return "", err
 	}
@@ -71,9 +51,7 @@ func (c *LLMClient) ChatJSON(ctx context.Context, system, user string) (string, 
 	if err != nil {
 		return "", err
 	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return "", fmt.Errorf("模型网关返回 %d", res.StatusCode)
-	}
+
 	var parsed struct {
 		Choices []struct {
 			Message struct {
@@ -88,4 +66,37 @@ func (c *LLMClient) ChatJSON(ctx context.Context, system, user string) (string, 
 		return "", fmt.Errorf("模型未返回内容")
 	}
 	return parsed.Choices[0].Message.Content, nil
+}
+
+func (c *LLMClient) openChat(ctx context.Context, system, user string, stream bool) (*http.Response, error) {
+	if !c.Configured() {
+		return nil, ErrAINotConfigured
+	}
+	reqBody, _ := json.Marshal(map[string]any{
+		"model":  c.cfg.Model,
+		"stream": stream,
+		"messages": []map[string]string{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+		"temperature":     0.2,
+		"response_format": map[string]string{"type": "json_object"},
+	})
+	u := strings.TrimSuffix(c.cfg.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		res.Body.Close()
+		return nil, fmt.Errorf("模型网关返回 %d", res.StatusCode)
+	}
+	return res, nil
 }

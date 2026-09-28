@@ -22,7 +22,7 @@
 ### `/market` 算力市场列表 ✅（浏览需登录：middleware + 后端 AuthRequired 双层）
 - `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|perpetual)` `available_hours` `price_min/price_max`(分) `card_count_min` `sort` `page` `page_size`
 - 商品卡片关键字段：`gpu_model` `card_count` `stock` `unit_price`(分/卡·周期) `pricing_mode` `region` `self_operated` **`health`**(unknown/healthy/degraded/offline —— offline 应显示「暂不可下单」灰态，unknown 不显示徽章)
-- 🆕 **算力评估 agent**（2026-09-28 升级，定位工作台首页智能入口；生产网关已接入，页面由前端团队改版实现）：`POST /market/agent-search`（需登录），入参 `{query: string ≤500字}`；响应字段：
+- 🆕 **算力评估 agent**（2026-09-28 升级，定位工作台首页智能入口；生产网关已接入，页面由前端团队改版实现）：`POST /market/agent-search`（JSON兼容） / `POST /market/agent-search/stream`（流式，需登录），入参 `{query: string ≤500字}`；响应字段：
   - `relevant` false 时只渲染 `reject_reason`
   - `summary` 一句话评估结论（agent 卡标题位）
   - `analysis_steps[] {title, detail}` — 建议打字机逐步展示
