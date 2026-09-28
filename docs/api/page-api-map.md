@@ -22,13 +22,15 @@
 ### `/market` 算力市场列表 ✅（浏览需登录：middleware + 后端 AuthRequired 双层）
 - `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|perpetual)` `available_hours` `price_min/price_max`(分) `card_count_min` `sort` `page` `page_size`
 - 商品卡片关键字段：`gpu_model` `card_count` `stock` `unit_price`(分/卡·周期) `pricing_mode` `region` `self_operated` **`health`**(unknown/healthy/degraded/offline —— offline 应显示「暂不可下单」灰态，unknown 不显示徽章)
-- 🆕 **智能选型入口**（页面待做）：`POST /market/agent-search`（需登录），入参 `{query: string ≤500字}`；响应字段：
+- 🆕 **算力评估 agent**（2026-09-28 升级，定位工作台首页智能入口；生产网关已接入，页面由前端团队改版实现）：`POST /market/agent-search`（需登录），入参 `{query: string ≤500字}`；响应字段：
   - `relevant` false 时只渲染 `reject_reason`
+  - `summary` 一句话评估结论（agent 卡标题位）
   - `analysis_steps[] {title, detail}` — 建议打字机逐步展示
   - `compute_estimate {total_vram_gb(float), per_card_vram_gb, min_cards, compute_class, basis}` — 做成「算力推定卡」，`basis` 含推导公式是核心展示位
-  - `matches[] {product(同商品结构), score(0-100), reasons[]}` — 商品卡+匹配理由
+  - `machine_plans[] {name, gpu_model, cards, nodes, per_card_vram_gb, note}` — 2-3 档可行机器方案（建议配置，不限于在售），与 `matches` 视觉区分
+  - `matches[] {product(同商品结构), score(0-100), reasons[]}` — 平台在售商品卡+匹配理由
   - `note` 无匹配时的提示文案
-  - 错误码：42900 限流(10 次/分)、50000 网关异常；详见 [agent-search-api.md](agent-search-api.md)
+  - 错误码：42900 限流(10 次/分)、50000 网关异常；详见 [agent-search-api.md](agent-search-api.md)；市场页旧「智能选型」按钮随前端改版移除
 
 ### `/market/[productId]` 商品详情 ✅（需登录，客户端经 `/api/market-proxy/products/:id` 取数）
 - `GET /products/:id` — 全字段见 compute-api.md；注意 `machine_count`/`total_pflops_approx`/`power_capacity_kw`/`rack_count` 可为 `null`（colocation/center 专属字段）

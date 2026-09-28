@@ -105,7 +105,7 @@ func main() {
 	computeSvc.SetNotifier(notificationSvc)
 	invoiceSvc.SetNotifier(notificationSvc)
 	ticketSvc.SetNotifier(notificationSvc)
-	// 智能搜索 (市场页智能选型): LLM 只做需求解析, 商品匹配由平台代码确定性完成。
+	// 算力评估 agent (工作台首页智能入口): LLM 做算力推定与机器方案建议, 商品匹配由平台代码确定性完成。
 	llmClient := agentsearch.NewLLMClient(agentsearch.LLMConfig{
 		BaseURL: cfg.AI.BaseURL, APIKey: cfg.AI.APIKey, Model: cfg.AI.Model, TimeoutSeconds: cfg.AI.TimeoutSeconds,
 	})

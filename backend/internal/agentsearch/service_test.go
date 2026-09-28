@@ -43,8 +43,15 @@ func fakeLLM(t *testing.T, parsed string) *LLMClient {
 
 func TestSearch_EndToEnd(t *testing.T) {
 	parsed := `{"relevant":true,"reject_reason":"","purpose":"7B 模型微调",
+		"summary":"7B 全参微调约需 124GB 显存, 建议 8×A100-80G",
 		"compute_estimate":{"total_vram_gb":124,"per_card_vram_gb":80,"min_cards":8,
 		  "compute_class":"训练-中等规模","basis":"7B×16字节×1.1≈124GB, 按80G卡向上取整并按2的幂对齐为8卡"},
+		"machine_plans":[
+		  {"name":"性价比方案","gpu_model":"A100-80G","cards":7.5,"nodes":0,"per_card_vram_gb":80,"note":"训练建议按 2 的幂对齐"},
+		  {"name":"幻觉条目","gpu_model":"","cards":4,"nodes":1,"per_card_vram_gb":80,"note":"无型号应被丢弃"},
+		  {"name":"性能方案","gpu_model":"H100","cards":8,"nodes":1,"per_card_vram_gb":96,"note":"缩短训练周期"},
+		  {"name":"多余方案3","gpu_model":"H200","cards":8,"nodes":1,"per_card_vram_gb":141,"note":"x"},
+		  {"name":"多余方案4","gpu_model":"B200","cards":8,"nodes":1,"per_card_vram_gb":192,"note":"超出上限应被截断"}],
 		"gpu_models":["A100-80G"],"card_count":8,"pricing_mode":"monthly","duration_hint":1,
 		"budget_fen_max":20000000,"region":"华北",
 		"analysis_steps":[{"title":"识别任务类型","detail":"7B 模型微调, 需要大显存"},
@@ -63,6 +70,19 @@ func TestSearch_EndToEnd(t *testing.T) {
 	}
 	if res.ComputeEstimate == nil || res.ComputeEstimate.MinCards != 8 || res.ComputeEstimate.Basis == "" {
 		t.Fatalf("算力推定缺失: %+v", res.ComputeEstimate)
+	}
+	if res.Summary == "" {
+		t.Fatal("评估结论 summary 缺失")
+	}
+	// 机器方案归一化: 幻觉条目(空型号)被丢弃, 超过 3 个截断, 卡数向上取整, nodes 缺省为 1
+	if len(res.MachinePlans) != 3 {
+		t.Fatalf("机器方案应为 3 个(丢 1 截 1): %+v", res.MachinePlans)
+	}
+	if res.MachinePlans[0].Cards != 8 || res.MachinePlans[0].Nodes != 1 {
+		t.Errorf("cards 7.5 应取整为 8、nodes 0 应兜底为 1: %+v", res.MachinePlans[0])
+	}
+	if res.MachinePlans[1].GPUModel != "H100" {
+		t.Errorf("无型号的幻觉条目应被丢弃: %+v", res.MachinePlans)
 	}
 	if len(res.Matches) == 0 || res.Matches[0].Product.ID != 1 {
 		t.Fatalf("应匹配到 A100-80G 商品: %+v", res.Matches)
@@ -99,8 +119,9 @@ func TestSearch_IrrelevantQueryRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if res.Relevant || res.RejectReason == "" || len(res.Matches) != 0 || res.AnalysisSteps != nil {
-		t.Fatalf("无关问题应拒答且不输出分析/商品: %+v", res)
+	if res.Relevant || res.RejectReason == "" || len(res.Matches) != 0 || res.AnalysisSteps != nil ||
+		res.MachinePlans != nil || res.Summary != "" {
+		t.Fatalf("无关问题应拒答且不输出分析/方案/商品: %+v", res)
 	}
 }
 

@@ -36,6 +36,16 @@ func TestLive_ComputeEstimation(t *testing.T) {
 	if ce.TotalVRAMGB < 60 || ce.TotalVRAMGB > 250 {
 		t.Errorf("72B INT8 推理显存推定 %.1fGB 明显失真", ce.TotalVRAMGB)
 	}
+	if res.Summary == "" {
+		t.Error("评估结论 summary 缺失")
+	}
+	if len(res.MachinePlans) == 0 {
+		t.Error("机器方案 machine_plans 缺失")
+	}
+	t.Logf("评估结论: %s", res.Summary)
+	for _, p := range res.MachinePlans {
+		t.Logf("机器方案: %s %d×%s(%gG) nodes=%d — %s", p.Name, p.Cards, p.GPUModel, p.PerCardVRAMGB, p.Nodes, p.Note)
+	}
 	t.Logf("算力推定: %+v", *ce)
 	for _, s := range res.AnalysisSteps {
 		t.Logf("分析: %s - %s", s.Title, s.Detail)
