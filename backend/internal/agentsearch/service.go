@@ -57,13 +57,13 @@ const (
    吞吐/并发/工期要求会放大卡数, 推导时一并考虑并说明。
 5. machine_plans 是给用户的可行机器方案, 2-3 个, 各有取舍(如性价比/性能/国产化), 型号用市面主流在用型号、不限于平台在售:
    每个方案的 cards × per_card_vram_gb 必须覆盖 total_vram_gb; nodes 按单机 8 卡常识折算; note 一句话说明该方案的适用场景与取舍。
-6. summary 是一句话评估结论(≤60字): 概括任务的算力量级与首选方案, 如"72B INT8 推理约需 94GB 显存, 建议 2×A100-80G 起步"。
+6. 必须按 relevant、summary、其他字段的顺序输出, 便于流式展示结论。summary 是一句话评估结论(≤60字): 概括任务的算力量级与首选方案, 如"72B INT8 推理约需 94GB 显存, 建议 2×A100-80G 起步"。
 7. analysis_steps 是展示给用户的分析过程: 3-5 步, 每步一句话, 专业克制, 体现
    「理解业务→算力推定(带数字)→机器方案→确定筛选条件」的递进, 不闲聊不营销。
 8. gpu_models 是用于平台在售商品筛选的型号, 只能从在售型号里选(可多选, 按显存满足度选入); 在售型号列表: %s
 
 输出 JSON 结构(字段都必填, 未知填零值):
-{"relevant":bool,"reject_reason":"","purpose":"用途一句话","summary":"一句话评估结论",
+{"relevant":bool,"summary":"一句话评估结论","reject_reason":"","purpose":"用途一句话",
 "compute_estimate":{"total_vram_gb":0,"per_card_vram_gb":0,"min_cards":0,"compute_class":"如: 训练-中等规模/推理-轻量","basis":"一句话推导依据, 必须含数字"},
 "machine_plans":[{"name":"方案名(如 性价比方案)","gpu_model":"如 A100-80G","cards":0,"nodes":0,"per_card_vram_gb":0,"note":"一句话适用说明"}],
 "gpu_models":["在售型号"],"card_count":0,"pricing_mode":"hourly|daily|weekly|monthly|perpetual|空串","duration_hint":0,"budget_fen_max":0,"region":"","analysis_steps":[{"title":"步骤名","detail":"一句话"}]}
@@ -231,6 +231,14 @@ func (s *Service) allowRate(userID int64) bool {
 var ErrRateLimited = fmt.Errorf("请求过于频繁, 请稍后再试")
 
 func (s *Service) Search(ctx context.Context, userID int64, query string) (*SearchResult, error) {
+	return s.search(ctx, userID, query, nil)
+}
+
+func (s *Service) SearchStream(ctx context.Context, userID int64, query string, onSummary func(string) error) (*SearchResult, error) {
+	return s.search(ctx, userID, query, onSummary)
+}
+
+func (s *Service) search(ctx context.Context, userID int64, query string, onSummary func(string) error) (*SearchResult, error) {
 	if !s.allowRate(userID) {
 		return nil, ErrRateLimited
 	}
@@ -247,7 +255,12 @@ func (s *Service) Search(ctx context.Context, userID int64, query string) (*Sear
 	}
 
 	system := fmt.Sprintf(systemPromptTmpl, modelList)
-	content, err := s.llm.ChatJSON(ctx, system, query)
+	var content string
+	if onSummary == nil {
+		content, err = s.llm.ChatJSON(ctx, system, query)
+	} else {
+		content, err = s.llm.ChatJSONStream(ctx, system, query, onSummary)
+	}
 	if err != nil {
 		return nil, err
 	}

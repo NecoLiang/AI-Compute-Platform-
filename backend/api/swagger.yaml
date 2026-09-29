@@ -1636,7 +1636,31 @@ paths:
               properties:
                 query: {type: string, maxLength: 500}
       responses:
-        '200': {description: 检查业务code；成功data包含relevant、analysis_steps、compute_estimate、requirement、matches、note。}
+        '200': {description: 检查业务code；成功data包含relevant、summary、analysis_steps、compute_estimate、machine_plans、requirement、matches、note。}
+
+  /market/agent-search/stream:
+    post:
+      tags: [算力市场 Compute]
+      summary: 流式算力评估
+      description: 需登录，与JSON选型接口共享10次/分钟限额。summary事件提前返回累计的用户可见结论，result事件包含与JSON接口一致的完整结果。拒答不发送summary；开始前错误返回JSON信封，开始后发送error事件。断连取消上游，禁止把缺少终止结果的流当作成功。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: {type: string, minLength: 1, maxLength: 500}
+      responses:
+        '200':
+          description: 检查SSE事件中的业务code；summary data为{text}，result/error data为原业务信封。summary不是最终完成标志。
+          content:
+            text/event-stream:
+              schema: {type: string}
+            application/json:
+              schema: {type: object, description: 流开始前的业务错误信封}
+        '401': {description: 未登录或会话无效}
 
   # ==================== 健康检查 ====================
   /health:
