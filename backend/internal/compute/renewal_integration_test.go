@@ -29,7 +29,7 @@ func activeRenewalOrder(t *testing.T, db *sqlx.DB) (*compute.Service, *payment.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := payments.HandleCallback(payment.CallbackReq{OrderNo: no, TxID: pay.TxID, Status: "success", Amount: 13800}); err != nil {
+	if err := sendPayNotify(t, payments, testCallback{OrderNo: no, TxID: pay.TxID, Status: "success", Amount: 13800}); err != nil {
 		t.Fatal(err)
 	}
 	service := compute.NewService(compute.NewRepository(db), db, strings.Repeat("12", 32))
@@ -53,17 +53,17 @@ func TestRenewalPaymentExtendsLeaseAndCredentialExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callback := payment.CallbackReq{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}
+	callback := testCallback{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}
 	wrong := callback
 	wrong.Amount++
-	if err := payments.HandleCallback(wrong); err == nil {
+	if err := sendPayNotify(t, payments, wrong); err == nil {
 		t.Fatal("wrong amount accepted")
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 6)
 	for range 6 {
 		wg.Add(1)
-		go func() { defer wg.Done(); errs <- payments.HandleCallback(callback) }()
+		go func() { defer wg.Done(); errs <- sendPayNotify(t, payments, callback) }()
 	}
 	wg.Wait()
 	close(errs)
@@ -123,9 +123,11 @@ func TestRenewalCancellationAndParentFreezePreventPaymentWithoutReturningParentS
 			} else if err := service.FreezeOrder(parentNo); err != nil {
 				t.Fatal(err)
 			}
-			if err := payments.HandleCallback(payment.CallbackReq{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}); err == nil {
-				t.Fatal("closed renewal was paid")
+			// 已关闭的续租单收到付款: 不复活订单, 款项排队原路退回。
+			if err := sendPayNotify(t, payments, testCallback{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}); err != nil {
+				t.Fatal(err)
 			}
+			assertQueuedForRefund(t, db, childNo)
 			child := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+childNo, nil, 0).Data.(map[string]any)
 			if child["order"].(map[string]any)["status"] != "cancelled" {
 				t.Fatalf("renewal remains payable: %v", child)
@@ -160,7 +162,7 @@ func TestRenewalAfterExpiryReservesAvailableStockAndRequiresFreshDelivery(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := payments.HandleCallback(payment.CallbackReq{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}); err != nil {
+	if err := sendPayNotify(t, payments, testCallback{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}); err != nil {
 		t.Fatal(err)
 	}
 	detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo, nil, 0).Data.(map[string]any)
@@ -223,8 +225,8 @@ func TestRenewalRefundRemovesOnlyUnusedExtensionAndNeverDuplicatesStock(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	callback := payment.CallbackReq{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}
-	if err := payments.HandleCallback(callback); err != nil {
+	callback := testCallback{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}
+	if err := sendPayNotify(t, payments, callback); err != nil {
 		t.Fatal(err)
 	}
 	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+childNo+"/refund", nil, 0)
@@ -233,7 +235,7 @@ func TestRenewalRefundRemovesOnlyUnusedExtensionAndNeverDuplicatesStock(t *testi
 			t.Fatal(err)
 		}
 	}
-	if err := payments.HandleCallback(callback); err != nil {
+	if err := sendPayNotify(t, payments, callback); err != nil {
 		t.Fatal(err)
 	}
 	detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo, nil, 0).Data.(map[string]any)
@@ -263,7 +265,7 @@ func TestExpiredRenewalCancelTimeoutAndRefundReleaseOnlyTheReservedCards(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			callback := payment.CallbackReq{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}
+			callback := testCallback{OrderNo: childNo, TxID: pay.TxID, Status: "success", Amount: 9200}
 			switch action {
 			case "cancel":
 				for range 2 {
@@ -277,7 +279,7 @@ func TestExpiredRenewalCancelTimeoutAndRefundReleaseOnlyTheReservedCards(t *test
 					}
 				}
 			case "refund":
-				if err := payments.HandleCallback(callback); err != nil {
+				if err := sendPayNotify(t, payments, callback); err != nil {
 					t.Fatal(err)
 				}
 				tradeRequest(t, buyer, "POST", "/api/v1/orders/"+childNo+"/refund", nil, 0)
@@ -287,8 +289,11 @@ func TestExpiredRenewalCancelTimeoutAndRefundReleaseOnlyTheReservedCards(t *test
 					}
 				}
 			}
-			if err := payments.HandleCallback(callback); action != "refund" && err == nil {
-				t.Fatal("late callback accepted")
+			if err := sendPayNotify(t, payments, callback); err != nil {
+				t.Fatal(err)
+			}
+			if action != "refund" {
+				assertQueuedForRefund(t, db, childNo)
 			}
 			product := tradeRequest(t, buyer, "GET", fmt.Sprintf("/api/v1/products/%d", productID), nil, 0).Data.(map[string]any)["product"].(map[string]any)
 			if product["stock"] != float64(8) {

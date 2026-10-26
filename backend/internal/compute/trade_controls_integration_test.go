@@ -49,7 +49,7 @@ func TestTradeConfigControlsNewOrdersAndPreservesFees(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := payments.HandleCallback(payment.CallbackReq{OrderNo: no, TxID: pay.TxID, Amount: 13800, Status: "success"}); err != nil {
+		if err := sendPayNotify(t, payments, testCallback{OrderNo: no, TxID: pay.TxID, Amount: 13800, Status: "success"}); err != nil {
 			t.Fatal(err)
 		}
 		settlements, err := payments.GetOrderSettlements(101, no)

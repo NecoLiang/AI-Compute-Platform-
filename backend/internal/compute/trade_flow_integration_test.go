@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,24 +162,110 @@ func TestTradePaymentRejectsWrongOwnerBeforeContactingProvider(t *testing.T) {
 // Only the external provider is a test double; handlers, transactions,
 // migrations, stock and delivery use the real implementation and MySQL.
 type testPaymentGateway struct {
-	amount int64
-	calls  int
-	splits int
+	mu         sync.Mutex
+	amount     int64
+	calls      int
+	splits     []payment.DivideOrder
+	refunds    []payment.RefundOrder
+	refundFail bool
+	channels   []string // nil 表示全部开通
 }
 
-func (g *testPaymentGateway) CreatePayment(no string, amount int64, channel string) (string, string, error) {
-	g.amount, g.calls = amount, g.calls+1
-	return "https://cashier.example.test/" + no, "TX" + no, nil
-}
-func (g *testPaymentGateway) VerifyCallback(req payment.CallbackReq) error {
-	if req.TxID != "TX"+req.OrderNo {
-		return fmt.Errorf("invalid test signature")
+func (g *testPaymentGateway) Configured() bool { return true }
+func (g *testPaymentGateway) PayChannels() []string {
+	if g.channels != nil {
+		return g.channels
 	}
-	return nil
+	return []string{"wechat", "alipay", "bank"}
 }
-func (g *testPaymentGateway) CreateSplit(no string, items []payment.SplitItem) error {
-	g.splits++
-	return nil
+func (g *testPaymentGateway) CreatePayment(o payment.PaymentOrder) (*payment.Checkout, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.amount, g.calls = o.Amount, g.calls+1
+	return &payment.Checkout{PayURL: "https://cashier.example.test/" + o.OrderNo, UniqueOrderNo: "TX" + o.OrderNo}, nil
+}
+func (g *testPaymentGateway) QueryPayment(no string) (*payment.PaymentResult, error) {
+	return &payment.PaymentResult{OrderNo: no, UniqueOrderNo: "TX" + no, Status: "PROCESSING"}, nil
+}
+func (g *testPaymentGateway) Divide(o payment.DivideOrder) (*payment.DivideResult, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.splits = append(g.splits, o)
+	return &payment.DivideResult{Status: "SUCCESS", Details: []payment.DivideDetail{{DetailNo: "DD" + o.RequestID, LedgerNo: o.Items[0].LedgerNo, Amount: o.Items[0].Amount}}}, nil
+}
+func (g *testPaymentGateway) QueryDivide(no, requestID string) (*payment.DivideResult, error) {
+	return &payment.DivideResult{Status: "SUCCESS"}, nil
+}
+func (g *testPaymentGateway) Refund(o payment.RefundOrder) (*payment.RefundResult, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.refunds = append(g.refunds, o)
+	if g.refundFail {
+		return nil, &payment.YeepayBizError{Op: "退款", Code: "OPR13001", Message: "余额不足"}
+	}
+	// 退款受理后异步完成, 终态由退款通知送达。
+	return &payment.RefundResult{OrderNo: o.OrderNo, RequestID: o.RequestID, Status: "PROCESSING", Amount: o.Amount}, nil
+}
+func (g *testPaymentGateway) QueryRefund(no, requestID string) (*payment.RefundResult, error) {
+	return &payment.RefundResult{OrderNo: no, RequestID: requestID, Status: "PROCESSING"}, nil
+}
+func (g *testPaymentGateway) NetInURL(requestNo string) (string, error) {
+	return "https://netin.example.test/" + requestNo, nil
+}
+func (g *testPaymentGateway) QueryNetIn(requestNo string) (*payment.NetInResult, error) {
+	return &payment.NetInResult{RequestNo: requestNo, ApplicationStatus: "REVIEWING"}, nil
+}
+
+// DecryptNotify 测试替身的"验签": 只有 signed: 前缀的报文视为易宝签发。
+func (g *testPaymentGateway) DecryptNotify(raw string) ([]byte, error) {
+	if !strings.HasPrefix(raw, "signed:") {
+		return nil, payment.ErrYeepayCallbackUnverifiable
+	}
+	return []byte(strings.TrimPrefix(raw, "signed:")), nil
+}
+
+func (g *testPaymentGateway) splitCount() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.splits)
+}
+
+func yuanString(fen int64) string { return fmt.Sprintf("%d.%02d", fen/100, fen%100) }
+
+func signedNotify(t testing.TB, payload map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "signed:" + string(raw)
+}
+
+// testCallback 一笔易宝支付结果通知。
+type testCallback struct {
+	OrderNo, TxID, Status string
+	Amount                int64
+}
+
+func sendPayNotify(t testing.TB, svc *payment.Service, cb testCallback) error {
+	status := map[string]string{"success": "SUCCESS", "fail": "FAIL"}[cb.Status]
+	return svc.HandleNotify(payment.NotifyPay, signedNotify(t, map[string]any{
+		"orderId": cb.OrderNo, "uniqueOrderNo": cb.TxID, "status": status, "orderAmount": yuanString(cb.Amount),
+		"paySuccessDate": time.Now().Format("2006-01-02 15:04:05"),
+	}))
+}
+
+func sendClearNotify(t testing.TB, svc *payment.Service, no string, amount int64) error {
+	return svc.HandleNotify(payment.NotifyClear, signedNotify(t, map[string]any{
+		"orderId": no, "uniqueOrderNo": "TX" + no, "status": "SUCCESS", "orderAmount": yuanString(amount),
+		"csSuccessDate": time.Now().Format("2006-01-02 15:04:05"),
+	}))
+}
+
+func sendRefundNotify(t testing.TB, svc *payment.Service, no, requestID, status string, amount int64) error {
+	return svc.HandleNotify(payment.NotifyRefund, signedNotify(t, map[string]any{
+		"orderId": no, "refundRequestId": requestID, "status": status, "refundAmount": yuanString(amount),
+	}))
 }
 
 func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
@@ -189,8 +276,12 @@ func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
 	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
-	gateway := &testPaymentGateway{}
+	gateway := &testPaymentGateway{channels: []string{"bank"}}
 	service := payment.NewService(payment.NewRepository(db), db, gateway)
+	if _, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "alipay"}); err == nil || gateway.calls != 0 {
+		t.Fatalf("未开通的支付方式不得向易宝下单: calls=%d err=%v", gateway.calls, err)
+	}
+	gateway.channels = nil
 	checkout, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "wechat"})
 	if err != nil || gateway.amount != 13800 {
 		t.Fatalf("checkout: %+v amount=%d err=%v", checkout, gateway.amount, err)
@@ -199,25 +290,38 @@ func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
 	if err != nil || repeated == nil || repeated.TxID != checkout.TxID || gateway.calls != 1 {
 		t.Fatalf("repeated pay created another payment: %+v calls=%d err=%v", repeated, gateway.calls, err)
 	}
-	req := payment.CallbackReq{TxID: checkout.TxID, OrderNo: no, Status: "fail", Amount: 13800}
-	if err := service.HandleCallback(req); err == nil {
-		t.Fatal("failed payment must not be accepted as paid")
+	req := testCallback{TxID: checkout.TxID, OrderNo: no, Status: "fail", Amount: 13800}
+	if err := sendPayNotify(t, service, req); err != nil {
+		t.Fatal(err)
+	}
+	if payments, _ := service.GetOrderPayments(102, no); len(payments) != 1 || payments[0].Status != "pending" {
+		t.Fatalf("failed payment must not be accepted as paid: %+v", payments)
 	}
 	req.Status, req.Amount = "success", 1
-	if err := service.HandleCallback(req); err == nil {
+	if err := sendPayNotify(t, service, req); err == nil {
 		t.Fatal("amount mismatch must be rejected")
 	}
 	req.Amount = 13800
-	if err := service.HandleCallback(req); err != nil {
+	if err := service.HandleNotify(payment.NotifyPay, `{"orderId":"`+no+`","uniqueOrderNo":"`+checkout.TxID+`","status":"SUCCESS","orderAmount":"138.00"}`); err == nil {
+		t.Fatal("unsigned notify must be rejected")
+	}
+	if err := sendPayNotify(t, service, req); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.HandleCallback(req); err != nil {
+	if err := sendPayNotify(t, service, req); err != nil {
 		t.Fatal(err)
 	}
 	computeService := compute.NewService(compute.NewRepository(db), db, strings.Repeat("12", 32))
 	order, err := computeService.GetOrder(no)
 	if err != nil || order.Status != "paid" {
 		t.Fatalf("business order not paid: %+v %v", order, err)
+	}
+	// 已清算但未交付: 资金留在易宝待分账, 不得分账。供给方开通商编前同样不分。
+	if err := sendClearNotify(t, service, no, 13800); err != nil {
+		t.Fatal(err)
+	}
+	if gateway.splitCount() != 0 {
+		t.Fatal("split before delivery confirmation")
 	}
 	if _, err := computeService.DeliverWithAccess(101, no, compute.DeliverInfo{IpAddress: "192.0.2.10"}, false); err != nil {
 		t.Fatal(err)
@@ -229,21 +333,158 @@ func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
 	if err != nil || order.Status != "active" {
 		t.Fatalf("delivery not active: %+v %v", order, err)
 	}
-	if err := service.HandleCallback(req); err != nil {
+	if err := service.RunJobs(); err != nil || gateway.splitCount() != 0 {
+		t.Fatalf("split without supplier merchant: splits=%d err=%v", gateway.splitCount(), err)
+	}
+	if err := service.BindMerchant(104, 101, "10089000101"); err != nil {
 		t.Fatal(err)
 	}
+	if err := service.RunJobs(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := sendPayNotify(t, service, req); err != nil {
+			t.Fatal(err)
+		}
+		if err := sendClearNotify(t, service, no, 13800); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.RunJobs(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	order, _ = computeService.GetOrder(no)
-	if order.Status != "active" || gateway.splits != 1 {
-		t.Fatalf("callback replay regressed delivery or repeated split: status=%s splits=%d", order.Status, gateway.splits)
+	if order.Status != "active" || gateway.splitCount() != 1 {
+		t.Fatalf("callback replay regressed delivery or repeated split: status=%s splits=%d", order.Status, gateway.splitCount())
+	}
+	split := gateway.splits[0]
+	if split.OrderNo != no || len(split.Items) != 1 || split.Items[0].LedgerNo != "10089000101" || split.Items[0].Amount != 13110 {
+		t.Fatalf("divide must send only the supplier share to its merchant: %+v", split)
 	}
 	settlements, err := service.GetOrderSettlements(101, no)
 	if err != nil || len(settlements) != 2 {
 		t.Fatalf("duplicate/missing settlement: %v %v", settlements, err)
 	}
 	for _, item := range settlements {
+		if item.Status != "success" {
+			t.Fatalf("settlement not divided: %+v", item)
+		}
 		if item.PayeeType == "supplier" && (item.PayeeID != 101 || item.Amount != 13110) {
 			t.Fatalf("wrong supplier settlement: %+v", item)
 		}
+	}
+
+	// 交付后退款: 运营执行, 已分给供给方的部分经 divideBackDetail 原路归还。
+	if err := computeService.RequestRefund(102, no); err != nil {
+		t.Fatal(err)
+	}
+	service.SetRefundHook(computeService.CompleteRefund)
+	if _, err := service.ExecuteRefund(104, no, "买家申请退款"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ExecuteRefund(104, no, "买家申请退款"); err == nil {
+		t.Fatal("refund submitted twice")
+	}
+	if len(gateway.refunds) != 1 {
+		t.Fatalf("refunds=%d", len(gateway.refunds))
+	}
+	refund := gateway.refunds[0]
+	if refund.Amount != 13800 || len(refund.DivideBack) != 1 || refund.DivideBack[0].LedgerNo != "10089000101" ||
+		refund.DivideBack[0].Amount != 13110 || refund.DivideBack[0].DivideDetailNo != "DD"+split.RequestID {
+		t.Fatalf("refund must claw back the supplier share: %+v", refund)
+	}
+	if err := sendRefundNotify(t, service, no, refund.RequestID+"x", "SUCCESS", 13800); err == nil {
+		t.Fatal("unknown refund request accepted")
+	}
+	for range 2 {
+		if err := sendRefundNotify(t, service, no, refund.RequestID, "SUCCESS", 13800); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order, _ = computeService.GetOrder(no)
+	if order.Status != "refunded" {
+		t.Fatalf("order not refunded: %s", order.Status)
+	}
+	settlements, _ = service.GetOrderSettlements(101, no)
+	for _, item := range settlements {
+		if item.Status != "reversed" {
+			t.Fatalf("divided settlement not reversed: %+v", item)
+		}
+	}
+	if total, succeeded, pending, err := service.SumSupplierSettlements(101); err != nil || total != 0 || succeeded != 0 || pending != 0 {
+		t.Fatalf("refunded order still counted: %d %d %d %v", total, succeeded, pending, err)
+	}
+}
+
+// 交付前退款: 资金仍在待分账账户, 原路退回且不归还任何分账; 退款失败可由运营重试。
+func TestTradeRefundBeforeDeliveryUsesUndividedFunds(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
+	id := int64(created.Data.(map[string]any)["id"].(float64))
+	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
+	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
+	no := placed.Data.(map[string]any)["order_no"].(string)
+	gateway := &testPaymentGateway{refundFail: true}
+	service := payment.NewService(payment.NewRepository(db), db, gateway)
+	computeService := compute.NewService(compute.NewRepository(db), db)
+	service.SetRefundHook(computeService.CompleteRefund)
+	if err := service.BindMerchant(104, 101, "10089000101"); err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "alipay"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sendPayNotify(t, service, testCallback{OrderNo: no, TxID: checkout.TxID, Status: "success", Amount: 13800}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ExecuteRefund(104, no, ""); err == nil {
+		t.Fatal("paid order refunded without buyer request or cancellation")
+	}
+	if err := computeService.RequestRefund(102, no); err != nil {
+		t.Fatal(err)
+	}
+	// 未清算: 先排队, 清算入账后由定时任务提交。
+	if status, err := service.ExecuteRefund(104, no, ""); err != nil || status != "pending" || len(gateway.refunds) != 0 {
+		t.Fatalf("uncleared refund: %s %v refunds=%d", status, err, len(gateway.refunds))
+	}
+	if err := sendClearNotify(t, service, no, 13800); err != nil {
+		t.Fatal(err)
+	}
+	if gateway.splitCount() != 0 {
+		t.Fatal("refunding order was divided")
+	}
+	if err := service.RunJobs(); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateway.refunds) != 1 || len(gateway.refunds[0].DivideBack) != 0 {
+		t.Fatalf("undivided refund must not claw back: %+v", gateway.refunds)
+	}
+	refunds, err := service.ListRefunds()
+	if err != nil || len(refunds) != 1 || refunds[0].RefundStatus == nil || *refunds[0].RefundStatus != "failed" {
+		t.Fatalf("failed refund not visible to operators: %+v %v", refunds, err)
+	}
+	gateway.refundFail = false
+	if status, err := service.ExecuteRefund(104, no, "重试"); err != nil || status != "processing" {
+		t.Fatalf("retry: %s %v", status, err)
+	}
+	if err := sendRefundNotify(t, service, no, gateway.refunds[1].RequestID, "SUCCESS", 13800); err != nil {
+		t.Fatal(err)
+	}
+	order, _ := computeService.GetOrder(no)
+	if order.Status != "refunded" {
+		t.Fatalf("order not refunded: %s", order.Status)
+	}
+	settlements, _ := service.GetOrderSettlements(101, no)
+	for _, item := range settlements {
+		if item.Status != "cancelled" {
+			t.Fatalf("undivided settlement not cancelled: %+v", item)
+		}
+	}
+	products := tradeRequest(t, tradeRouter(db, 101), "GET", "/api/v1/supplier/products", nil, 0)
+	if products.Data.([]any)[0].(map[string]any)["stock"] != float64(8) {
+		t.Fatalf("stock was not released: %v", products.Data)
 	}
 }
 
@@ -255,7 +496,8 @@ func TestTradeLatePaymentCannotReviveCancelledOrderOrConsumeReleasedStock(t *tes
 	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
 	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 2, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
 	no := placed.Data.(map[string]any)["order_no"].(string)
-	service := payment.NewService(payment.NewRepository(db), db, &testPaymentGateway{})
+	gateway := &testPaymentGateway{}
+	service := payment.NewService(payment.NewRepository(db), db, gateway)
 	checkout, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "wechat"})
 	if err != nil {
 		t.Fatal(err)
@@ -265,13 +507,15 @@ func TestTradeLatePaymentCannotReviveCancelledOrderOrConsumeReleasedStock(t *tes
 	if n, err := computeService.CloseExpiredUnpaidOrders(); err != nil || n != 1 {
 		t.Fatalf("expiration: %d %v", n, err)
 	}
-	if err := service.HandleCallback(payment.CallbackReq{OrderNo: no, TxID: checkout.TxID, Status: "success", Amount: 13800}); err == nil {
-		t.Fatal("late callback revived cancelled order")
+	// 迟到的支付: 钱已进易宝, 订单不复活, 收款记为待原路退回。
+	if err := sendPayNotify(t, service, testCallback{OrderNo: no, TxID: checkout.TxID, Status: "success", Amount: 13800}); err != nil {
+		t.Fatal(err)
 	}
 	order, _ := computeService.GetOrder(no)
 	if order.Status != "cancelled" {
 		t.Fatalf("late callback: %s", order.Status)
 	}
+	assertOrphanRefund(t, db, service, gateway, no, 13800)
 	products := tradeRequest(t, tradeRouter(db, 101), "GET", "/api/v1/supplier/products", nil, 0)
 	if products.Data.([]any)[0].(map[string]any)["stock"] != float64(8) {
 		t.Fatalf("stock was not released: %v", products.Data)
@@ -301,6 +545,75 @@ func TestTradeAdminClosesNumericOrderIDAndReleasesStockOnce(t *testing.T) {
 		t.Fatalf("stock not released exactly once: %v", products.Data)
 	}
 	tradeRequest(t, admin, "PATCH", "/api/v1/admin/orders/999999/status", map[string]string{"status": "cancelled"}, 40400)
+}
+
+// 运营关闭订单: 租期未开始的自动原路退款; 交付后关闭的不自动退, 进入退款待办由运营决定。
+func TestTradeAdminCloseRefundsOnlyUndeliveredOrdersAutomatically(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", tradeProductInput(), 0)
+	id := int64(created.Data.(map[string]any)["id"].(float64))
+	admin := tradeRouter(db, 104)
+	tradeRequest(t, admin, "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
+	gateway := &testPaymentGateway{}
+	service := payment.NewService(payment.NewRepository(db), db, gateway)
+	computeService := compute.NewService(compute.NewRepository(db), db, strings.Repeat("12", 32))
+	service.SetRefundHook(computeService.CompleteRefund)
+	if err := service.BindMerchant(104, 101, "10089000101"); err != nil {
+		t.Fatal(err)
+	}
+	paidOrder := func() string {
+		placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 1, "duration": 3, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
+		no := placed.Data.(map[string]any)["order_no"].(string)
+		order, _ := computeService.GetOrder(no)
+		checkout, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "alipay"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sendPayNotify(t, service, testCallback{OrderNo: no, TxID: checkout.TxID, Status: "success", Amount: order.TotalAmount}); err != nil {
+			t.Fatal(err)
+		}
+		if err := sendClearNotify(t, service, no, order.TotalAmount); err != nil {
+			t.Fatal(err)
+		}
+		return no
+	}
+	undelivered, delivered := paidOrder(), paidOrder()
+	if _, err := computeService.DeliverWithAccess(101, delivered, compute.DeliverInfo{IpAddress: "192.0.2.10"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := computeService.ConfirmDelivery(102, delivered); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RunJobs(); err != nil || gateway.splitCount() != 1 {
+		t.Fatalf("delivered order not divided: %d %v", gateway.splitCount(), err)
+	}
+	for _, no := range []string{undelivered, delivered} {
+		tradeRequest(t, admin, "PATCH", "/api/v1/admin/orders/"+no+"/status", map[string]string{"status": "cancelled"}, 0)
+	}
+	if err := service.RunJobs(); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateway.refunds) != 1 || gateway.refunds[0].OrderNo != undelivered || len(gateway.refunds[0].DivideBack) != 0 {
+		t.Fatalf("only the undelivered order may be refunded automatically: %+v", gateway.refunds)
+	}
+	refunds, err := service.ListRefunds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued bool
+	for _, item := range refunds {
+		queued = queued || item.OrderNo == delivered && item.RefundStatus == nil
+	}
+	if !queued {
+		t.Fatalf("closed delivered order missing from operator refund queue: %+v", refunds)
+	}
+	if _, err := service.ExecuteRefund(104, delivered, "运营核实后全额退款"); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateway.refunds) != 2 || len(gateway.refunds[1].DivideBack) != 1 {
+		t.Fatalf("operator refund must claw back the divided share: %+v", gateway.refunds)
+	}
 }
 
 func TestTradeInquiryReachesCRMWithProductContext(t *testing.T) {
@@ -346,6 +659,55 @@ func tradeRequest(t *testing.T, r http.Handler, method, path string, body any, w
 		t.Fatalf("%s %s: want code %d, status=%d body=%s err=%v", method, path, wantCode, w.Code, w.Body.String(), err)
 	}
 	return result
+}
+
+type paymentState struct {
+	Status       string  `db:"status"`
+	RefundStatus *string `db:"refund_status"`
+}
+
+// assertQueuedForRefund 已关闭订单收到的付款: 订单不复活, 收款排队原路退回, 不产生任何应结。
+func assertQueuedForRefund(t *testing.T, db *sqlx.DB, no string) {
+	t.Helper()
+	var state paymentState
+	if err := db.Get(&state, "SELECT status,refund_status FROM payments WHERE order_no=?", no); err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "paid" || state.RefundStatus == nil || *state.RefundStatus != "pending" {
+		t.Fatalf("late payment not queued for refund: %+v", state)
+	}
+	var orderStatus string
+	if err := db.Get(&orderStatus, "SELECT status FROM orders WHERE order_no=?", no); err != nil || orderStatus != "cancelled" {
+		t.Fatalf("closed order revived by payment: %s %v", orderStatus, err)
+	}
+	var settlements int
+	if err := db.Get(&settlements, "SELECT COUNT(*) FROM settlements WHERE order_no=?", no); err != nil || settlements != 0 {
+		t.Fatalf("late payment created settlements: %d %v", settlements, err)
+	}
+}
+
+// assertOrphanRefund 已关闭订单收到的付款必须在清算后自动原路退回。
+func assertOrphanRefund(t *testing.T, db *sqlx.DB, service *payment.Service, gateway *testPaymentGateway, no string, amount int64) {
+	t.Helper()
+	assertQueuedForRefund(t, db, no)
+	var state paymentState
+	before := len(gateway.refunds)
+	if err := sendClearNotify(t, service, no, amount); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RunJobs(); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateway.refunds) != before+1 || gateway.refunds[before].Amount != amount || len(gateway.refunds[before].DivideBack) != 0 {
+		t.Fatalf("orphan refund not submitted: %+v", gateway.refunds)
+	}
+	if err := sendRefundNotify(t, service, no, gateway.refunds[before].RequestID, "SUCCESS", amount); err != nil {
+		t.Fatal(err)
+	}
+	db.Get(&state, "SELECT status,refund_status FROM payments WHERE order_no=?", no)
+	if state.Status != "refunded" {
+		t.Fatalf("orphan refund not completed: %+v", state)
+	}
 }
 
 func seedTradeUsers(db *sqlx.DB) {

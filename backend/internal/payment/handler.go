@@ -2,8 +2,11 @@ package payment
 
 import (
 	"errors"
-	"github.com/gin-gonic/gin"
+	"log/slog"
+	"net/http"
 	"strconv"
+
+	"github.com/gin-gonic/gin"
 	"tokenfactory/internal/compute"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/response"
@@ -16,6 +19,7 @@ type Handler struct {
 func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
 
 func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
+	r.GET("/payment/channels", h.PayChannels)
 	r.POST("/payment/pay", h.Pay)
 	r.GET("/payment/status/:order_no", h.PaymentStatus)
 }
@@ -31,10 +35,19 @@ func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
 func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/admin/payment/reconcile", h.Reconcile)
 	r.GET("/admin/payment/list", h.ListPayments)
+	r.GET("/admin/payment/refunds", h.ListRefunds)
+	r.POST("/admin/payment/refunds/:order_no", h.ExecuteRefund)
+	r.GET("/admin/payment/merchants", h.ListMerchants)
+	r.PUT("/admin/payment/merchants/:user_id", h.BindMerchant)
 }
 
+// RegisterCallbackRoutes 易宝异步通知(公开路由, 信任来源是报文解密验签)。
 func (h *Handler) RegisterCallbackRoutes(r *gin.RouterGroup) {
-	r.POST("/payment/callback", h.Callback)
+	r.POST("/payment/yeepay/notify/:kind", h.Notify)
+}
+
+func (h *Handler) PayChannels(c *gin.Context) {
+	response.Success(c, gin.H{"channels": h.svc.PayChannels()})
 }
 
 func (h *Handler) Pay(c *gin.Context) {
@@ -60,34 +73,37 @@ func (h *Handler) PaymentStatus(c *gin.Context) {
 	response.Success(c, payments)
 }
 
-func (h *Handler) Callback(c *gin.Context) {
-	var req CallbackReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Error(c, errcode.ParamInvalid, err.Error())
+// Notify 易宝通知以表单字段 response 携带密文; 必须回纯文本 SUCCESS, 否则易宝持续重试。
+func (h *Handler) Notify(c *gin.Context) {
+	raw := c.PostForm("response")
+	if raw == "" {
+		raw = c.Query("response")
+	}
+	kind := c.Param("kind")
+	if err := h.svc.HandleNotify(kind, raw); err != nil {
+		slog.Warn("易宝通知处理失败", "kind", kind, "error", err)
+		c.String(http.StatusOK, "FAIL")
 		return
 	}
-	if err := h.svc.HandleCallback(req); err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
-		return
-	}
-	response.Success(c, nil)
+	c.String(http.StatusOK, "SUCCESS")
 }
 
 func (h *Handler) StartOnboard(c *gin.Context) {
-	if err := h.svc.StartOnboard(c.GetInt64("user_id")); err != nil {
-		response.Error(c, errcode.InternalError, err.Error())
+	status, err := h.svc.StartOnboard(c.GetInt64("user_id"))
+	if err != nil {
+		response.Error(c, paymentErrorCode(err), err.Error())
 		return
 	}
-	response.Success(c, nil)
+	response.Success(c, status)
 }
 
 func (h *Handler) OnboardStatus(c *gin.Context) {
 	status, err := h.svc.GetOnboardStatus(c.GetInt64("user_id"))
 	if err != nil {
-		response.Error(c, errcode.InternalError, "支付进件状态读取失败")
+		response.Error(c, errcode.InternalError, "收款账户开通状态读取失败")
 		return
 	}
-	response.Success(c, gin.H{"status": status})
+	response.Success(c, status)
 }
 
 func (h *Handler) Settlements(c *gin.Context) {
@@ -144,8 +160,55 @@ func (h *Handler) ListPayments(c *gin.Context) {
 	response.Success(c, list)
 }
 
+func (h *Handler) ListRefunds(c *gin.Context) {
+	list, err := h.svc.ListRefunds()
+	if err != nil {
+		response.Error(c, errcode.InternalError, "退款列表读取失败")
+		return
+	}
+	response.Success(c, list)
+}
+
+func (h *Handler) ExecuteRefund(c *gin.Context) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	status, err := h.svc.ExecuteRefund(c.GetInt64("user_id"), c.Param("order_no"), req.Reason)
+	if err != nil {
+		response.Error(c, paymentErrorCode(err), err.Error())
+		return
+	}
+	response.Success(c, gin.H{"refund_status": status})
+}
+
+func (h *Handler) ListMerchants(c *gin.Context) {
+	list, err := h.svc.ListMerchants()
+	if err != nil {
+		response.Error(c, errcode.InternalError, "收款商户列表读取失败")
+		return
+	}
+	response.Success(c, list)
+}
+
+func (h *Handler) BindMerchant(c *gin.Context) {
+	userID, err := strconv.ParseInt(c.Param("user_id"), 10, 64)
+	var req struct {
+		MerchantNo string `json:"merchant_no"`
+	}
+	if err != nil || c.ShouldBindJSON(&req) != nil {
+		response.Error(c, errcode.ParamInvalid, "参数无效")
+		return
+	}
+	if err := h.svc.BindMerchant(c.GetInt64("user_id"), userID, req.MerchantNo); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	response.Success(c, nil)
+}
+
 func paymentErrorCode(err error) int {
-	if errors.Is(err, ErrPaymentConflict) {
+	if errors.Is(err, ErrPaymentConflict) || errors.Is(err, ErrRefundNotAllowed) {
 		return errcode.Conflict
 	}
 	if errors.Is(err, ErrYeepayNotConfigured) || errors.Is(err, ErrYeepayCallbackUnverifiable) {

@@ -90,7 +90,16 @@ func main() {
 			"补充方式", "config.yaml 配置 64 位 hex(32字节)密钥, 生产环境应从 KMS 注入")
 	}
 	paymentRepo := payment.NewRepository(sqlDB)
-	paymentSvc := payment.NewService(paymentRepo, sqlDB)
+	yeepay, err := payment.NewYeepayClient(payment.YeepayConfig(cfg.Yeepay))
+	if err != nil {
+		slog.Error("configure Yeepay", "error", err)
+		os.Exit(1)
+	}
+	if !yeepay.Configured() {
+		slog.Warn("易宝支付未接入: 支付下单与支付通知将一律拒绝", "补充方式", "配置 yeepay.* / YEEPAY_* 环境变量")
+	}
+	paymentSvc := payment.NewService(paymentRepo, sqlDB, yeepay)
+	paymentSvc.SetRefundHook(computeSvc.CompleteRefund)
 	intermediaryRepo := intermediary.NewRepository(sqlDB)
 	intermediarySvc := intermediary.NewService(intermediaryRepo)
 	equipmentRepo := equipment.NewRepository(sqlDB)
@@ -263,6 +272,10 @@ func main() {
 			slog.Error("吊销过期访问凭证失败", "error", err)
 		} else if n > 0 {
 			slog.Info("已吊销过期访问凭证", "count", n)
+		}
+		// 先向易宝补查支付结果, 再关单: 通知延迟时不至于把已付款的订单误关。
+		if err := paymentSvc.RunJobs(); err != nil {
+			slog.Error("易宝支付/分账/退款同步失败", "error", err)
 		}
 		if n, err := computeSvc.CloseExpiredUnpaidOrders(); err != nil {
 			slog.Error("关闭超时未支付订单失败", "error", err)

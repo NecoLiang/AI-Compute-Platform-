@@ -65,3 +65,22 @@ blockchain:
   # 平台见证签名 Ed25519 种子, 64 位 hex (openssl rand -hex 32)。
   # 生产从 KMS/环境变量注入; 留空表示暂不签名, 存证仍可用。
   sign_key_seed: ""
+
+
+yeepay:
+  # 易宝支付·平台商收付款方案: 买家付款进平台收单商编的分账在途账户, 清算且交付确认后
+  # 自动分账给供给方易宝商编, 平台不经手资金(不做二清)。
+  # app_key/parent_merchant_no/merchant_no/private_key/notify_base_url/return_base_url
+  # 要么全空(未接入: 支付下单与通知一律拒绝), 要么全配。
+  app_key: ""               # 开放平台应用 appKey, 如 app_1008xxxxxxx
+  parent_merchant_no: ""    # 平台商(发起方)商编
+  merchant_no: ""           # 收单商编; 平台自收时与 parent_merchant_no 相同
+  # 商户 RSA2048 私钥(PKCS#8 base64) — 敏感! 生产从环境变量 YEEPAY_PRIVATE_KEY 注入,
+  # 对应公钥需上传到易宝商户后台。
+  private_key: ""
+  platform_public_key: ""   # 留空用易宝官方平台公钥
+  server_root: ""           # 留空用 https://openapi.yeepay.com/yop-center
+  notify_base_url: ""       # 如 https://www.omnisline.com/api/v1 (必须 https)
+  return_base_url: ""       # 如 https://www.omnisline.com
+  # 向买家开放的支付方式(wechat/alipay/bank, 逗号分隔), 须与易宝已开通的产品一致; 留空为全部。
+  pay_channels: ""
