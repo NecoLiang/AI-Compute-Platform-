@@ -116,29 +116,38 @@ func TestValidateProductReq_TypeAndPricingMatrix(t *testing.T) {
 		{"买断-缺GPU型号", func(r *CreateProductReq) {
 			r.ProductType, r.PricingMode, r.MachineCount, r.GpuModel = ProductTypeOutright, PricingPerpetual, 4, ""
 		}, "必须填写 GPU 型号"},
+		{"买断-缺卡数", func(r *CreateProductReq) {
+			r.ProductType, r.PricingMode, r.MachineCount, r.CardCount = ProductTypeOutright, PricingPerpetual, 4, 0
+		}, "请填写每台卡数"},
+		{"买断-每台卡数不一致", func(r *CreateProductReq) {
+			r.ProductType, r.PricingMode, r.MachineCount, r.CardCount = ProductTypeOutright, PricingPerpetual, 4, 10
+		}, "整数倍"},
 		{"买断-不许面议", func(r *CreateProductReq) {
 			r.ProductType, r.PricingMode, r.MachineCount, r.PriceNegotiable = ProductTypeOutright, PricingPerpetual, 4, true
 		}, "不支持面议"},
 
 		// --- 成熟算力中心 center: 必须有台数 + 约算力 ---
 		{"算力中心-合法", func(r *CreateProductReq) {
-			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox = ProductTypeCenter, PricingMonthly, 64, "约128P"
+			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox, r.CardCount = ProductTypeCenter, PricingMonthly, 64, "约128P", 512
 		}, ""},
 		{"算力中心-按小时非法", func(r *CreateProductReq) {
 			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox = ProductTypeCenter, PricingHourly, 64, "约128P"
 		}, "不适用于该商品类型"},
 		{"算力中心-缺约算力", func(r *CreateProductReq) {
-			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox = ProductTypeCenter, PricingMonthly, 64, ""
+			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox, r.CardCount = ProductTypeCenter, PricingMonthly, 64, "", 512
 		}, "约总算力"},
 		{"算力中心-缺台数", func(r *CreateProductReq) {
 			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox = ProductTypeCenter, PricingMonthly, 0, "约128P"
 		}, "台数必须大于 0"},
+		{"算力中心-缺卡数", func(r *CreateProductReq) {
+			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox, r.CardCount = ProductTypeCenter, PricingMonthly, 64, "约128P", 0
+		}, "请填写每台卡数"},
 		{"算力中心-面议可免单价", func(r *CreateProductReq) {
-			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox = ProductTypeCenter, PricingMonthly, 64, "约128P"
+			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox, r.CardCount = ProductTypeCenter, PricingMonthly, 64, "约128P", 512
 			r.PriceNegotiable, r.UnitPrice = true, 0
 		}, ""},
 		{"算力中心-非面议且无单价", func(r *CreateProductReq) {
-			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox = ProductTypeCenter, PricingMonthly, 64, "约128P"
+			r.ProductType, r.PricingMode, r.MachineCount, r.TotalPflopsApprox, r.CardCount = ProductTypeCenter, PricingMonthly, 64, "约128P", 512
 			r.PriceNegotiable, r.UnitPrice = false, 0
 		}, "需填写单价, 或勾选面议"},
 

@@ -58,7 +58,11 @@ func (h *Handler) Pay(c *gin.Context) {
 	}
 	resp, err := h.svc.Pay(c.GetInt64("user_id"), req)
 	if err != nil {
-		response.Error(c, paymentErrorCode(err), err.Error())
+		code := paymentErrorCode(err)
+		if code == errcode.InternalError {
+			slog.Error("发起支付失败", "order_no", req.OrderNo, "channel", req.Channel, "error", err)
+		}
+		response.Error(c, code, err.Error())
 		return
 	}
 	response.Success(c, resp)

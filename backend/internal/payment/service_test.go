@@ -97,6 +97,12 @@ func TestPayChannels_OnlyConfiguredChannelsAreOffered(t *testing.T) {
 	assert.Empty(t, (&YeepayClient{}).PayChannels(), "未接入时不开放任何支付方式")
 }
 
+func TestGoodsName(t *testing.T) {
+	assert.Equal(t, "算力租赁 H100 x8卡", goodsName("H100", 8, 0))
+	assert.Equal(t, "算力租赁 昇腾910B x1台", goodsName("昇腾910B", 0, 1), "买断商品没有卡数")
+	assert.Equal(t, "算力租赁", goodsName("", 0, 0))
+}
+
 // 金额与易宝交互时以元字符串传递, 换算必须精确到分且不经浮点。
 func TestYuanConversion(t *testing.T) {
 	for in, want := range map[string]int64{"0": 0, "0.01": 1, "1": 100, "1.5": 150, "138.00": 13800, "138.000": 13800, "201600.99": 20160099} {

@@ -417,6 +417,34 @@ func TestTradePaymentCallbackUnlocksDeliveryAndIsIdempotent(t *testing.T) {
 }
 
 // 交付前退款: 资金仍在待分账账户, 原路退回且不归还任何分账; 退款失败可由运营重试。
+// 买断商品必须在发布时给出每台卡数; 早期已上架、卡数为 NULL 的买断商品
+// 曾导致发起支付扫描失败(买家看到"在线支付暂不可用"), 存量商品也必须能正常付款。
+func TestTradeOutrightProductCardCountIsRequiredAndLegacyProductsStillPay(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	input := map[string]any{"product_type": "outright", "gpu_model": "昇腾910B", "machine_count": 1,
+		"delivery_mode": "bare_metal", "pricing_mode": "perpetual", "unit_price": 100,
+		"stock": 1, "min_order": 1, "min_duration": 1, "region": "北京", "compliance_agreed": true, "compliance_version": "2026-09-06.1"}
+	tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", input, 40001)
+	input["card_count"] = 8
+	created := tradeRequest(t, tradeRouter(db, 101), "POST", "/api/v1/supplier/products", input, 0)
+	id := int64(created.Data.(map[string]any)["id"].(float64))
+	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 0)
+	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{"product_id": id, "quantity": 1, "duration": 1, "compliance_agreed": true, "compliance_version": "2026-09-06.1"}, 0)
+	no := placed.Data.(map[string]any)["order_no"].(string)
+
+	db.MustExec("UPDATE products SET card_count=NULL WHERE id=?", id) // 模拟存量商品
+	gateway := &testPaymentGateway{channels: []string{"bank"}}
+	service := payment.NewService(payment.NewRepository(db), db, gateway)
+	checkout, err := service.Pay(102, payment.PayReq{OrderNo: no, Channel: "bank"})
+	if err != nil || checkout == nil || gateway.calls != 1 || gateway.amount != 100 {
+		t.Fatalf("legacy outright checkout: %+v calls=%d amount=%d err=%v", checkout, gateway.calls, gateway.amount, err)
+	}
+	// 存量商品重新送审时, 运营不能在缺卡数的情况下通过。
+	db.MustExec("UPDATE products SET status='pending' WHERE id=?", id)
+	tradeRequest(t, tradeRouter(db, 104), "POST", fmt.Sprintf("/api/v1/admin/audits/products/%d/approve", id), nil, 40001)
+}
+
 func TestTradeRefundBeforeDeliveryUsesUndividedFunds(t *testing.T) {
 	db := setupTradeDB(t)
 	seedTradeUsers(db)

@@ -59,6 +59,18 @@ type PayResp struct {
 	TxID   string `json:"tx_id"`
 }
 
+// goodsName 易宝收银台展示的商品名。
+func goodsName(gpuModel string, cards, machines int) string {
+	name := strings.TrimSpace("算力租赁 " + gpuModel)
+	switch {
+	case cards > 0:
+		return fmt.Sprintf("%s x%d卡", name, cards)
+	case machines > 0:
+		return fmt.Sprintf("%s x%d台", name, machines)
+	}
+	return name
+}
+
 // PayChannels 买家下单时可选的支付方式(与易宝已开通产品一致)。
 func (s *Service) PayChannels() []string { return s.yeepay.PayChannels() }
 
@@ -79,12 +91,15 @@ func (s *Service) Pay(buyerID int64, req PayReq) (*PayResp, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 买断/算力中心商品没有卡数, 空心机房没有型号: 这些列可能为 NULL。
 	var order struct {
 		payableOrder
-		GPUModel  string `db:"gpu_model"`
-		CardCount int    `db:"card_count"`
+		GPUModel     string `db:"gpu_model"`
+		CardCount    int    `db:"card_count"`
+		MachineCount int    `db:"machine_count"`
 	}
-	if err := tx.Get(&order, `SELECT o.buyer_id,o.total_amount,o.status,o.payment_expires_at,p.gpu_model,p.card_count
+	if err := tx.Get(&order, `SELECT o.buyer_id,o.total_amount,o.status,o.payment_expires_at,
+		COALESCE(p.gpu_model,'') AS gpu_model,COALESCE(p.card_count,0) AS card_count,COALESCE(p.machine_count,0) AS machine_count
 		FROM orders o JOIN products p ON p.id=o.product_id WHERE o.order_no=? FOR UPDATE`, req.OrderNo); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("order not found")
@@ -129,7 +144,7 @@ func (s *Service) Pay(buyerID int64, req PayReq) (*PayResp, error) {
 	}
 	checkout, err := s.yeepay.CreatePayment(PaymentOrder{
 		OrderNo: req.OrderNo, Amount: order.Amount, Channel: req.Channel, ExpiresAt: *order.ExpiresAt,
-		GoodsName: fmt.Sprintf("算力租赁 %s x%d", order.GPUModel, order.CardCount),
+		GoodsName: goodsName(order.GPUModel, order.CardCount, order.MachineCount),
 	})
 	if err != nil {
 		return nil, err

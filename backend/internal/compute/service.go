@@ -656,6 +656,9 @@ func ValidateProductReq(req CreateProductReq) error {
 		if req.MachineCount <= 0 {
 			return fmt.Errorf("买断商品的台数必须大于 0")
 		}
+		if err := validateCardsPerMachine(req); err != nil {
+			return err
+		}
 		if req.UnitPrice <= 0 {
 			return fmt.Errorf("买断商品的单价必须大于 0")
 		}
@@ -665,6 +668,9 @@ func ValidateProductReq(req CreateProductReq) error {
 	case ProductTypeCenter:
 		if req.MachineCount <= 0 {
 			return fmt.Errorf("算力中心商品的台数必须大于 0")
+		}
+		if err := validateCardsPerMachine(req); err != nil {
+			return err
 		}
 		if strings.TrimSpace(req.TotalPflopsApprox) == "" {
 			return fmt.Errorf("算力中心商品必须填写约总算力(如 128P)")
@@ -685,6 +691,18 @@ func ValidateProductReq(req CreateProductReq) error {
 		if req.UnitPrice != 0 {
 			return fmt.Errorf("空心机房为面议商品, 单价必须为 0")
 		}
+	}
+	return nil
+}
+
+// validateCardsPerMachine 买断/算力中心按台交易, 但调度建议、算力评估都按卡核算,
+// 所以发布时就必须给出总卡数且每台一致(见 CardsPerUnit), 不能留到下单交付时才报错。
+func validateCardsPerMachine(req CreateProductReq) error {
+	if req.CardCount <= 0 {
+		return fmt.Errorf("请填写每台卡数")
+	}
+	if _, err := CardsPerUnit(req.ProductType, req.CardCount, req.MachineCount); err != nil {
+		return fmt.Errorf("总卡数必须是台数的整数倍(每台卡数一致)")
 	}
 	return nil
 }
@@ -896,6 +914,20 @@ func (s *Service) GetSupplierProductsGrouped(supplierID int64) ([]ProductTypeGro
 }
 
 func (s *Service) ApproveProduct(id int64) error {
+	p, err := s.repo.GetProductByID(id)
+	if err != nil {
+		return err
+	}
+	// 早期发布的买断/算力中心商品没有卡数, 重新上架时也要拦住, 让供给方补全后再审。
+	if p.ProductType == ProductTypeOutright || p.ProductType == ProductTypeCenter {
+		machines := 0
+		if p.MachineCount != nil {
+			machines = *p.MachineCount
+		}
+		if _, err := CardsPerUnit(p.ProductType, p.CardCount, machines); err != nil {
+			return fmt.Errorf("商品规格缺少每台卡数, 请驳回让供给方补全后再通过")
+		}
+	}
 	return s.repo.ReviewProduct(id, "active", "")
 }
 
