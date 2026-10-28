@@ -13,6 +13,7 @@ import (
 	"tokenfactory/internal/legal"
 	"tokenfactory/internal/trading"
 	"tokenfactory/pkg/crypto"
+	"tokenfactory/pkg/errcode"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
@@ -2079,7 +2080,7 @@ func (s *Service) SyncResource(operatorID int64, isAdmin bool, syncType string, 
 		return nil, fmt.Errorf("无权盘点该商品: 商品不属于当前供给方")
 	}
 	if p.FulfillmentMode == FulfillmentManaged {
-		return nil, fmt.Errorf("托管商品库存由节点卡槽探活派生, 不支持人工盘点")
+		return nil, errcode.New(errcode.ParamInvalid, "托管商品库存由平台按卡槽自动计算")
 	}
 	// 被动上报只能由供给方发起, 主动盘点只能由运营发起, 防止身份与类型错配。
 	if syncType == "active" && !isAdmin {

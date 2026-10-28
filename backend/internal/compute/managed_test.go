@@ -44,9 +44,9 @@ func TestManagedFulfillmentValidation(t *testing.T) {
 
 func TestManagedStockIgnoredAndDraftStatus(t *testing.T) {
 	req := validCardRentalReq()
-	req.FulfillmentMode, req.DeliveryMode, req.Stock = FulfillmentManaged, "container", 0
+	req.FulfillmentMode, req.DeliveryMode, req.Stock = FulfillmentManaged, "container", 50
 	n := NormalizeProductReq(req)
-	assert.Equal(t, 0, n.Stock)
+	assert.Equal(t, 0, n.Stock, "托管商品忽略人工填写的库存")
 	assert.NoError(t, ValidateProductReq(n), "托管商品库存由卡槽派生, stock=0 不应报错")
 	assert.Equal(t, "draft", initialProductStatus(FulfillmentManaged))
 	assert.Equal(t, "pending", initialProductStatus(FulfillmentManual))
