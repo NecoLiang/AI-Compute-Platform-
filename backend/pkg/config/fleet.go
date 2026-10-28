@@ -65,6 +65,8 @@ type AccessGWConfig struct {
 	EgressIPs      []string
 	UpstreamPubkey string
 	HMACSecret     string
+	// HostKeyFingerprint 网关自身 SSH 主机密钥指纹(SHA256:...), 主服务经网关自检时据此固定网关身份。
+	HostKeyFingerprint string
 }
 
 func loadFleet(v *viper.Viper, cfg *Config) error {
@@ -96,12 +98,13 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 		return fmt.Errorf("fleet.base_images 格式错误(应为 [{name, ref}] 列表): %w", err)
 	}
 	gw := AccessGWConfig{
-		PublicHost:     strings.TrimSpace(v.GetString("accessgw.public_host")),
-		PublicPort:     v.GetInt("accessgw.public_port"),
-		InternalListen: strings.TrimSpace(v.GetString("accessgw.internal_listen")),
-		EgressIPs:      cleanList(v.GetStringSlice("accessgw.egress_ips")),
-		UpstreamPubkey: strings.TrimSpace(v.GetString("accessgw.upstream_pubkey")),
-		HMACSecret:     v.GetString("accessgw.hmac_secret"),
+		PublicHost:         strings.TrimSpace(v.GetString("accessgw.public_host")),
+		PublicPort:         v.GetInt("accessgw.public_port"),
+		InternalListen:     strings.TrimSpace(v.GetString("accessgw.internal_listen")),
+		EgressIPs:          cleanList(v.GetStringSlice("accessgw.egress_ips")),
+		UpstreamPubkey:     strings.TrimSpace(v.GetString("accessgw.upstream_pubkey")),
+		HMACSecret:         v.GetString("accessgw.hmac_secret"),
+		HostKeyFingerprint: strings.TrimSpace(v.GetString("accessgw.host_key_fingerprint")),
 	}
 	applyFleetDefaults(&f, &gw)
 	cfg.Fleet = f
@@ -211,6 +214,11 @@ func validateFleet(cfg *Config) error {
 		missing = append(missing, "accessgw.hmac_secret")
 	} else if len(gw.HMACSecret) < 32 {
 		invalid = append(invalid, "accessgw.hmac_secret 至少 32 字节")
+	}
+	if gw.HostKeyFingerprint == "" {
+		missing = append(missing, "accessgw.host_key_fingerprint")
+	} else if !strings.HasPrefix(gw.HostKeyFingerprint, "SHA256:") {
+		invalid = append(invalid, "accessgw.host_key_fingerprint 须为 SHA256:... 格式(ssh-keygen -lf 输出)")
 	}
 	if f.Probe.MinPerfRatio > 1 {
 		invalid = append(invalid, "fleet.probe.min_perf_ratio 须在 (0,1]")

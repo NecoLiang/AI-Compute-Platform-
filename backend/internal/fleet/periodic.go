@@ -27,8 +27,18 @@ const (
 func (s *Service) RunPeriodic(ctx context.Context) {
 	t := time.NewTicker(lightInterval)
 	defer t.Stop()
+	var lastPurge time.Time
 	for {
 		s.periodicRound(ctx)
+		if time.Since(lastPurge) >= time.Hour {
+			lastPurge = time.Now()
+			// 访问会话审计保留 180 天(docs/25 §25.6.3)。
+			if n, err := s.repo.PurgeOldSessions(lastPurge.Add(-sessionRetention)); err != nil {
+				slog.Error("清理过期访问会话记录失败", "error", err)
+			} else if n > 0 {
+				slog.Info("已清理过期访问会话记录", "rows", n)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return

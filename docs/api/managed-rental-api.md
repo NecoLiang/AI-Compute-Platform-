@@ -3,8 +3,8 @@
 **Base**: `http://localhost:8080/api/v1` | **Auth**: 供给方接口需 supplier 角色（只能操作自己商品下的节点）；运营接口需 operator/admin
 **设计**：`docs/25`（§25.4 节点接入、§25.8.1 节点状态机、§25.10 API 摘要）。本文件为正式接口契约。
 
-> **当前范围（v1.2 S1，T-076~T-081）**：节点接入、探活、卡槽、运营停用/恢复与任务重试。
-> 租约、买家连接、访问网关（S2，T-082 起）的接口由后续阶段追加到本文件，**此处尚未提供**。
+> **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）。
+> 买家公钥、连接信息、会话记录与运营租约/会话检索（T-086）见「买家连接」「运营接口」相应小节。
 
 **开关**：所有接口仅在 `fleet.enabled=true` 时注册。关闭时（默认）这些路径未注册（HTTP 404），`POST /supplier/nodes` 传 `mgmt_mode:"ssh"` 返回 40001「托管履约未启用(fleet.enabled=false)」，托管商品不可提交审核与下单（40001），人工模式行为不变。
 
@@ -194,7 +194,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 | P8 | 主机资源 | CPU/内存/Docker 数据目录所在盘/OS/内核 + 驱动 ≥ `fleet.min_driver_version` |
 | P9 | 容器运行时 | Docker ≥ 24；拉取 `fleet.probe_image`；`docker run --gpus "device=<空闲卡>"` 可见卡数一致 |
 | P10 | 磁盘配额（非必检） | `--storage-opt size=1G`；不支持则只能整机出租 |
-| P11 | 租约端口：网关可达 | 端口段内**从末尾向下**选空闲端口起临时 TCP 监听容器，由访问网关做连通自检。**网关（S2）未接入时判不通过** |
+| P11 | 租约端口：网关可达 | 端口段内**从末尾向下**选空闲端口起临时 TCP 监听容器，由访问网关从其出口做 TCP 连通自检（S2 T-085：系统自检身份登录 `p-<token>` 下发任务，见下文「访问网关内部接口」`probe`）。网关未配置、不可达、主机指纹不符或未在 10s 内回报 → 判不通过 |
 | P12 | 租约端口：未裸露 | 同一端口从主服务出口直连，必须连不上 |
 | P13 | 短压测 | 空闲卡逐卡 FP16 矩阵乘（默认 60s）+ 降频采样 + 压测后复扫 Xid/ECC；低于 `gpu_catalog.probe_baseline_tflops × fleet.probe.min_perf_ratio`、降频、掉卡的卡标 `faulty`；**全部卡不通过才判不通过**；无空闲卡时通过并注明 |
 
@@ -203,3 +203,116 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 **结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间 SSH 信息被修改或节点被停用 → 结论作废（任务 `result.discarded=true`），不改节点状态。
 
 **周期**：`verified` 节点每 60s SSH 轻量探活（`nvidia-smi` 利用率/温度/ECC + Docker 守护进程 + 近 2 分钟 Xid），成功写心跳与 `available_cards`；距上次成功超过 90s → `offline` + 通知，恢复后自动上线。空闲卡掉卡或出现致命错误 → `faulty` + 通知；在租卡异常仅记运营告警（租约侧处理在 S2）。完整探活每 12h、端口复测每 24h 自动入队。
+
+---
+
+## 访问网关内部接口（S2 T-085）✅
+
+仅供访问网关插件（`backend/cmd/accessgw`，运行在 sshpiperd v1.6.1 下）调用。**不在公网 API 上**：主服务在 `accessgw.internal_listen`（内网地址）上单独起一个 HTTP 服务，只挂下列路径；公网路由组不注册它们。设计见 docs/25 §25.6.2/§25.6.3 及其「S2 实现口径（T-085）」。
+
+**Base**：`http://<accessgw.internal_listen>/api/v1/internal/accessgw`
+
+**签名（每个请求必带）**
+
+| 请求头 | 值 |
+|---|---|
+| `X-Gw-Timestamp` | Unix 秒；与主服务时钟偏差 > 60s 拒绝 |
+| `X-Gw-Nonce` | 16 字节随机数的小写 hex（32 位）；300s 内不可重复 |
+| `X-Gw-Signature` | `hex(HMAC-SHA256(accessgw.hmac_secret, method + "\n" + uri + "\n" + ts + "\n" + nonce + "\n" + hex(sha256(body))))`，小写 hex |
+
+`uri` 为 RequestURI（路径 + 查询串，按实际发送的编码），例如 `/api/v1/internal/accessgw/revocations?cursor=1793181263-42`；GET 的 body 为空串。请求体上限 1 MiB。
+
+**错误**：信封与 HTTP 200 同公网接口。签名/时间戳/nonce 不合法或重放 → `40100`「签名校验失败」；Redis 不可用（nonce 去重、爆破计数、探活任务）→ `50000`；签名通过但路径不存在 → `40400`；请求体非法 → `40001`。
+
+### POST /auth · 鉴权与路由
+
+请求：
+
+```json
+{"login":"l-7f3k9q2a","method":"publickey","pubkey_fp":"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU","remote_ip":"198.51.100.7"}
+```
+
+```json
+{"login":"l-7f3k9q2a","method":"password","password":"<访问凭证 access_value>","remote_ip":"2001:db8::7"}
+```
+
+- `method` ∈ `publickey` / `password`，其他 40001；`publickey` 时 `pubkey_fp` 必须以 `SHA256:` 开头，否则 40001；`remote_ip` 必须是合法 IP（不带端口），否则 40001。
+- 不存在/非法的登录名、凭证不符、租约不可登录都**不是错误**：返回 `allow:false`，网关统一提示认证失败。
+
+放行（买家）：
+
+```json
+{"code":0,"message":"success","data":{"allow":true,"upstream_host":"203.0.113.20","upstream_port":40001,"upstream_host_key_fp":"SHA256:Zq0n6n9Lr0m7y3G2b1J1p3b5fK0wQ3Xc9eN8uT4sV2A","access_until":"2026-11-27T10:00:00+08:00","cache_ttl_s":30},"request_id":"..."}
+```
+
+拒绝：
+
+```json
+{"code":0,"message":"success","data":{"allow":false,"cache_ttl_s":0},"request_id":"..."}
+```
+
+系统自检身份（`fleet.selftest_key_file` 公钥）登录 `provisioning` 租约（开通自检）：`allow:true`、`"system":true`、`"cache_ttl_s":0`，其余字段同买家放行。系统身份登录 `p-<token>`（P11 端口自检，token 为 32 位小写 hex，已由主服务登记）：
+
+```json
+{"code":0,"message":"success","data":{"allow":false,"cache_ttl_s":0,"probe":{"token":"9f2c4b1e0a7d4c3b8e6f5a4d3c2b1a09","host":"203.0.113.20","port":40999}},"request_id":"..."}
+```
+
+网关收到 `probe` 后从自身出口对 `host:port` 做 5s TCP 连接，调用 `/probe-result` 回报，然后拒绝该 SSH 登录。
+
+判定规则：
+
+| 条件 | 结果 |
+|---|---|
+| 来源 IP 处于封禁期（10 分钟内密码失败 20 次 → 封 30 分钟，按规范化后的 IP） | 拒绝（所有方式） |
+| `password` 且「登录名+IP」处于锁定期（10 分钟内失败 10 次 → 锁 15 分钟） | 拒绝（公钥不受影响） |
+| 租约 `state=active`、`delivery_kind=container`、`now < access_until`、已有上游端口与主机指纹 | 才进入凭证比对 |
+| 公钥：指纹属于租约买家且 `revoked_at IS NULL` / 密码：等于订单访问凭证（常量时间比较） | 放行，`cache_ttl_s = min(30, access_until − now)` |
+| 系统身份 | 仅 `provisioning` 且路由齐全的租约放行；不计数、不受封禁 |
+
+只有**密码**失败计入爆破计数；公钥失败不计（SSH 客户端会依次尝试多把公钥）。
+
+### GET /revocations?cursor= · 撤销游标
+
+`cursor` 格式 `"<unix 秒>-<lease id>"`；首次传空串取起点。
+
+```json
+{"code":0,"message":"success","data":{"logins":[],"cursor":"1793181261-0"},"request_id":"..."}
+```
+
+```json
+{"code":0,"message":"success","data":{"logins":["l-7f3k9q2a","l-ab2cd3ef"],"cursor":"1793181263-42"},"request_id":"..."}
+```
+
+- 返回 `leases.access_changed_at` 在游标之后（按 `(access_changed_at, id)` 严格递增）且**早于当前 2 秒**的租约登录名，每页最多 1000 条；没有新行时 `cursor` 原样返回。空游标返回 `NOW()−2s` 处的起点，不回放历史。
+- 网关拿到 `logins` 即清掉这些登录名的放行缓存；`logins` 满 1000 条时立即用新游标再拉（单次轮询最多 20 页）。轮询失败 → 网关清空全部缓存。
+- `access_changed_at` 刷新时机（S2 现状）：租约每次状态迁移；买家删除公钥（刷新其名下 `active/parked/suspended/grace` 租约，T-086）。冻结吊销凭证、续租改 `access_until`、访问凭证重置时的刷新属 T-088（`Repository.touchAccess` 已备好）；在此之前这几类变化依赖缓存 TTL（≤ 30s）自然失效。
+- 游标格式非法 → 40001。
+
+### POST /sessions · 会话事件上报
+
+```json
+{"events":[
+  {"gw_session_id":"7b0c…e1","login":"l-7f3k9q2a","remote_ip":"198.51.100.7","auth_method":"publickey","key_fingerprint":"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU","started_at":"2026-10-28T10:00:00+08:00","bytes_up":0,"bytes_down":0},
+  {"gw_session_id":"7b0c…e1","login":"l-7f3k9q2a","remote_ip":"198.51.100.7","auth_method":"publickey","key_fingerprint":"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU","started_at":"2026-10-28T10:00:00+08:00","ended_at":"2026-10-28T11:30:00+08:00","bytes_up":0,"bytes_down":0,"end_reason":"closed"}
+]}
+```
+
+```json
+{"code":0,"message":"success","data":{"accepted":2,"ignored":0},"request_id":"..."}
+```
+
+- 单批最多 500 条，超过 40001。按 `gw_session_id` upsert：开始与结束事件可分批、乱序、重复上报；`ended_at`/`end_reason` 首次写入后不再覆盖，字节数取较大值。
+- 计入 `ignored`（不报错）：登录名不是存在的租约、`auth_method` 不是 `publickey/password`、`remote_ip` 非法、`ended_at` 早于 `started_at`、`gw_session_id` 为空或过长、指纹为系统自检身份。
+- `bytes_up/bytes_down`：sshpiperd v1.6.1 插件拿不到字节计数，当前恒为 0。`end_reason`：`closed`（正常断开）或错误摘要。不记录会话内容。保留 180 天。
+
+### POST /probe-result · P11 端口自检回报
+
+```json
+{"token":"9f2c4b1e0a7d4c3b8e6f5a4d3c2b1a09","reachable":false,"error":"dial tcp 203.0.113.20:40999: connect: connection refused"}
+```
+
+```json
+{"code":0,"message":"success","data":{},"request_id":"..."}
+```
+
+`token` 非 32 位小写 hex → 40001；未登记或已过期（任务 2 分钟有效）→ 40400。结果保存 120s，主服务读取后删除。

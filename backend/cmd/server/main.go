@@ -133,6 +133,7 @@ func main() {
 	// 托管零租 S1 节点接入与探活 (docs/25 §25.4)。fleet.enabled=false(默认)时不装配,
 	// 现有行为不变: 添加 ssh 托管节点返回明确错误, 托管商品提交审核被拒。
 	var fleetSvc *fleet.Service
+	var internalSrv *http.Server
 	if cfg.Fleet.Enabled {
 		credKey, kerr := tfcrypto.ParseKeyHex(cfg.Security.CredentialKey)
 		if kerr != nil {
@@ -146,7 +147,27 @@ func main() {
 		computeSvc.SetLeaseHooks(fleetSvc.LeaseHooks())
 		paymentSvc.SetPaidHook(computeSvc.OnOrderPaidTx)
 		schedulerSvc.SetManagedNodes(fleetSvc)
-		slog.Warn("fleet 已启用; 访问网关(S2)未接入前探活 P11 判为不通过, 托管节点无法进入 verified")
+
+		// 访问网关 (docs/25 §25.6, T-085): 系统自检身份 + 内部接口(独立监听, 不挂公网路由)。
+		// 任一环节不可用即启动失败, 不降级为"跳过自检"。
+		signer, serr := fleet.LoadSelftestSigner(cfg.Fleet.SelftestKeyFile)
+		if serr != nil {
+			slog.Error("fleet.enabled=true 但系统自检私钥不可用", "error", serr)
+			os.Exit(1)
+		}
+		gwClient, gerr := fleet.NewGatewayClient(cfg.AccessGW, signer, rdb)
+		if gerr != nil {
+			slog.Error("fleet.enabled=true 但访问网关自检客户端配置不完整", "error", gerr)
+			os.Exit(1)
+		}
+		fleetSvc.SetGateway(gwClient)
+		gwAPI, aerr := fleet.NewGatewayAPI(fleetSvc, rdb, cfg.AccessGW.HMACSecret, gwClient.SelftestFingerprint())
+		if aerr != nil {
+			slog.Error("访问网关内部接口无法初始化", "error", aerr)
+			os.Exit(1)
+		}
+		internalSrv = &http.Server{Addr: cfg.AccessGW.InternalListen, Handler: gwAPI.Router(),
+			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
 	}
 
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
@@ -339,6 +360,16 @@ func main() {
 		go fleetSvc.RunPeriodic(workerCtx)
 	}
 
+	if internalSrv != nil {
+		go func() {
+			slog.Info("访问网关内部接口监听", "addr", internalSrv.Addr)
+			if err := internalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("访问网关内部接口监听失败", "error", err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	go func() {
 		slog.Info("server starting", "port", cfg.Server.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -357,4 +388,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+	if internalSrv != nil {
+		internalSrv.Shutdown(ctx)
+	}
 }

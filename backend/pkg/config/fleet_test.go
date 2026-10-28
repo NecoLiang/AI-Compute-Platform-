@@ -36,7 +36,8 @@ func TestFleetEnabledListsEveryMissingKey(t *testing.T) {
 	}
 	for _, key := range []string{"fleet.controller_egress_ips", "fleet.base_images", "fleet.probe_image",
 		"fleet.min_driver_version", "fleet.selftest_key_file", "security.credential_key", "accessgw.public_host",
-		"accessgw.internal_listen", "accessgw.egress_ips", "accessgw.upstream_pubkey", "accessgw.hmac_secret"} {
+		"accessgw.internal_listen", "accessgw.egress_ips", "accessgw.upstream_pubkey", "accessgw.hmac_secret",
+		"accessgw.host_key_fingerprint"} {
 		if !strings.Contains(err.Error(), key) {
 			t.Errorf("missing key %s not reported: %v", key, err)
 		}
@@ -63,6 +64,7 @@ accessgw:
   egress_ips: 10.0.0.3, 47.0.0.3
   upstream_pubkey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample gw
   hmac_secret: 0123456789abcdef0123456789abcdef
+  host_key_fingerprint: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s
 `
 
 func TestFleetEnabledValidConfigLoads(t *testing.T) {
