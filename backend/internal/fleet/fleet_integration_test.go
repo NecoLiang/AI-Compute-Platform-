@@ -76,6 +76,7 @@ type stubGateway struct {
 	leaseOut string
 	leaseErr error
 	leases   []string
+	rechecks []string
 	onLease  func()
 }
 
@@ -88,6 +89,13 @@ func (g *stubGateway) SelfTestLease(_ context.Context, leaseNo string) (string, 
 		fn()
 	}
 	return out, err
+}
+
+func (g *stubGateway) RecheckLease(ctx context.Context, leaseNo string) (string, error) {
+	g.mu.Lock()
+	g.rechecks = append(g.rechecks, leaseNo)
+	g.mu.Unlock()
+	return g.SelfTestLease(ctx, leaseNo)
 }
 
 func (g *stubGateway) SelfTestPort(_ context.Context, _ int64, _ string, port int) error {

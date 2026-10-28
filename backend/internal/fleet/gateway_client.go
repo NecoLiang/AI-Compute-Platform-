@@ -139,6 +139,19 @@ func (c *GatewayClient) SelfTestLease(ctx context.Context, leaseNo string) (stri
 	return out.String(), nil
 }
 
+// RecheckLease 节点重启对账(T-087): 在 Redis 登记复检许可后以系统自检身份经网关登录 active 租约,
+// 执行 nvidia-smi -L 并返回输出; 结束即删除许可。
+func (c *GatewayClient) RecheckLease(ctx context.Context, leaseNo string) (string, error) {
+	if !ValidLeaseNo(leaseNo) {
+		return "", fmt.Errorf("租约号非法: %q", leaseNo)
+	}
+	if err := c.rdb.Set(ctx, recheckKey(leaseNo), "1", gwRecheckTTL).Err(); err != nil {
+		return "", fmt.Errorf("登记复检许可失败(Redis): %w", err)
+	}
+	defer c.rdb.Del(context.WithoutCancel(ctx), recheckKey(leaseNo))
+	return c.SelfTestLease(ctx, leaseNo)
+}
+
 // SelfTestPort P11: 在 Redis 登记一次性探活任务, 以系统身份登录临时用户名 p-<token>; 网关识别后从其出口对
 // host:port 做 TCP 连接并回报结果, 然后拒绝该登录。这里等待并读取回报。
 func (c *GatewayClient) SelfTestPort(ctx context.Context, nodeID int64, host string, port int) error {

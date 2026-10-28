@@ -228,12 +228,19 @@ func (s *Service) FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error) {
 	return true, s.repo.RevokeAccessByOrderTx(tx, o.ID)
 }
 
-// ManagedOrderAccess 托管订单访问信息所需的订单字段(买家本人校验在 fleet 侧完成)。
 // ManagedOrderByID 托管订单只读查询(fleet 收尾通知、到期扫描用)。
 func (s *Service) ManagedOrderByID(orderID int64) (*Order, error) {
 	return s.repo.GetOrderByID(orderID)
 }
 
+// CompleteExpiredManagedOrder fleet 30s 到期扫描(docs/25 §25.7.1): 与 CompleteExpiredLeases 同一守卫式流转
+// (active → completed, 要求 lease_end_at 已过), 同一事务内经 LeaseHooks.ReleaseTx 把租约转 grace 并入队 stop。
+// 主服务 5 分钟任务与本方法可能同时命中同一订单, 守卫式 UPDATE 保证只流转一次。
+func (s *Service) CompleteExpiredManagedOrder(orderNo string) (bool, error) {
+	return s.releaseStockTxDeadline(orderNo, []string{"active"}, "completed", true)
+}
+
+// OrderForAccess 托管订单访问信息所需的订单字段(买家本人校验在 fleet 侧完成)。
 func (s *Service) OrderForAccess(orderNo string) (*Order, error) {
 	return s.repo.GetOrderByNo(orderNo)
 }

@@ -262,6 +262,22 @@ func TestGatewayAPISystemIdentityAndProbe(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, r.Allow)
 
+	// active 租约: 系统身份默认无权登录; 主服务登记复检许可(节点重启对账)期间可登录, 许可删除即失效。
+	e.db.MustExec(`UPDATE leases SET state='active' WHERE id=?`, e.lease.ID)
+	r, err = e.api.Authenticate(ctx, pkReq(login, "10.0.0.1", e.sys))
+	require.NoError(t, err)
+	assert.False(t, r.Allow)
+	require.NoError(t, e.rdb.Set(ctx, recheckKey(login), "1", time.Minute).Err())
+	r, err = e.api.Authenticate(ctx, pkReq(login, "10.0.0.1", e.sys))
+	require.NoError(t, err)
+	assert.True(t, r.Allow)
+	assert.True(t, r.System)
+	require.NoError(t, e.rdb.Del(ctx, recheckKey(login)).Err())
+	r, err = e.api.Authenticate(ctx, pkReq(login, "10.0.0.1", e.sys))
+	require.NoError(t, err)
+	assert.False(t, r.Allow)
+	e.db.MustExec(`UPDATE leases SET state='provisioning' WHERE id=?`, e.lease.ID)
+
 	// P11 探活: 只有系统身份 + 已登记的 token 才下发任务, 且 allow 恒为 false。
 	token, err := accessgw.NewNonce()
 	require.NoError(t, err)

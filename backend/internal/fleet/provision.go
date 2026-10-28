@@ -200,39 +200,54 @@ func runRemote(ctx context.Context, r Runner, cmd string, d time.Duration) (stri
 
 // firewall ②。
 func (p *provisionRun) firewall(ctx context.Context) error {
-	if _, err := p.ensureImage(ctx, p.s.cfg.ProbeImage); err != nil {
-		return fmt.Errorf("平台探针镜像(下发防火墙规则用): %w", err)
-	}
-	start, end := portRange(p.n)
-	cmd, err := firewallCommand(p.s.cfg.ProbeImage, p.s.gwEgress, start, end)
+	rules, err := p.s.applyFirewall(ctx, p.client, p.n)
 	if err != nil {
 		return err
 	}
-	out, err := runRemote(ctx, p.client, cmd, cmdTimeout)
+	p.out.Firewall = append(p.out.Firewall, rules...)
+	return nil
+}
+
+// applyFirewall 下发节点租约端口段来源限制(幂等; 开通 ② 与节点重启对账共用), 返回各后端的结论。
+func (s *Service) applyFirewall(ctx context.Context, client Runner, n *Node) ([]string, error) {
+	if _, err := ensureImageOn(ctx, client, s.cfg.ProbeImage); err != nil {
+		return nil, fmt.Errorf("平台探针镜像(下发防火墙规则用): %w", err)
+	}
+	start, end := portRange(n)
+	cmd, err := firewallCommand(s.cfg.ProbeImage, s.gwEgress, start, end)
+	if err != nil {
+		return nil, err
+	}
+	out, err := runRemote(ctx, client, cmd, cmdTimeout)
 	if strings.Contains(out, "@@nochain") {
-		return fmt.Errorf("节点上没有 DOCKER-USER 链(Docker 未启用 iptables 管理), 无法限制租约端口来源")
+		return nil, fmt.Errorf("节点上没有 DOCKER-USER 链(Docker 未启用 iptables 管理), 无法限制租约端口来源")
 	}
 	if err != nil {
-		return fmt.Errorf("下发租约端口防火墙规则失败: %w", err)
+		return nil, fmt.Errorf("下发租约端口防火墙规则失败: %w", err)
 	}
+	var rules []string
 	for _, l := range nonEmptyLines(out) {
 		if strings.HasPrefix(l, "@@present ") || strings.HasPrefix(l, "@@applied ") {
-			p.out.Firewall = append(p.out.Firewall, strings.TrimPrefix(l, "@@"))
+			rules = append(rules, strings.TrimPrefix(l, "@@"))
 		}
 	}
-	if len(p.out.Firewall) == 0 {
-		return fmt.Errorf("防火墙规则脚本无结论输出: %q", truncate(strings.TrimSpace(out), 200))
+	if len(rules) == 0 {
+		return nil, fmt.Errorf("防火墙规则脚本无结论输出: %q", truncate(strings.TrimSpace(out), 200))
 	}
-	return nil
+	return rules, nil
 }
 
 // ensureImage 镜像不在本地时拉取(≤30min), 返回是否发生了拉取。
 func (p *provisionRun) ensureImage(ctx context.Context, image string) (bool, error) {
+	return ensureImageOn(ctx, p.client, image)
+}
+
+func ensureImageOn(ctx context.Context, client Runner, image string) (bool, error) {
 	cmd, err := imagePresentCommand(image)
 	if err != nil {
 		return false, err
 	}
-	out, err := runRemote(ctx, p.client, cmd, cmdTimeout)
+	out, err := runRemote(ctx, client, cmd, cmdTimeout)
 	if err != nil {
 		return false, fmt.Errorf("检查镜像失败: %w", err)
 	}
@@ -246,7 +261,7 @@ func (p *provisionRun) ensureImage(ctx context.Context, image string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	if _, err := runRemote(ctx, p.client, pull, pullTimeout); err != nil {
+	if _, err := runRemote(ctx, client, pull, pullTimeout); err != nil {
 		return false, fmt.Errorf("拉取镜像失败: %w", err)
 	}
 	return true, nil

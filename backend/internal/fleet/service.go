@@ -33,6 +33,8 @@ type ProductStore interface {
 	ManagedAccessValue(q sqlx.Queryer, orderID int64) (string, error)
 	OrderForAccess(orderNo string) (*compute.Order, error)
 	ManagedOrderByID(orderID int64) (*compute.Order, error)
+	// 到期(T-087): 托管订单 active → completed(守卫式, 同事务经 ReleaseTx 转 grace)。
+	CompleteExpiredManagedOrder(orderNo string) (bool, error)
 }
 
 // HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
@@ -52,6 +54,8 @@ type GatewaySelfTester interface {
 	SelfTestPort(ctx context.Context, nodeID int64, host string, port int) error
 	// SelfTestLease 开通 ⑤: 以系统自检身份经网关公网入口登录 provisioning 租约, 执行 nvidia-smi -L 并返回输出。
 	SelfTestLease(ctx context.Context, leaseNo string) (string, error)
+	// RecheckLease 节点重启对账(T-087): 以系统自检身份经网关登录 active 租约(需主服务登记的一次性复检许可)。
+	RecheckLease(ctx context.Context, leaseNo string) (string, error)
 }
 
 // Deps fleet 的外部依赖, 全部由 main 注入。

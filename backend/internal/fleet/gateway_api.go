@@ -67,6 +67,12 @@ func probeKey(token string) string         { return "accessgw:probe:" + token }
 func probeResultKey(token string) string   { return "accessgw:probe:" + token + ":result" }
 func nonceKey(nonce string) string         { return "accessgw:nonce:" + nonce }
 
+// recheckKey 主服务对 active 租约的系统复检许可(节点重启对账, T-087): 存在期间系统自检身份可登录该 active 租约。
+func recheckKey(leaseNo string) string { return "accessgw:recheck:" + leaseNo }
+
+// gwRecheckTTL 复检许可有效期(覆盖一次经网关登录 + nvidia-smi)。
+const gwRecheckTTL = 2 * time.Minute
+
 // failIncr 固定窗口计数: 首次失败开 10 分钟窗口; 达到上限时把同一个键的有效期改为封禁时长,
 // 封禁期间值 ≥ 上限即视为封禁(不再递增, 等待自然过期)。只用设计文档约定的两个键。
 var failIncr = redis.NewScript(`
@@ -239,7 +245,8 @@ func (g *GatewayAPI) upstreamIP(ctx context.Context, r *gwLeaseRoute) (string, e
 	return a.String(), nil
 }
 
-// systemAuth 系统自检身份(fleet.selftest_key_file): 只能登录 provisioning 租约(开通自检), 或领取 P11 端口连通任务。
+// systemAuth 系统自检身份(fleet.selftest_key_file): 只能登录 provisioning 租约(开通自检)、主服务登记了复检许可
+// (accessgw:recheck:<lease_no>, 节点重启对账)的 active 租约, 或领取 P11 端口连通任务。
 func (g *GatewayAPI) systemAuth(ctx context.Context, login string) (*accessgw.AuthResponse, error) {
 	if token, ok := probeLoginToken(login); ok {
 		raw, err := g.rdb.Get(ctx, probeKey(token)).Bytes()
@@ -263,7 +270,20 @@ func (g *GatewayAPI) systemAuth(ctx context.Context, login string) (*accessgw.Au
 	if err != nil || r == nil {
 		return deny, err
 	}
-	if r.State != LeaseProvisioning || r.DeliveryKind != "container" || !r.routable() {
+	if r.DeliveryKind != "container" || !r.routable() {
+		return deny, nil
+	}
+	switch r.State {
+	case LeaseProvisioning:
+	case LeaseActive:
+		n, err := g.rdb.Exists(ctx, recheckKey(login)).Result()
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return deny, nil
+		}
+	default:
 		return deny, nil
 	}
 	upstream, err := g.upstreamIP(ctx, r)
