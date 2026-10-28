@@ -56,6 +56,7 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		id BIGINT PRIMARY KEY AUTO_INCREMENT,
 		supplier_id BIGINT NOT NULL DEFAULT 1,
 		stock INT NOT NULL DEFAULT 0,
+		fulfillment_mode ENUM('manual','managed') NOT NULL DEFAULT 'manual',
 		status ENUM('draft','pending','active','sold_out','offline','frozen') DEFAULT 'active'
 	)`)
 	db.MustExec(`CREATE TABLE orders (

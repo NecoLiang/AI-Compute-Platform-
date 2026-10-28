@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/pkg/errcode"
 )
 
 const (
@@ -41,11 +42,41 @@ type Notifier interface {
 type Service struct {
 	repo     *Repository
 	notifier Notifier
+	managed  ManagedNodes
 }
 
 func NewService(repo *Repository) *Service { return &Service{repo: repo} }
 
 func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+
+// ManagedNodeReq 托管节点(mgmt_mode=ssh)注册参数, 沿用 POST /supplier/nodes(docs/25 §25.10)。
+type ManagedNodeReq struct {
+	ProductID      int64
+	NodeName       string
+	TotalCards     int
+	DiskPerCardGB  int
+	LeasePortStart int
+	LeasePortEnd   int
+}
+
+// ManagedNodes 托管节点的生命周期由 fleet 负责, main 在 fleet.enabled=true 时注入。
+// 未注入时: 注册托管节点 40001, 删除托管节点 50000, 管理端列表不附加探活结论。
+type ManagedNodes interface {
+	RegisterManagedNode(supplierID int64, req ManagedNodeReq) (any, error)
+	DeleteManagedNode(supplierID, nodeID int64) error
+	// ManagedNodeExtras 按节点 ID 返回附加信息(最近探活结论等), 供运营列表展示。
+	ManagedNodeExtras(nodeIDs []int64) (map[int64]any, error)
+}
+
+func (s *Service) SetManagedNodes(m ManagedNodes) { s.managed = m }
+
+// RegisterManagedNode 托管节点注册: 委托 fleet。
+func (s *Service) RegisterManagedNode(supplierID int64, req ManagedNodeReq) (any, error) {
+	if s.managed == nil {
+		return nil, errcode.New(errcode.ParamInvalid, "托管履约未启用(fleet.enabled=false): 暂不支持添加 ssh 托管节点")
+	}
+	return s.managed.RegisterManagedNode(supplierID, req)
+}
 
 // ===== 节点注册与心跳 =====
 
@@ -60,6 +91,13 @@ func (s *Service) RegisterNode(supplierID, productID int64, nodeName string, tot
 	}
 	if owner == 0 || owner != supplierID {
 		return nil, "", fmt.Errorf("商品不存在或不属于当前供应方")
+	}
+	mode, err := s.repo.ProductFulfillmentMode(productID)
+	if err != nil {
+		return nil, "", err
+	}
+	if mode == "managed" {
+		return nil, "", fmt.Errorf("托管商品只能添加 ssh 托管节点(mgmt_mode=ssh)")
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -119,6 +157,17 @@ func (s *Service) DeleteNode(id, supplierID int64) error {
 	if err != nil {
 		return err
 	}
+	if n != nil && n.SupplierID == supplierID && n.MgmtMode == "ssh" {
+		// 托管节点删除要校验在租卡槽、释放卡 UUID 与主机指纹占用、重算派生库存(docs/25 §25.4.2)。
+		if s.managed == nil {
+			return errcode.New(errcode.InternalError, "托管履约模块未启用(fleet.enabled=false), 无法删除托管节点")
+		}
+		if err := s.managed.DeleteManagedNode(supplierID, id); err != nil {
+			return err
+		}
+		s.refreshProductHealth(n.ProductID, n.SupplierID)
+		return nil
+	}
 	ok, err := s.repo.DeleteNode(id, supplierID)
 	if err != nil {
 		return err
@@ -139,7 +188,29 @@ func (s *Service) ListAllNodes(status string, page, pageSize int) ([]Node, int64
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 20
 	}
-	return s.repo.ListAllNodes(status, page, pageSize)
+	list, total, err := s.repo.ListAllNodes(status, page, pageSize)
+	if err != nil || s.managed == nil {
+		return list, total, err
+	}
+	var ids []int64
+	for _, n := range list {
+		if n.MgmtMode == "ssh" {
+			ids = append(ids, n.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return list, total, nil
+	}
+	extras, err := s.managed.ManagedNodeExtras(ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range list {
+		if x, ok := extras[list[i].ID]; ok {
+			list[i].Managed = x
+		}
+	}
+	return list, total, nil
 }
 
 // ===== 探活 sweep =====
@@ -181,6 +252,11 @@ func (s *Service) sweepOnce() {
 		}
 		s.refreshProductHealth(pid, owner)
 	}
+}
+
+// RefreshProductHealth 供 fleet 在托管节点状态变化后触发健康度聚合(口径与心跳节点一致)。
+func (s *Service) RefreshProductHealth(productID, supplierID int64) {
+	s.refreshProductHealth(productID, supplierID)
 }
 
 // refreshProductHealth 聚合健康度; 发生跨越可用性边界的变化时通知供应方。

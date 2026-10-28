@@ -167,6 +167,8 @@ type Service struct {
 	attester Attester
 	// notifier 消息中心写入口。nil 表示未启用, 业务照常。
 	notifier Notifier
+	// managedGate 托管履约判定(fleet 注入)。nil = fleet 未启用, 托管商品不可提审/下单。
+	managedGate ManagedGate
 }
 
 // Notifier 消息中心写接口, 由 notification 包实现。
@@ -552,6 +554,8 @@ type CreateProductReq struct {
 	StorageSpec       string `json:"storage_spec"`
 	BandwidthSpec     string `json:"bandwidth_spec"`
 	DeliveryMode      string `json:"delivery_mode"`
+	// FulfillmentMode manual(默认)/managed(平台托管, docs/25); 创建后不可修改。
+	FulfillmentMode   string `json:"fulfillment_mode"`
 	PricingMode       string `json:"pricing_mode"`
 	UnitPrice         int64  `json:"unit_price"` // fen
 	AvailableHours    string `json:"available_hours"`
@@ -568,6 +572,13 @@ type CreateProductReq struct {
 func NormalizeProductReq(req CreateProductReq) CreateProductReq {
 	if req.ProductType == "" {
 		req.ProductType = ProductTypeCardRental
+	}
+	if req.FulfillmentMode == "" {
+		req.FulfillmentMode = FulfillmentManual
+	}
+	// 托管商品库存由卡槽派生(探活通过的空闲卡), 忽略人工填写值。
+	if req.FulfillmentMode == FulfillmentManaged {
+		req.Stock = 0
 	}
 	if req.MinOrder <= 0 {
 		req.MinOrder = 1
@@ -628,6 +639,9 @@ func ValidateProductReq(req CreateProductReq) error {
 		return fmt.Errorf("库存超出上限(不得超过 %d)", MaxOrderQuantity)
 	}
 
+	if err := validateFulfillment(req); err != nil {
+		return err
+	}
 	if modes := allowedPricingModes[req.ProductType]; !modes[req.PricingMode] {
 		return fmt.Errorf("计费模式 %q 不适用于该商品类型, 允许: %s", req.PricingMode, allowedModesText(req.ProductType))
 	}
@@ -640,7 +654,7 @@ func ValidateProductReq(req CreateProductReq) error {
 		if req.CardCount <= 0 {
 			return fmt.Errorf("零租商品的卡数必须大于 0")
 		}
-		if req.Stock <= 0 {
+		if req.Stock <= 0 && req.FulfillmentMode != FulfillmentManaged {
 			return fmt.Errorf("零租商品的可租库存必须大于 0")
 		}
 		if req.UnitPrice <= 0 {
@@ -739,6 +753,14 @@ func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) er
 	if existing.SupplierID != supplierID {
 		return fmt.Errorf("无权修改其他供给方的商品")
 	}
+	if fulfillmentOrManual(existing.FulfillmentMode) != p.FulfillmentMode {
+		return fmt.Errorf("履约模式创建后不可修改, 如需切换请新建商品")
+	}
+	if p.FulfillmentMode == FulfillmentManaged {
+		if err := s.checkManagedSubmit(id, p.GpuModel); err != nil {
+			return err
+		}
+	}
 	return s.repo.ResubmitProduct(id, p, req.ComplianceVersion)
 }
 
@@ -767,6 +789,7 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 		StorageSpec:      req.StorageSpec,
 		BandwidthSpec:    req.BandwidthSpec,
 		DeliveryMode:     req.DeliveryMode,
+		FulfillmentMode:  req.FulfillmentMode,
 		PricingMode:      req.PricingMode,
 		UnitPrice:        req.UnitPrice,
 		PriceNegotiable:  req.PriceNegotiable,
@@ -928,7 +951,22 @@ func (s *Service) ApproveProduct(id int64) error {
 			return fmt.Errorf("商品规格缺少每台卡数, 请驳回让供给方补全后再通过")
 		}
 	}
-	return s.repo.ReviewProduct(id, "active", "")
+	if p.FulfillmentMode == FulfillmentManaged {
+		// 审核期间节点可能已探活失败: 通过前按当前节点状态复核一次。
+		if err := s.checkManagedSubmit(id, p.GpuModel); err != nil {
+			return err
+		}
+	}
+	if err := s.repo.ReviewProduct(id, "active", ""); err != nil {
+		return err
+	}
+	if p.FulfillmentMode == FulfillmentManaged {
+		if err := s.managedGate.RefreshManagedStock(id); err != nil {
+			// 审核已生效; 库存由下一轮探活(60s)重算兜底, 这里只记录。
+			slog.Error("托管商品审核通过后重算库存失败", "product_id", id, "error", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) RejectProduct(id int64, reason string) error {
@@ -1090,6 +1128,13 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	// unknown(未接入探活)不拦截, 存量商品不受影响。
 	if p.Health == "offline" {
 		return nil, fmt.Errorf("供应方算力节点已全部离线, 该商品暂不可下单")
+	}
+	// 托管商品: fleet 未启用 → 40001; 租约开通(S2)未接入 → 50000, 不走人工交付路径。
+	if p.FulfillmentMode == FulfillmentManaged {
+		if s.managedGate == nil {
+			return nil, ErrManagedDisabled
+		}
+		return nil, errManagedLeaseNotWired
 	}
 
 	qty, dur, err := ValidateOrderParams(p, req.Quantity, req.Duration)
@@ -1890,10 +1935,12 @@ func (s *Service) SyncResource(operatorID int64, isAdmin bool, syncType string, 
 	if err != nil {
 		return nil, err
 	}
-
 	// 归属校验: 非运营时必须是商品所属供给方。
 	if !isAdmin && p.SupplierID != operatorID {
 		return nil, fmt.Errorf("无权盘点该商品: 商品不属于当前供给方")
+	}
+	if p.FulfillmentMode == FulfillmentManaged {
+		return nil, fmt.Errorf("托管商品库存由节点卡槽探活派生, 不支持人工盘点")
 	}
 	// 被动上报只能由供给方发起, 主动盘点只能由运营发起, 防止身份与类型错配。
 	if syncType == "active" && !isAdmin {

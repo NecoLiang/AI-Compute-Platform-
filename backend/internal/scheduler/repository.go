@@ -14,20 +14,26 @@ type Node struct {
 	SupplierID      int64      `db:"supplier_id" json:"supplier_id"`
 	ProductID       int64      `db:"product_id" json:"product_id"`
 	NodeName        string     `db:"node_name" json:"node_name"`
-	NodeKeyHash     string     `db:"node_key_hash" json:"-"`
-	Status          string     `db:"status" json:"status"` // online/degraded/offline
+	NodeKeyHash     string     `db:"node_key_hash" json:"-"` // ssh 模式为空(库中 NULL)
+	Status          string     `db:"status" json:"status"`   // online/degraded/offline
 	TotalCards      int        `db:"total_cards" json:"total_cards"`
 	AvailableCards  int        `db:"available_cards" json:"available_cards"`
 	GPUUtilPct      *int       `db:"gpu_util_pct" json:"gpu_util_pct"`
 	VRAMUtilPct     *int       `db:"vram_util_pct" json:"vram_util_pct"`
 	LastHeartbeatAt *time.Time `db:"last_heartbeat_at" json:"last_heartbeat_at"`
+	// 托管列(migration 026, 由 fleet 写): push=docs/23 心跳节点, ssh=平台 SSH 管理(docs/25)。
+	MgmtMode     string `db:"mgmt_mode" json:"mgmt_mode"`
+	VerifyStatus string `db:"verify_status" json:"verify_status"`
+	Schedulable  bool   `db:"schedulable" json:"schedulable"`
+	// Managed 托管节点的附加信息(最近探活结论等), 由 fleet 填充; push 节点为空。
+	Managed any `db:"-" json:"managed,omitempty"`
 	// SupplierName 供给方公司名, 仅 ListAllNodes(运营视角)填充; 供给方自查列表不带。
-	SupplierName string `db:"supplier_name" json:"supplier_name,omitempty"`
-	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt       time.Time  `db:"updated_at" json:"updated_at"`
+	SupplierName string    `db:"supplier_name" json:"supplier_name,omitempty"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
 }
 
-const nodeColumns = "id, supplier_id, product_id, node_name, node_key_hash, status, total_cards, available_cards, gpu_util_pct, vram_util_pct, last_heartbeat_at, created_at, updated_at"
+const nodeColumns = "id, supplier_id, product_id, node_name, COALESCE(node_key_hash,'') AS node_key_hash, status, total_cards, available_cards, gpu_util_pct, vram_util_pct, last_heartbeat_at, mgmt_mode, verify_status, schedulable, created_at, updated_at"
 
 type Repository struct{ db *sqlx.DB }
 
@@ -128,16 +134,18 @@ func (r *Repository) RecordHeartbeat(nodeID int64, keyHash string, availableCard
 }
 
 // MarkStaleOffline 把心跳超时的节点置为离线, 返回受影响的 product_id 列表(去重)。
+// 托管节点(mgmt_mode='ssh')不推心跳, 在线状态只由 fleet 的 SSH 探活判定(docs/25 §25.4.4),
+// 两条 SQL 都必须排除, 否则会与 fleet 判定来回抖动。
 func (r *Repository) MarkStaleOffline(ttl time.Duration) ([]int64, error) {
 	var productIDs []int64
 	err := r.db.Select(&productIDs, `SELECT DISTINCT product_id FROM supplier_nodes
-		WHERE status<>'offline' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < NOW() - INTERVAL ? SECOND)`,
+		WHERE status<>'offline' AND mgmt_mode<>'ssh' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < NOW() - INTERVAL ? SECOND)`,
 		int(ttl.Seconds()))
 	if err != nil {
 		return nil, err
 	}
 	_, err = r.db.Exec(`UPDATE supplier_nodes SET status='offline'
-		WHERE status<>'offline' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < NOW() - INTERVAL ? SECOND)`,
+		WHERE status<>'offline' AND mgmt_mode<>'ssh' AND (last_heartbeat_at IS NULL OR last_heartbeat_at < NOW() - INTERVAL ? SECOND)`,
 		int(ttl.Seconds()))
 	return productIDs, err
 }
@@ -180,6 +188,16 @@ func (r *Repository) UpdateProductHealth(productID int64) (string, string, error
 		}
 	}
 	return prev, next, nil
+}
+
+// ProductFulfillmentMode 商品履约模式(manual/managed); 商品不存在返回空串。
+func (r *Repository) ProductFulfillmentMode(productID int64) (string, error) {
+	var mode string
+	err := r.db.Get(&mode, "SELECT fulfillment_mode FROM products WHERE id=?", productID)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return mode, err
 }
 
 // ProductSupplierID 商品归属校验用。

@@ -52,16 +52,18 @@ type Product struct {
 	StorageSpec       string  `db:"storage_spec" json:"storage_spec"`
 	BandwidthSpec     string  `db:"bandwidth_spec" json:"bandwidth_spec"`
 	DeliveryMode      string  `db:"delivery_mode" json:"delivery_mode"`
-	PricingMode       string  `db:"pricing_mode" json:"pricing_mode"`
-	UnitPrice         int64   `db:"unit_price" json:"unit_price"` // fen
-	PriceNegotiable   bool    `db:"price_negotiable" json:"price_negotiable"`
-	AvailableHours    string  `db:"available_hours" json:"available_hours"`
-	Stock             int     `db:"stock" json:"stock"`
-	MinOrder          int     `db:"min_order" json:"min_order"`
-	MinDuration       int     `db:"min_duration" json:"min_duration"`
-	Region            string  `db:"region" json:"region"`
-	Status            string  `db:"status" json:"status"`
-	RejectedReason    string  `db:"rejected_reason" json:"rejected_reason"`
+	// FulfillmentMode 履约模式(migration 026): manual=供给方人工交付 managed=平台托管开通(docs/25)。
+	FulfillmentMode string `db:"fulfillment_mode" json:"fulfillment_mode"`
+	PricingMode     string `db:"pricing_mode" json:"pricing_mode"`
+	UnitPrice       int64  `db:"unit_price" json:"unit_price"` // fen
+	PriceNegotiable bool   `db:"price_negotiable" json:"price_negotiable"`
+	AvailableHours  string `db:"available_hours" json:"available_hours"`
+	Stock           int    `db:"stock" json:"stock"`
+	MinOrder        int    `db:"min_order" json:"min_order"`
+	MinDuration     int    `db:"min_duration" json:"min_duration"`
+	Region          string `db:"region" json:"region"`
+	Status          string `db:"status" json:"status"`
+	RejectedReason  string `db:"rejected_reason" json:"rejected_reason"`
 	// Health 节点探活聚合的健康度(unknown/healthy/degraded/offline), 由 scheduler 模块维护。
 	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
 	Health       string `db:"health" json:"health"`
@@ -158,7 +160,7 @@ const productColumns = `id, supplier_id, product_type,
 	machine_count, total_pflops_approx, power_capacity_kw, rack_count,
 	COALESCE(cpu_spec,'') AS cpu_spec, COALESCE(memory_spec,'') AS memory_spec,
 	COALESCE(storage_spec,'') AS storage_spec, COALESCE(bandwidth_spec,'') AS bandwidth_spec,
-	COALESCE(delivery_mode,'') AS delivery_mode, pricing_mode, unit_price,
+	COALESCE(delivery_mode,'') AS delivery_mode, fulfillment_mode, pricing_mode, unit_price,
 	COALESCE(price_negotiable,0) AS price_negotiable, COALESCE(available_hours,'') AS available_hours,
 	stock, COALESCE(min_order,1) AS min_order, COALESCE(min_duration,1) AS min_duration,
 	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
@@ -476,13 +478,13 @@ func (r *Repository) CreateProduct(p *Product, version string) (int64, error) {
 	res, err := tx.Exec(
 		`INSERT INTO products (supplier_id, product_type, gpu_model, card_count, machine_count, total_pflops_approx,
 		power_capacity_kw, rack_count, cpu_spec, memory_spec, storage_spec, bandwidth_spec,
-		delivery_mode, pricing_mode, unit_price, price_negotiable, available_hours, stock, min_order, min_duration,
+		delivery_mode, fulfillment_mode, pricing_mode, unit_price, price_negotiable, available_hours, stock, min_order, min_duration,
 		region, status, compliance_agreed)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.SupplierID, p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
 		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
-		nullString(p.DeliveryMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock,
-		p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed,
+		nullString(p.DeliveryMode), fulfillmentOrManual(p.FulfillmentMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock,
+		p.MinOrder, p.MinDuration, p.Region, initialProductStatus(p.FulfillmentMode), p.ComplianceAgreed,
 	)
 	if err != nil {
 		return 0, err
@@ -1293,6 +1295,9 @@ func ErrToCode(err error) int {
 	}
 	if errors.Is(err, crypto.ErrKeyNotConfigured) || errors.Is(err, crypto.ErrInvalidKeySize) {
 		return errcode.InternalError
+	}
+	if code := errcode.CodeOf(err, 0); code != 0 {
+		return code
 	}
 	msg := err.Error()
 	switch msg {
