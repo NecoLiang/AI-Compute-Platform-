@@ -309,7 +309,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | P2 | SSH 握手与指纹 | 已钉死则比对，不一致 → `key_mismatch`；未钉死 → 记录观测值并在 P3 后停止 |
 | P3 | 管理密钥认证 | 平台私钥登录 |
 | P4 | GPU 清单 | `nvidia-smi --query-gpu=...`；卡 UUID 已被其他节点登记 → 不通过 |
-| P5 | 声明一致性 | 型号按 `gpu_catalog` 归一、卡数、显存误差 ≤ 3%（GDDR 卡开 ECC 时按可见显存少 1/16 再比） |
+| P5 | 声明一致性 | 型号按 `gpu_catalog` 归一后**完全相同**（忽略品牌/显存容量/HBM 类型/PCIe·SXM 形态；`4090 D`、`V100S`、`H100 NVL` 等后缀视为不同型号）、卡数、显存误差 ≤ 3%（GDDR 卡开 ECC 时按可见显存少 1/16 再比） |
 | P6 | 拓扑 | `nvidia-smi topo -m` → `topo_group` |
 | P7 | 健康 | 不可纠正 ECC、退役页/行重映射待生效或失败、24h 致命 Xid；问题卡标 `faulty`；**全部卡故障才判不通过** |
 | P8 | 主机资源 | CPU/内存/Docker 数据目录所在盘/OS/内核 + 驱动 ≥ `fleet.min_driver_version` |
