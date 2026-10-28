@@ -212,7 +212,7 @@ curl -X POST http://localhost:8080/api/v1/orders \
 {"code":40900,"message":"insufficient stock"}
 ```
 
-金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。v1.2 前的存量订单由迁移 028 按迁移时的计费方式回填快照（续租子订单取其续租快照，其余取当时商品方式），与新订单同样只认快照；快照缺失属数据异常，交付、签收、续租报价返回 `50000`「订单缺少计费方式快照…」，不回退商品当前展示方式。托管商品（`fulfillment_mode=managed`）与包夜（`nightly`）在托管履约模块接入前下单返回 `50000`「托管履约模块未启用」，不会静默按人工交付建单。
+金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。v1.2 前的存量订单由迁移 028 按迁移时的计费方式回填快照（续租子订单取其续租快照，其余取当时商品方式），与新订单同样只认快照；快照缺失属数据异常，交付、签收、续租报价返回 `50000`「订单缺少计费方式快照…」，不回退商品当前展示方式。托管商品（`fulfillment_mode=managed`）下单的错误码见下方「托管商品」「托管订单」两节（`fleet.enabled=false` 为 40001，租约钩子未接入为 50000）；包夜（`nightly`）在 S4 接入前下单返回 `50000`，不会静默按人工交付建单。
 
 ---
 
@@ -458,7 +458,7 @@ v1.2 S1（T-076~T-081）。`fulfillment_mode` 缺省或 `manual` 的商品所有
 **审核通过 `POST /admin/audits/products/:id/approve`**：`managed` 商品按当前节点状态再校验一次（审核期间节点可能已探活失败），不满足返回上表同样的 40001；通过后 `pending → active` 并立即按空闲卡槽重算库存（无空闲卡则 `sold_out`，有卡后自动回到 `active`）。
 
 **其他**
-- `managed` 商品库存由节点卡槽派生（docs/25 §25.6），人工盘点（`POST /supplier/resource-syncs/passive`、`POST /admin/resource-syncs/active`）返回 40001「托管商品库存由节点卡槽探活派生, 不支持人工盘点」。
+- `managed` 商品库存由节点卡槽派生（docs/25 §25.6），人工盘点（`POST /supplier/resource-syncs/passive`、`POST /admin/resource-syncs/active`）返回 40001「托管商品库存由平台按卡槽自动计算」。
 - `draft` 商品对公开接口不可见：`GET /products/:id` 40400，`POST /orders` 40900「product not available」。
 
 ## 托管订单（S2，`fulfillment_mode=managed`）
