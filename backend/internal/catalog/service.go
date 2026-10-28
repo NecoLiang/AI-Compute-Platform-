@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -12,6 +13,9 @@ func NewService(repo *Repository) *Service { return &Service{repo: repo} }
 var validOrigins = map[string]bool{"domestic": true, "international": true}
 var validGrades = map[string]bool{"datacenter": true, "consumer": true}
 var validStatus = map[string]bool{"enabled": true, "disabled": true}
+
+// computeCapabilityPattern CUDA 算力架构 "主.次", 如 8.0 / 8.9 / 9.0 / 10.0 / 12.0。
+var computeCapabilityPattern = regexp.MustCompile(`^[0-9]{1,2}\.[0-9]$`)
 
 // PublicList 前端下拉用: 只出 enabled, 且不暴露 spec_source(内部运营字段)。
 func (s *Service) PublicList(f Filter) ([]GPUModel, error) {
@@ -48,6 +52,16 @@ func validate(m *GPUModel) error {
 	}
 	if m.FP16TFLOPS != nil && *m.FP16TFLOPS <= 0 {
 		return fmt.Errorf("fp16_tflops 须为正数")
+	}
+	if m.ComputeCapability != nil {
+		v := strings.TrimSpace(*m.ComputeCapability)
+		if v == "" {
+			m.ComputeCapability = nil
+		} else if !computeCapabilityPattern.MatchString(v) {
+			return fmt.Errorf("compute_capability 须为 主.次 格式, 如 8.0 / 8.9 / 9.0")
+		} else {
+			m.ComputeCapability = &v
+		}
 	}
 	return nil
 }
@@ -87,4 +101,9 @@ func (s *Service) Update(id int64, m *GPUModel) (*GPUModel, error) {
 		return nil, err
 	}
 	return s.repo.Get(id)
+}
+
+// ComputeCapabilityByModel 一键部署可行性判定取型号算力架构(docs/27 §27.2)。
+func (s *Service) ComputeCapabilityByModel(modelName string) (string, bool, error) {
+	return s.repo.ComputeCapabilityByModel(modelName)
 }

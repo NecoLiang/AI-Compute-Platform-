@@ -22,6 +22,7 @@
 | [compute-api.md](compute-api.md) | 算力市场：商品列表/详情、下单、订单、交付签收、访问凭证 | 买家/供应方 |
 | [agent-search-api.md](agent-search-api.md) | 市场页智能选型：算力推定 + 商品匹配 | 买家 |
 | [gpu-catalog-api.md](gpu-catalog-api.md) | GPU 型号库下拉（含安可认证标记）+ 管理端维护 | 发布页/运营 |
+| [model-deploy-api.md](model-deploy-api.md) | 一键部署：模型目录与真机验证（运营）、模型列表与部署方案（买家） | 运营/托管租约 |
 | [scheduler-api.md](scheduler-api.md) | 供应方节点注册/心跳、商品健康度、调度建议 | 供应方/运营 |
 | [blockchain-api.md](blockchain-api.md) | 文昌链存证查验（订单/交付/违规 上链验证） | 全部 |
 | [payment-api.md](payment-api.md) | 支付与结算 | 买家/供应方 |

@@ -17,6 +17,7 @@ import (
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
+	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
 	"tokenfactory/internal/scheduler"
@@ -129,6 +130,8 @@ func main() {
 	schedulerSvc.SetNotifier(notificationSvc)
 
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
+	// 模型一键部署目录(docs/27, S5): 型号算力架构取自 GPU 型号库。
+	modelDeploySvc := modeldeploy.NewService(modeldeploy.NewRepository(sqlDB), catalogSvc)
 
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
@@ -247,6 +250,7 @@ func main() {
 	blockchain.NewHandler(blockchainSvc).RegisterAdminRoutes(adminRoute)
 	scheduler.NewHandler(schedulerSvc).RegisterAdminRoutes(adminRoute)
 	catalog.NewHandler(catalogSvc).RegisterAdminRoutes(adminRoute)
+	modeldeploy.NewHandler(modelDeploySvc).RegisterAdminRoutes(adminRoute)
 
 	// Payment callback (no auth, signature verification)
 	payment.NewHandler(paymentSvc).RegisterCallbackRoutes(r.Group("/api/v1"))
