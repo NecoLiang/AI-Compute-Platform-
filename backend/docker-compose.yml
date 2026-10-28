@@ -54,6 +54,7 @@ services:
       - ./migrations/024_equipment_review.up.sql:/docker-entrypoint-initdb.d/024.sql:ro
       - ./migrations/025_yeepay_payment.up.sql:/docker-entrypoint-initdb.d/025.sql:ro
       - ./migrations/026_managed_fulfillment.up.sql:/docker-entrypoint-initdb.d/026.sql:ro
+      - ./migrations/027_leases_and_gateway.up.sql:/docker-entrypoint-initdb.d/027.sql:ro
       - ./migrations/028_flexible_pricing.up.sql:/docker-entrypoint-initdb.d/028.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
