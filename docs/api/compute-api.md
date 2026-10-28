@@ -18,7 +18,9 @@ curl "http://localhost:8080/api/v1/products?gpu_model=H100&region=北京&pricing
 |------|------|:--:|------|
 | gpu_model | string | — | NVIDIA H100 / 华为昇腾910B 等 |
 | region | string | — | 北京/上海/深圳等 |
-| pricing_mode | string | — | hourly / daily / weekly / monthly / nightly / perpetual；当前按商品展示主价方式筛选（按任一已启用价格筛选随 T-093 上线） |
+| pricing_mode | string | — | hourly / daily / weekly / monthly / nightly / perpetual。零租商品匹配**任一已启用价格行**（不限展示主价，停用行不匹配）；非零租商品及无价格行的存量零租商品按顶层 `pricing_mode`（T-093） |
+| card_count_min | int | — | 商品规格卡数 `card_count` ≥ N（≥0，非负整数，否则 40001） |
+| min_cards | int | — | 能一次租到至少 N 张卡（T-093，≥0，否则 40001）：托管商品 `max_free_per_node ≥ N`（单台节点空闲且可租的卡数，与下单分卡同口径）；人工零租 `stock ≥ N`；买断/算力中心 `card_count ≥ N`（每份所含卡数）；空心机房无卡，传入即不匹配 |
 | price_min | int | — | 最低单价(分) |
 | price_max | int | — | 最高单价(分) |
 | sort | string | — | price_asc / price_desc / created_at_desc |
@@ -35,6 +37,7 @@ curl "http://localhost:8080/api/v1/products?gpu_model=H100&region=北京&pricing
     "unit_price":3500,"available_hours":"全天 24h","stock":32,"min_order":1,"min_duration":1,
     "region":"北京","status":"active","self_operated":false,
     "fulfillment_mode":"manual","availability":"fulltime","night_start_min":null,"night_end_min":null,
+    "card_split_options":null,"max_free_per_node":null,
     "prices":[
       {"pricing_mode":"hourly","unit_price":3500,"min_duration":1,"enabled":true},
       {"pricing_mode":"daily","unit_price":72000,"min_duration":1,"enabled":true}
@@ -49,6 +52,8 @@ curl "http://localhost:8080/api/v1/products?gpu_model=H100&region=北京&pricing
 
 - `prices`：零租（`card_rental`）商品的全部计费方式，按周期从短到长排序；公开市场与详情只返回 `enabled=true` 的行，供给方 `/supplier/products` 与运营 `/admin/products` 返回含已停用在内的全部行。非零租商品恒为 `[]`，以顶层 `pricing_mode/unit_price/min_duration` 为准。`unit_price` 单位为 分/卡/周期。
 - 顶层 `pricing_mode/unit_price/min_duration` 是**展示主价**：已启用价格中周期最短的一项，供旧前端与排序使用；下单金额以所选方式的价格行为准。
+- `card_split_options`（T-092）：托管容器零租商品（`card_rental` + `managed` + `container`）买家可选的单笔卡数，升序 int 数组，如 `[1,2,4,8]`；下单 `quantity` 必须是其中之一（否则 40001），`min_order` 对这类商品不生效。其他商品恒为 `null`。
+- `max_free_per_node`（T-092）：托管商品单台节点当前最多可一次租到的卡数（fleet 重算库存时回写；节点无磁盘配额或整机交付时只计全空闲整机）；人工商品为 `null`。`stock` 对托管商品是全部空闲卡合计，不代表单笔可租量，前端判断"能否租 N 卡"应看此字段或调用 availability。
 - `fulfillment_mode`：`manual`（供给方人工交付）/ `managed`（平台托管开通）；`availability`：`fulltime` / `night_window`；夜间窗口商品的 `night_start_min/night_end_min` 为 Asia/Shanghai 当日分钟数（0-1439，`end<=start` 表示次日结束），其余为 `null`。
 
 ---
@@ -73,6 +78,68 @@ curl http://localhost:8080/api/v1/products/1
 
 ---
 
+## GET /products/:id/availability · 可租性与报价 ✅ 登录（T-093）
+
+只读计算：给出"现在按这组参数能否下单"以及与 `POST /orders` **完全相同**的报价（同一纯函数 `QuoteOrder` + 当前交易配置费率）。**不预留**任何库存或卡槽；结果仅代表查询时刻，下单时以订单事务内的分配为准（仍可能 40900）。
+
+```
+curl -H "Authorization: Bearer <token>" \
+  "http://localhost:8080/api/v1/products/12/availability?pricing_mode=hourly&cards=4&duration=2"
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:--:|------|
+| cards | int | ✅ | 卡数（= 下单 `quantity`）。托管分卡商品必须在 `card_split_options` 内，否则 40001 |
+| pricing_mode | string | — | 计费方式，省略取展示主价方式；未开放/已停用 40001 |
+| duration | int | ✅² | 周期数，与 `POST /orders` 同校验：须 ≥ 该方式 `min_duration` 且 ≤ 单笔上限，否则 40001 |
+| night_start_date | string | — | `YYYY-MM-DD`，仅包夜。非包夜传入、或格式错误 40001 |
+
+² 买断（`perpetual`）可省略，按 1 计。
+
+**限流**：每用户每分钟 30 次（Redis 固定窗口，key `market:availability:rl:{user_id}`），超出 42900「查询过于频繁, 每分钟最多 30 次, 请稍后再试」。Redis 未装配/不可用时返回 50000（不放开限流）。
+
+**响应**（托管商品，可下单）：
+```json
+{"code":0,"message":"success","data":{
+  "available":true,
+  "reason":"",
+  "quote":{"pricing_mode":"hourly","unit_price":1500,"quantity":4,"duration":2,
+           "total_amount":12000,"platform_fee":780,"fee_rate":650},
+  "lease_preview":{"start_rule":"on_activation",
+                   "start_at":"2026-10-28T15:04:05+08:00","end_at":"2026-10-28T17:04:05+08:00"}
+},"request_id":"..."}
+```
+
+**响应**（人工商品，库存不足）：
+```json
+{"code":0,"message":"success","data":{
+  "available":false,
+  "reason":"库存不足: 当前可租 6",
+  "quote":{"pricing_mode":"hourly","unit_price":2300,"quantity":7,"duration":1,
+           "total_amount":16100,"platform_fee":1046,"fee_rate":650},
+  "lease_preview":{"start_rule":"on_buyer_confirm","start_at":null,"end_at":null}
+},"request_id":"..."}
+```
+
+**响应**（包夜，S4 未接入）：
+```json
+{"code":0,"message":"success","data":{
+  "available":false,
+  "reason":"包夜预订尚未开放(夜间日历与每晚开停机待接入), 暂不可下单",
+  "quote":null,
+  "lease_preview":null
+},"request_id":"..."}
+```
+
+字段说明：
+- `quote`：金额单位分。`unit_price` 分/卡/周期；`total_amount = unit_price × quantity × duration`；`platform_fee` 内含于总价，= `total_amount × fee_rate / 10000` 向下取整；`fee_rate` 为基点。与随后 `POST /orders` 的 `total_amount/platform_fee` 相同（前提是期间商品价格与交易配置未变）。`available=false` 时仍给报价（包夜除外）。
+- `lease_preview.start_rule`：`on_activation`＝托管商品，租期从开通自检通过起算（D-6，不计开通耗时），`start_at` 取查询时刻（Asia/Shanghai，秒级），`end_at` 按计费周期换算，仅为预估；买断 `end_at=null`。`on_buyer_confirm`＝人工商品，租期从买家确认签收起算，签收时刻未知，`start_at/end_at` 均为 `null`。
+- `available=false` 时 `reason` 为可直接展示的中文原因，按以下优先级只给第一条：交易总开关关闭（「交易暂时关闭，请稍后再试」）→ 商品已售罄 → 供应方算力节点已全部离线 → 供给方资质已过期 → 人工：库存不足 → 托管：托管履约未启用 / 托管履约模块未启用 → 托管整机交付：「整机托管开通尚未接入(T-089), 暂不可下单」→ 托管：「所选卡数暂无整机余量」（没有任何单台节点能凑齐 `cards` 张卡；判定与下单分配的候选规则一致：已验收 + 可调度 + 在线 + 空闲 ≥ cards，无磁盘配额的节点只能整机）。
+
+**错误码**：40001 参数非法（cards 缺失/非正、卡数不在可选集合、计费方式未开放、时长不足、托管买断、面议商品、`night_start_date` 非法）；40400「商品不存在」（不存在或非 `active/sold_out`；`sold_out` 可查询，返回 `available=false`）；42900 限流；50000 内部错误。
+
+---
+
 ## POST /supplier/products · 提交商品审核 ✅ supplier
 
 ```
@@ -93,6 +160,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 | prices | array | — | 仅零租。多计费方式：`[{"pricing_mode":"hourly","unit_price":3500,"min_duration":1,"enabled":true}, ...]`；`min_duration` 省略为 1，`enabled` 省略为 true |
 | fulfillment_mode | string | — | manual（默认）/ managed；managed 仅零租 |
 | availability | string | — | fulltime（默认）/ night_window；night_window 仅零租 |
+| card_split_options | int[] | — | T-092/T-093，仅托管容器零租（`card_rental` + `managed` + `container`）。每个值须属于平台集合 `{1,2,4,6,8}` 且 ≤ `card_count`；去重升序保存；省略取平台集合中 ≤ `card_count` 的全部值（`card_count<1` 时为空，返回 40001「托管分卡商品至少需要一个可选卡数」）。其他商品传入返回 40001「可选卡数仅适用于平台托管的分卡容器(container)零租商品」 |
 | night_start_min / night_end_min | int | — | 仅 night_window；默认 1320/480（22:00-08:00）；30 分钟对齐，窗口长 4-14 小时；`available_hours` 由服务端按窗口生成 |
 | stock | int | ✅ | 可售余量 |
 | region | string | ✅ | 地域 |
@@ -390,5 +458,7 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 
 - 交付信息（`GET /orders/:id/access-credential`）：`ip_address` 为网关地址（`accessgw.public_host`）、`ssh_port` 为网关端口、`username` 为租约号（登录名）；**不含节点 IP/端口**。访问凭证 `access_value` 即网关密码登录口令，沿用 reveal 接口查看。推荐改用 SSH 公钥（`POST /user/ssh-keys`）。
 - 订单进入 `cancelled/refunded/completed` 时同一事务内释放卡槽并迁移租约（`releaseHoldTx`，已释放幂等）；人工订单仍按 `stock_reserved` 归还库存。
+- 释放只发生一次（T-093）：关单定时任务、买家取消、运营关单（`PATCH /admin/orders/:id/status` → `cancelled`）、退款完成都先锁订单行再做带前置状态的守卫 UPDATE，只有真正迁移了状态的那一路释放卡槽；其余返回 40900（订单已不在可迁移状态）或空操作，库存按卡槽真实空闲重算，不做加减。运营关单改为同样的守卫迁移（原为无条件写状态）。托管订单误入人工 `stock_reserved` 归还路径返回 50000，不会改 `products.stock`。
+- **库存上报**（T-093）：托管商品的库存由平台按卡槽派生，节点 agent / 供给方对托管商品的资源同步（被动上报与主动同步）返回 40001「托管商品库存由平台按卡槽自动计算」，不写库存与快照。
 
 **续租**：托管订单 `GET /orders/:id/renewal-quote` 与 `POST /orders/:id/renew` 返回 50000「托管订单续租尚未接入(docs/25 §25.7.2, T-088), 暂不可续租」，不走人工续租路径。

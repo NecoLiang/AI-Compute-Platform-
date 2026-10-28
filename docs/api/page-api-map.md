@@ -20,8 +20,10 @@
 > 浏览器统一经鉴权 BFF **`GET /api/market-proxy/<path>`**（白名单代理，401 自动 refresh）取数，市场页面均为客户端取数、不再 SSR 直连。
 
 ### `/market` 算力市场列表 ✅（浏览需登录：middleware + 后端 AuthRequired 双层）
-- `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|perpetual)` `available_hours` `price_min/price_max`(分) `card_count_min` `sort` `page` `page_size`
+- `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|nightly|perpetual)`（零租按任一已启用计费方式匹配，T-093） `available_hours` `price_min/price_max`(分) `card_count_min` `min_cards`(能一次租到 ≥N 卡，T-093) `sort` `page` `page_size`
 - 商品卡片关键字段：`gpu_model` `card_count` `stock` `unit_price`(分/卡·周期) `pricing_mode` `region` `self_operated` **`health`**(unknown/healthy/degraded/offline —— offline 应显示「暂不可下单」灰态，unknown 不显示徽章)
+- 🆕 v1.2 字段（列表与详情同）：`prices[]` `fulfillment_mode` `availability` `night_start_min/night_end_min` `card_split_options`（托管分卡可选卡数，非托管为 null） `max_free_per_node`（托管单机最多可租卡数，人工为 null）
+- 🆕 **`GET /products/:id/availability?pricing_mode&cards&duration&night_start_date`**（T-093，需登录，每用户 30 次/分钟超出 42900）— 下单前选卡数/时长后实时校验可租性并报价，与 `POST /orders` 同一报价函数；返回 `available` `reason` `quote{pricing_mode,unit_price,quantity,duration,total_amount,platform_fee,fee_rate}` `lease_preview{start_rule,start_at,end_at}`。经 `/api/market-proxy/products/:id/availability`，**前端仓库 market-proxy `ALLOWED_PATHS` 需新增该路径**（本仓库未改）。详见 compute-api.md
 - 🆕 **算力评估 agent**（2026-09-28 升级，定位工作台首页智能入口；生产网关已接入，页面由前端团队改版实现）：`POST /market/agent-search`（JSON兼容） / `POST /market/agent-search/stream`（流式，需登录），入参 `{query: string ≤500字}`；响应字段：
   - `relevant` false 时只渲染 `reject_reason`
   - `summary` 一句话评估结论（agent 卡标题位）
@@ -157,7 +159,7 @@
 - `GET /supplier/settlements?status`、`GET /supplier/settlements/summary`
 
 ### `/console/supplier/inventory` 盘点 ✅
-- `GET /supplier/resource-syncs?product_id`、`POST /supplier/resource-syncs/passive`
+- `GET /supplier/resource-syncs?product_id`、`POST /supplier/resource-syncs/passive`（托管商品返回 40001「托管商品库存由平台按卡槽自动计算」，页面应对托管商品隐藏上报入口，T-093）
 
 ### `/console/supplier/messages` ✅ 同买家通知四件套
 
