@@ -59,12 +59,13 @@ func TestHeartbeatKeepsLongProbeAlive(t *testing.T) {
 	seedManaged(t, db)
 	s := newTestFleet(t, db)
 	s.gateway = &stubGateway{}
-	s.taskTTL, s.taskBeat = 2*time.Second, 400*time.Millisecond
+	// TTL 4s / 心跳 250ms: 锁按秒精度写入, 留足余量, 并行跑包时 DB 偶发变慢也不误判。
+	s.taskTTL, s.taskBeat = 4*time.Second, 250*time.Millisecond
 	fake := newFakeNode(t, genPW)
 	id, taskID := onboardPending(t, s, fake, "gpu-lease-2", 47660)
 
 	fake.OnCommand("docker run --rm --name omnis-probe-", once(func() {
-		time.Sleep(3500 * time.Millisecond) // 超过 TTL
+		time.Sleep(5500 * time.Millisecond) // 超过 TTL
 		s.reclaimOnce()
 	}))
 	task, err := s.repo.claimNextFor(s.claimLocks())
