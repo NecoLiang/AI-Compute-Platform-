@@ -66,13 +66,14 @@ type nodeTel struct {
 	CacheTotal *int64     `db:"cache_total_bytes"`
 	CacheAt    *time.Time `db:"cache_observed_at"`
 	CacheNote  *string    `db:"cache_note"`
+	CacheSrc   *string    `db:"cache_source"`
 }
 
 func nodeTelemetry(t *testing.T, db *sqlx.DB, nodeID int64) nodeTel {
 	t.Helper()
 	var n nodeTel
 	require.NoError(t, db.Get(&n, `SELECT generation, xid_scan_ok_at, xid_covered_from, xid_scan_note, cache_free_bytes,
-		cache_total_bytes, cache_observed_at, cache_note FROM supplier_nodes WHERE id=?`, nodeID))
+		cache_total_bytes, cache_observed_at, cache_note, cache_source FROM supplier_nodes WHERE id=?`, nodeID))
 	return n
 }
 
@@ -293,6 +294,46 @@ func TestFullProbeCacheDirMissing(t *testing.T) {
 	assert.Contains(t, lastCmdWith(fake, "if [ -d '"), "'/data/omnis-models'")
 }
 
+// 轻探活每分钟读缓存目录 df: 成功即刷新并标来源 light; 读取失败不动上一次读数只记原因(读取方按采集时间判过期);
+// 目录不存在是确定读数, 清空; 都不影响探活成败。
+func TestLightProbeCacheDF(t *testing.T) {
+	s, db, fake, id, o := fullProbedNode(t, nil)
+	require.True(t, o.Pass, "failed=%v", o.Failed)
+	full := nodeTelemetry(t, db, id)
+	require.NotNil(t, full.CacheSrc)
+	assert.Equal(t, cacheSourceFull, *full.CacheSrc)
+	n, err := s.repo.GetNode(id)
+	require.NoError(t, err)
+	light := func() nodeTel {
+		time.Sleep(1100 * time.Millisecond)
+		s.lightProbe(context.Background(), n)
+		assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM supplier_nodes WHERE id=? AND probe_fail_count>0`, id), "缓存目录读数不影响探活成败")
+		return nodeTelemetry(t, db, id)
+	}
+
+	fake.Override("if [ -d '", fakeReply{Stdout: "    Avail     1B-blocks\n1000 5000\n"})
+	nt := light()
+	assert.Equal(t, cacheSourceLight, *nt.CacheSrc)
+	assert.Equal(t, int64(1000), *nt.CacheFree)
+	assert.Equal(t, int64(5000), *nt.CacheTotal)
+	assert.True(t, nt.CacheAt.After(*full.CacheAt))
+	assert.Nil(t, nt.CacheNote)
+	at := *nt.CacheAt
+
+	fake.Override("if [ -d '", fakeReply{Stderr: "df: Input/output error\n", Code: 1})
+	nt = light()
+	assert.Equal(t, int64(1000), *nt.CacheFree, "读取失败保留上一次读数")
+	assert.True(t, nt.CacheAt.Equal(at), "读取失败不刷新采集时间")
+	require.NotNil(t, nt.CacheNote)
+	assert.Contains(t, *nt.CacheNote, "读取模型缓存目录容量失败")
+
+	fake.Override("if [ -d '", fakeReply{Stdout: "@@missing\n"})
+	nt = light()
+	assert.Nil(t, nt.CacheFree)
+	assert.Nil(t, nt.CacheAt)
+	assert.Equal(t, "模型缓存目录不存在", *nt.CacheNote)
+}
+
 // 节点代次变化(停用/改连接/确认指纹)之后, 旧连接采到的遥测一律不写回。
 func TestTelemetryWritesGuardedByGeneration(t *testing.T) {
 	s, db, _, id, o := fullProbedNode(t, nil)
@@ -303,7 +344,7 @@ func TestTelemetryWritesGuardedByGeneration(t *testing.T) {
 	gpus := []GPU{{Index: 0, UUID: fakeUUID0}, {Index: 1, UUID: fakeUUID1}}
 
 	require.NoError(t, s.recordTopo(id, stale, gpus, [][]string{{"X", "PIX"}, {"PIX", "X"}}, now))
-	require.NoError(t, s.recordCacheDF(id, stale, CacheDF{Missing: true}, "", now))
+	require.NoError(t, s.recordCacheDF(id, stale, cacheSourceFull, CacheDF{Missing: true}, "", now))
 	used := int64(9)
 	require.NoError(t, s.inTx(func(tx *sqlx.Tx) error {
 		return s.repo.recordTelemetryTx(tx, id, stale, []GPUTelemetry{{UUID: fakeUUID0, VRAMUsedMiB: &used}}, now)

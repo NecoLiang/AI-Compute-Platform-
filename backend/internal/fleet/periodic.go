@@ -208,6 +208,12 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		return "", true // 平台侧故障不计入节点失败
 	}
 	mergeFatalXids(recentFatal, xid.fatalSince(xidAt, xidAt.Add(-fatalXidHold)))
+	// 模型缓存目录容量(docs/27 F4): 读取失败不影响探活成败, 只记原因。
+	cacheDF, cacheNote := p.readCacheDF(ctx, 15*time.Second)
+	cacheAt := time.Now()
+	if cacheNote != "" {
+		slog.Warn("fleet 轻量探活读取模型缓存目录容量失败", "node_id", n.ID, "detail", cacheNote)
+	}
 
 	slots, err := s.repo.listSlots(s.repo.db, n.ID)
 	if err != nil {
@@ -275,6 +281,9 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 			return err
 		}
 		if err := s.repo.recordXidScanTx(tx, n.ID, n.Generation, xid, xidAt); err != nil {
+			return err
+		}
+		if err := s.repo.recordCacheDFTx(tx, n.ID, n.Generation, cacheSourceLight, cacheDF, cacheNote, cacheAt); err != nil {
 			return err
 		}
 		if changed > 0 || prev != "online" {

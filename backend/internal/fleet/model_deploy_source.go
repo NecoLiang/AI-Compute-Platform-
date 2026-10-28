@@ -24,13 +24,15 @@ import (
 //	致命 Xid(F6)     gpu_xid_events + supplier_nodes.xid_covered_from / xid_scan_ok_at(轻探活自上次扫描起)
 //	NVLink(F5)      gpu_slots.topo_links / topo_at(完整探活 P6 两两矩阵); 无矩阵时退回 topo_group 只判"没有"
 //	模型已缓存        node_model_cache(state=ready 且已校验)
-//	缓存区空间(F4)    supplier_nodes.cache_free_bytes / cache_observed_at(完整探活 df) + node_model_cache 可清理条目
+//	缓存区空间(F4)    supplier_nodes.cache_free_bytes / cache_observed_at / cache_source(轻探活 60s df, 完整探活也写) + node_model_cache 可清理条目
 //
 // 新鲜度(超过即视为未知, 列入 LeaseSnapshot.Unknown, 判定侧写"无法判定", 不用旧值):
-//   - 轻探活数据(显存占用、Xid 扫描): 3 个轻探活周期(snapshotLightFresh = 3 × 60s);
-//   - 完整探活数据(拓扑、缓存容量): 完整探活周期 + 1 小时(snapshotFullFresh = 13h)。
+//   - 轻探活数据(显存占用、Xid 扫描、缓存容量): 3 个轻探活周期(snapshotLightFresh = 3 × 60s);
+//   - 完整探活数据(拓扑): 完整探活周期 + 1 小时(snapshotFullFresh = 13h);
+//   - 缓存容量的最新读数若来自完整探活(轻探活读不到 df 时), 按 13h 认; 一旦有更新的轻探活读数就只按 3 分钟认。
 //
-// 时间均由平台(应用)时钟写入(telemetry_repo.go), 这里同样用应用时钟比较。
+// 时间均由平台(应用)时钟写入(telemetry_repo.go)并以应用时钟比较; 前提是数据库会话时区与应用一致
+// (+08:00, DSN loc=Asia/Shanghai), 平台启动时已校验(pkg/db/mysql.go)。
 
 // ModelDeployLeases 实现 modeldeploy.LeaseSource。
 type ModelDeployLeases struct{ s *Service }
@@ -57,6 +59,7 @@ const (
 	unknownFatalXidStale  = "节点内核日志 Xid 扫描超过 3 分钟未成功, 无法确认近 1 小时无致命 Xid"
 	unknownModelCache     = "节点模型缓存区的实际剩余空间尚未经探活采集(model_cache_gb 仅为供给方声明)"
 	unknownModelCacheOld  = "节点模型缓存区容量的探活数据已超过 13 小时, 等待下一次完整探活"
+	unknownModelCacheLate = "节点模型缓存区容量超过 3 分钟未更新(节点可能失联或目录读取失败), 无法确认剩余空间"
 	unknownModelCacheRows = "节点有正在下载的模型缓存条目缺少目录信息, 无法估算其占用"
 	unknownNVLink         = "卡间逐对连接类型尚未经完整探活采集(或已超过 13 小时), 同组的卡不一定两两 NVLink 直连"
 )
@@ -300,8 +303,9 @@ func (m *ModelDeployLeases) fillCacheSpace(ctx context.Context, snap *modeldeplo
 		Free *int64     `db:"cache_free_bytes"`
 		At   *time.Time `db:"cache_observed_at"`
 		Note *string    `db:"cache_note"`
+		Src  *string    `db:"cache_source"`
 	}
-	if err := db.GetContext(ctx, &df, `SELECT cache_free_bytes, cache_observed_at, cache_note FROM supplier_nodes WHERE id=?`, nodeID); err != nil {
+	if err := db.GetContext(ctx, &df, `SELECT cache_free_bytes, cache_observed_at, cache_note, cache_source FROM supplier_nodes WHERE id=?`, nodeID); err != nil {
 		return "", err
 	}
 	if df.Free == nil || df.At == nil {
@@ -310,8 +314,15 @@ func (m *ModelDeployLeases) fillCacheSpace(ctx context.Context, snap *modeldeplo
 		}
 		return unknownModelCache, nil
 	}
-	if !fresh(df.At, now, snapshotFullFresh) {
-		return unknownModelCacheOld, nil
+	// 轻探活 60s 刷新, 按 3 分钟认; 最新读数来自完整探活(轻探活一直读不到)时退回 13h。
+	switch {
+	case fresh(df.At, now, snapshotLightFresh):
+	case df.Src != nil && *df.Src == cacheSourceFull:
+		if !fresh(df.At, now, snapshotFullFresh) {
+			return unknownModelCacheOld, nil
+		}
+	default:
+		return withNote(unknownModelCacheLate, df.Note), nil
 	}
 	var rows []struct {
 		ModelID  int64      `db:"model_id"`
@@ -371,4 +382,12 @@ func leaseNVLink(slots []Slot) (nvlink, known bool) {
 		return false, true
 	}
 	return false, false
+}
+
+// withNote 在未知原因后附上最近一次采集失败原因(如有)。
+func withNote(reason string, note *string) string {
+	if note == nil || *note == "" {
+		return reason
+	}
+	return reason + "(最近一次采集: " + *note + ")"
 }

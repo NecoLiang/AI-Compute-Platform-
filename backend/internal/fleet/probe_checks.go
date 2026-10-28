@@ -87,17 +87,11 @@ func (p *probeRun) inventory(ctx context.Context) {
 
 // modelCache 模型缓存目录所在文件系统容量(一键部署 F4 输入, 不是检查项, 不影响探活结论)。
 func (p *probeRun) modelCache(ctx context.Context) {
-	var df CacheDF
-	note := ""
-	cmd, err := cacheDFCommand(p.s.cfg.ModelCacheDir)
-	if err != nil {
-		note = err.Error()
-	} else if out, err := p.run(ctx, cmd); err != nil {
-		note = "读取模型缓存目录容量失败: " + err.Error()
-	} else if df, err = ParseCacheDF(out); err != nil {
-		note = err.Error()
+	df, note := p.readCacheDF(ctx, 30*time.Second)
+	if note != "" {
+		slog.Warn("fleet 完整探活读取模型缓存目录容量失败", "node_id", p.n.ID, "detail", note)
 	}
-	if err := p.s.recordCacheDF(p.n.ID, p.gen, df, note, time.Now()); err != nil {
+	if err := p.s.recordCacheDF(p.n.ID, p.gen, cacheSourceFull, df, note, time.Now()); err != nil {
 		slog.Error("fleet 记录模型缓存目录容量失败", "node_id", p.n.ID, "error", err)
 	}
 }

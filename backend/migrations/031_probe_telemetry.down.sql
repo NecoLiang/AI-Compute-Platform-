@@ -3,6 +3,7 @@
 DROP TABLE IF EXISTS gpu_xid_events;
 
 ALTER TABLE supplier_nodes
+    DROP COLUMN cache_source,
     DROP COLUMN cache_note,
     DROP COLUMN cache_observed_at,
     DROP COLUMN cache_total_bytes,

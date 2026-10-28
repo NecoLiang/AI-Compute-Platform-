@@ -211,7 +211,7 @@ func TestModelDeployLeaseSnapshotFromProbeData(t *testing.T) {
 		return out, checks
 	}
 
-	// 轻探活(首扫 61 分钟, 节点日志自 48h 前)+ 完整探活的拓扑/缓存写入。
+	// 轻探活(首扫 61 分钟, 节点日志自 48h 前; 同时读缓存目录 df)+ 完整探活的拓扑写入。
 	n, err := e.s.repo.GetNode(e.node)
 	require.NoError(t, err)
 	e.s.lightProbe(ctx, n)
@@ -219,7 +219,9 @@ func TestModelDeployLeaseSnapshotFromProbeData(t *testing.T) {
 	require.NoError(t, err)
 	gpus := []GPU{{Index: 0, UUID: fakeUUID0}, {Index: 1, UUID: fakeUUID1}}
 	require.NoError(t, e.s.recordTopo(e.node, n.Generation, gpus, matrix, time.Now()))
-	require.NoError(t, e.s.recordCacheDF(e.node, n.Generation, CacheDF{AvailBytes: 3298534883328, TotalBytes: 3840755982336}, "", time.Now()))
+	var cacheSrc string
+	require.NoError(t, e.db.Get(&cacheSrc, `SELECT cache_source FROM supplier_nodes WHERE id=?`, e.node))
+	assert.Equal(t, cacheSourceLight, cacheSrc, "缓存容量由轻探活写入")
 
 	snap, err := src.ManagedLeaseSnapshot(ctx, buyer, no, modelID)
 	require.NoError(t, err)
@@ -284,7 +286,7 @@ func TestModelDeployLeaseSnapshotFromProbeData(t *testing.T) {
 
 	// 过期规则。
 	e.db.MustExec(`UPDATE gpu_slots SET telemetry_at=? WHERE node_id=? AND gpu_index=1`, time.Now().Add(-4*time.Minute), e.node)
-	e.db.MustExec(`UPDATE supplier_nodes SET cache_observed_at=? WHERE id=?`, time.Now().Add(-14*time.Hour), e.node)
+	e.db.MustExec(`UPDATE supplier_nodes SET cache_observed_at=? WHERE id=?`, time.Now().Add(-4*time.Minute), e.node)
 	e.db.MustExec(`UPDATE gpu_slots SET topo_at=?, topo_group='g0-nvlink' WHERE node_id=? AND gpu_index=0`, time.Now().Add(-14*time.Hour), e.node)
 	e.db.MustExec(`UPDATE gpu_slots SET topo_group='g0-nvlink' WHERE node_id=?`, e.node)
 	e.db.MustExec(`UPDATE supplier_nodes SET xid_scan_ok_at=? WHERE id=?`, time.Now().Add(-4*time.Minute), e.node)
@@ -293,13 +295,29 @@ func TestModelDeployLeaseSnapshotFromProbeData(t *testing.T) {
 	assert.Equal(t, unknownVRAMStale, snap.Unknown[modeldeploy.InputVRAMUsage])
 	assert.Zero(t, snap.Cards[0].VRAMUsedBytes, "部分卡新鲜也不填, 整体未知")
 	assert.Equal(t, unknownFatalXidStale, snap.Unknown[modeldeploy.InputFatalXid])
-	assert.Equal(t, unknownModelCacheOld, snap.Unknown[modeldeploy.InputModelCache])
+	assert.Equal(t, unknownModelCacheLate, snap.Unknown[modeldeploy.InputModelCache], "轻探活读数超过 3 分钟")
 	assert.Equal(t, unknownNVLink, snap.Unknown[modeldeploy.InputNVLink])
 	out, checks = plans()
 	assert.False(t, out.Feasible)
 	for _, id := range []string{"F3", "F4", "F6"} {
 		assert.Contains(t, checks[id].Message, "无法判定", id)
 	}
+	// 缓存容量: 最新读数来自完整探活(轻探活一直读不到)时按 13h 认; 超过 13h 未知; 读取失败原因附在未知原因后。
+	e.db.MustExec(`UPDATE supplier_nodes SET cache_source='full', cache_observed_at=? WHERE id=?`, time.Now().Add(-2*time.Hour), e.node)
+	snap, err = src.ManagedLeaseSnapshot(ctx, buyer, no, modelID)
+	require.NoError(t, err)
+	assert.NotContains(t, snap.Unknown, modeldeploy.InputModelCache)
+	assert.Equal(t, int64(3298534883328), snap.CacheFreeBytes)
+	e.db.MustExec(`UPDATE supplier_nodes SET cache_observed_at=? WHERE id=?`, time.Now().Add(-14*time.Hour), e.node)
+	snap, err = src.ManagedLeaseSnapshot(ctx, buyer, no, modelID)
+	require.NoError(t, err)
+	assert.Equal(t, unknownModelCacheOld, snap.Unknown[modeldeploy.InputModelCache])
+	e.db.MustExec(`UPDATE supplier_nodes SET cache_source='light', cache_observed_at=?, cache_note='读取模型缓存目录容量失败: timeout' WHERE id=?`,
+		time.Now().Add(-4*time.Minute), e.node)
+	snap, err = src.ManagedLeaseSnapshot(ctx, buyer, no, modelID)
+	require.NoError(t, err)
+	assert.Contains(t, snap.Unknown[modeldeploy.InputModelCache], unknownModelCacheLate)
+	assert.Contains(t, snap.Unknown[modeldeploy.InputModelCache], "timeout")
 	// 拓扑过期但分组能确定"没有": 退回分组判定。
 	e.db.MustExec(`UPDATE gpu_slots SET topo_group=CONCAT('g', gpu_index) WHERE node_id=?`, e.node)
 	snap, err = src.ManagedLeaseSnapshot(ctx, buyer, no, modelID)
@@ -313,7 +331,7 @@ func TestModelDeployLeaseSnapshotFromProbeData(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, unknownFatalXid, snap.Unknown[modeldeploy.InputFatalXid])
 	e.db.MustExec(`UPDATE supplier_nodes SET xid_covered_from=NULL, xid_scan_note='管理账户无权读取内核日志' WHERE id=?`, e.node)
-	require.NoError(t, e.s.recordCacheDF(e.node, n.Generation, CacheDF{Missing: true}, "", time.Now()))
+	require.NoError(t, e.s.recordCacheDF(e.node, n.Generation, cacheSourceFull, CacheDF{Missing: true}, "", time.Now()))
 	snap, err = src.ManagedLeaseSnapshot(ctx, buyer, no, modelID)
 	require.NoError(t, err)
 	assert.Contains(t, snap.Unknown[modeldeploy.InputFatalXid], "管理账户无权读取内核日志")

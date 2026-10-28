@@ -12,6 +12,7 @@ package fleet
 // 时间统一用平台(应用)时钟写入, 读取方同样用应用时钟判新鲜度。
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -179,26 +180,57 @@ func (s *Service) recordTopo(nodeID int64, gen int, gpus []GPU, links [][]string
 	})
 }
 
-// recordCacheDF 完整探活的模型缓存目录容量。目录不存在/读取失败时清空容量与采集时间(读取方即视为未知)并记原因,
-// 绝不保留旧值冒充新值。
-func (s *Service) recordCacheDF(nodeID int64, gen int, df CacheDF, failNote string, now time.Time) error {
+// 模型缓存目录容量读数来源(supplier_nodes.cache_source)。
+const (
+	cacheSourceLight = "light"
+	cacheSourceFull  = "full"
+)
+
+// recordCacheDFTx 写模型缓存目录容量(调用方持有节点行锁; 代次守卫)。
+//   - 读到容量: 写容量、采集时间与来源, 清空原因;
+//   - 目录不存在: 这是确定的读数, 容量与采集时间置空(读取方即为未知)并记原因;
+//   - 读取失败(failNote 非空): 不动上一次读数, 只记原因 —— 上一次读数是否还能用由读取方按采集时间与来源判断。
+func (r *Repository) recordCacheDFTx(tx *sqlx.Tx, nodeID int64, gen int, source string, df CacheDF, failNote string, now time.Time) error {
+	var err error
+	switch {
+	case failNote != "":
+		_, err = tx.Exec(`UPDATE supplier_nodes SET cache_note=? WHERE id=? AND generation=?`, truncate(failNote, 250), nodeID, gen)
+	case df.Missing:
+		_, err = tx.Exec(`UPDATE supplier_nodes SET cache_free_bytes=NULL, cache_total_bytes=NULL, cache_observed_at=NULL,
+			cache_note='模型缓存目录不存在', cache_source=? WHERE id=? AND generation=?`, source, nodeID, gen)
+	default:
+		_, err = tx.Exec(`UPDATE supplier_nodes SET cache_free_bytes=?, cache_total_bytes=?, cache_observed_at=?, cache_note=NULL,
+			cache_source=? WHERE id=? AND generation=?`, df.AvailBytes, df.TotalBytes, dbSecond(now), source, nodeID, gen)
+	}
+	return err
+}
+
+// recordCacheDF 自带事务的 recordCacheDFTx(完整探活用)。
+func (s *Service) recordCacheDF(nodeID int64, gen int, source string, df CacheDF, failNote string, now time.Time) error {
 	return s.inTx(func(tx *sqlx.Tx) error {
 		cur, ok, err := lockNodeGeneration(tx, nodeID)
 		if err != nil || !ok || cur != gen {
 			return err
 		}
-		if failNote != "" || df.Missing {
-			if df.Missing {
-				failNote = "模型缓存目录不存在"
-			}
-			_, err := tx.Exec(`UPDATE supplier_nodes SET cache_free_bytes=NULL, cache_total_bytes=NULL, cache_observed_at=NULL, cache_note=?
-				WHERE id=? AND generation=?`, truncate(failNote, 250), nodeID, gen)
-			return err
-		}
-		_, err = tx.Exec(`UPDATE supplier_nodes SET cache_free_bytes=?, cache_total_bytes=?, cache_observed_at=?, cache_note=NULL
-			WHERE id=? AND generation=?`, df.AvailBytes, df.TotalBytes, dbSecond(now), nodeID, gen)
-		return err
+		return s.repo.recordCacheDFTx(tx, nodeID, gen, source, df, failNote, now)
 	})
+}
+
+// readCacheDF 在节点上读模型缓存目录容量; 返回非空 note 表示读取失败。
+func (p *probeRun) readCacheDF(ctx context.Context, d time.Duration) (CacheDF, string) {
+	cmd, err := cacheDFCommand(p.s.cfg.ModelCacheDir)
+	if err != nil {
+		return CacheDF{}, err.Error()
+	}
+	out, err := p.runFor(ctx, cmd, d)
+	if err != nil {
+		return CacheDF{}, "读取模型缓存目录容量失败: " + err.Error()
+	}
+	df, err := ParseCacheDF(out)
+	if err != nil {
+		return CacheDF{}, err.Error()
+	}
+	return df, ""
 }
 
 // PurgeOldXidEvents 删除超过保留期的 Xid 明细(周期任务调用, 分批删除)。

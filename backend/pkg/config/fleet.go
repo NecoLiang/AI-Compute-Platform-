@@ -33,7 +33,7 @@ type FleetConfig struct {
 	// DenyCIDRs 追加到内置拒绝名单(pkg/netguard.DefaultDenyCIDRs)的目标地址段, 典型为平台自身 VPC/内网网段、
 	// 主服务与网关所在公网段。只能追加, 不能放行内置段。元素为 CIDR 或单个 IP。
 	DenyCIDRs []string
-	// ModelCacheDir 节点上的模型权重缓存目录(docs/27 §27.4.3), 完整探活读取其所在文件系统容量作为
+	// ModelCacheDir 节点上的模型权重缓存目录(docs/27 §27.4.3), 轻量探活与完整探活读取其所在文件系统容量作为
 	// 一键部署可行性 F4 的输入。只允许 /[A-Za-z0-9._/-]、不含 ".."(会直接进入节点命令)。默认 /data/omnis-models。
 	ModelCacheDir string
 	Grace         FleetGrace

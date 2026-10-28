@@ -1,6 +1,6 @@
 -- 031 探活遥测(docs/27 §27.3 一键部署可行性 F3/F4/F5/F6 的数据源, docs/25 §25.4.4 周期探活):
 --   gpu_slots      逐卡遥测(轻探活 60s 刷新)与两两拓扑(完整探活 12h 刷新);
---   supplier_nodes Xid 扫描覆盖区间(每次探活刷新)与模型缓存目录容量(完整探活刷新);
+--   supplier_nodes Xid 扫描覆盖区间(每次探活刷新)与模型缓存目录容量(轻探活 60s 刷新, 完整探活也写);
 --   gpu_xid_events 内核日志里的 Xid 事件明细(按节点+原始行去重)。
 -- 全部为可从节点重新采集的遥测, 只加表加列; 读取方按采集时间判新鲜度, 过期即视为"未知"。
 ALTER TABLE gpu_slots
@@ -21,8 +21,9 @@ ALTER TABLE supplier_nodes
     ADD COLUMN xid_scan_note VARCHAR(255) NULL COMMENT '最近一次 Xid 扫描不可用的原因',
     ADD COLUMN cache_free_bytes BIGINT NULL COMMENT '模型缓存目录所在文件系统可用字节(df -B1)',
     ADD COLUMN cache_total_bytes BIGINT NULL COMMENT '模型缓存目录所在文件系统总字节',
-    ADD COLUMN cache_observed_at DATETIME NULL COMMENT '缓存目录容量采集时间; 目录不存在/读取失败时只更新 cache_note',
-    ADD COLUMN cache_note VARCHAR(255) NULL COMMENT '最近一次缓存目录容量采集失败原因';
+    ADD COLUMN cache_observed_at DATETIME NULL COMMENT '缓存目录容量采集时间; 目录不存在时与容量一并置空, 读取失败时不动只写 cache_note',
+    ADD COLUMN cache_note VARCHAR(255) NULL COMMENT '最近一次缓存目录容量采集失败原因',
+    ADD COLUMN cache_source ENUM('light','full') NULL COMMENT '当前容量读数来自轻探活还是完整探活(读取方按来源取新鲜度)';
 
 CREATE TABLE gpu_xid_events (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,

@@ -284,7 +284,7 @@ type LeaseSource interface {
 | `Cards[].FatalXidLastHour`（F6） | `gpu_xid_events` 中 `occurred_at ≥ now-1h` 且 xid 属致命清单（`fleet.FatalXids`）、PCI 地址与该卡 `gpu_slots.pci_bus_id` 相同的事件 |
 | `NVLink`（F5） | `gpu_slots.topo_links`（完整探活 P6 两两矩阵）：租约内每对卡的连接均为 `NV#` 才为是；单卡为否。无有效矩阵时退回 `topo_group` 分组：跨组、同组但非 `-nvlink` 组 → 确定为否，同属 `-nvlink` 组 → 未知 |
 | `ModelCached` | `node_model_cache` 中 `state='ready' AND verified_at IS NOT NULL` 的行 |
-| `CacheFreeBytes`（F4） | `supplier_nodes.cache_free_bytes`（完整探活 `df -B1` 缓存目录可用量）− `downloading` 条目的完整权重 − 采集之后才校验完成的 `ready` 条目权重（均按 `model_catalog.weights_bytes` 最坏情况预扣），下限 0 |
+| `CacheFreeBytes`（F4） | `supplier_nodes.cache_free_bytes`（轻量探活 60s 对缓存目录 `df -B1` 的可用量，完整探活也写；来源记在 `cache_source`）− `downloading` 条目的完整权重 − 采集之后才校验完成的 `ready` 条目权重（均按 `model_catalog.weights_bytes` 最坏情况预扣），下限 0 |
 | `CacheEvictableBytes`（F4） | 已校验 `ready` 条目中，未被该节点未终止部署（`model_deployments.state` 不是 `stopped/failed`）引用的条目 `weights_bytes` 之和（docs/27 §27.4.3） |
 
 **新鲜度规则**（时间均为平台时钟；不满足即列入 `Unknown`，不用旧值）：
@@ -293,8 +293,10 @@ type LeaseSource interface {
 |---|---|---|---|
 | `vram_usage` | 租约内**每张卡**的 `telemetry_at` 在 3 分钟内（3 个轻探活周期）且 `vram_used_mb` 非空 | 尚未采集 / 超过 3 分钟未更新（节点可能失联） | F3 error"无法判定" |
 | `fatal_xid` | 节点 `xid_scan_ok_at` 在 3 分钟内，且连续覆盖起点 `xid_covered_from ≤ now-1h`；各卡有 PCI 地址 | 覆盖不足 1 小时（新接入/刚恢复/中断后需累计）/ 扫描超过 3 分钟未成功 / 扫描不可用（附 `xid_scan_note`，如无权读内核日志） | 无故障卡时 F6 error"无法判定" |
-| `model_cache` | 已缓存该模型；或 `cache_observed_at` 在 13 小时内（12h 完整探活 + 1h 余量）且下载中条目都有目录权重 | 未采集 / 缓存目录不存在（附 `cache_note`）/ 超过 13 小时 | 未缓存时 F4 error"无法判定" |
+| `model_cache` | 已缓存该模型；或 `cache_observed_at` 在 3 分钟内（与显存占用相同）；或最新读数来自完整探活（`cache_source='full'`，即轻探活一直读不到 df、没有更新的读数）且在 13 小时内 —— 同时下载中条目都有目录权重 | 未采集 / 缓存目录不存在（附 `cache_note`）/ 轻探活读数超过 3 分钟未更新（附最近一次读取失败原因）/ 完整探活读数超过 13 小时 | 未缓存时 F4 error"无法判定" |
 | `nvlink` | 每张卡的 `topo_at` 在 13 小时内且矩阵覆盖租约内各卡；或分组能确定为否 | 未采集或过期，且同属 `-nvlink` 组 | F5 warning"无法判定"（不阻断） |
+
+**时区前提**：以上时间全部由应用写入、由应用时钟比较；成立的前提是数据库会话时区与应用一致（+08:00，DSN `loc=Asia/Shanghai`）。平台启动时已实测校验（`backend/pkg/db/mysql.go` `verifyTimezone`），不一致直接拒绝启动；本数据源不再单独处理。
 
 覆盖区间终点是最近一次成功扫描（≤3 分钟前），其后至今的几分钟由下一次轻探活补上；同样，显存占用是 ≤3 分钟前的实测值。
 提交部署（T-098）时由部署任务在节点上再次确认，不以本快照为准。
@@ -307,6 +309,6 @@ type LeaseSource interface {
 
 `backend/migrations/030_model_deployment.up.sql`：`gpu_catalog.compute_capability`、`supplier_nodes.model_cache_gb`，新建 `model_catalog`、`model_catalog_verifications`、`node_model_cache`、`model_deployments`、`deployment_health_samples`（结构同 docs/27 §27.7）。
 
-`backend/migrations/031_probe_telemetry.up.sql`（探活遥测，F3–F6 数据源）：`gpu_slots` 加逐卡遥测列（`vram_used_mb`/`vram_total_mb`/`temp_c`/`power_w`/`throttle_reasons`/`ecc_*`/`telemetry_at`）与两两拓扑（`topo_links`/`topo_at`）；`supplier_nodes` 加 Xid 覆盖区间（`xid_scan_ok_at`/`xid_covered_from`/`xid_scan_note`）与缓存目录容量（`cache_free_bytes`/`cache_total_bytes`/`cache_observed_at`/`cache_note`）；新建 `gpu_xid_events`。down 为直接删除：全部是可由下一轮探活重新采集的遥测，不含业务数据（停机认定用 `leases.resource_alert` 与 T-105 自己的表）。
+`backend/migrations/031_probe_telemetry.up.sql`（探活遥测，F3–F6 数据源）：`gpu_slots` 加逐卡遥测列（`vram_used_mb`/`vram_total_mb`/`temp_c`/`power_w`/`throttle_reasons`/`ecc_*`/`telemetry_at`）与两两拓扑（`topo_links`/`topo_at`）；`supplier_nodes` 加 Xid 覆盖区间（`xid_scan_ok_at`/`xid_covered_from`/`xid_scan_note`）与缓存目录容量（`cache_free_bytes`/`cache_total_bytes`/`cache_observed_at`/`cache_note`/`cache_source`）；新建 `gpu_xid_events`。down 为直接删除：全部是可由下一轮探活重新采集的遥测，不含业务数据（停机认定用 `leases.resource_alert` 与 T-105 自己的表）。
 
 `030_model_deployment.down.sql` 无条件 `SIGNAL SQLSTATE '45000'`：部署记录、真机验证记录与健康采样属于业务数据，回退须经审计归档，禁止自动删除。
