@@ -75,6 +75,7 @@ type Lease struct {
 	AccessUntil       *time.Time `db:"access_until" json:"access_until"`
 	AccessChangedAt   time.Time  `db:"access_changed_at" json:"access_changed_at"`
 	GraceUntil        *time.Time `db:"grace_until" json:"grace_until"`
+	SuspendedAt       *time.Time `db:"suspended_at" json:"suspended_at"`
 	ProvisionedAt     *time.Time `db:"provisioned_at" json:"provisioned_at"`
 	PurgedAt          *time.Time `db:"purged_at" json:"purged_at"`
 	FailReason        *string    `db:"fail_reason" json:"fail_reason"`
@@ -87,7 +88,7 @@ type Lease struct {
 
 const leaseColumns = `id, lease_no, order_id, buyer_id, product_id, node_id, cards, delivery_kind, state, upstream_port,
 	port_claim, upstream_host_key_fp, container_name, volume_name, access_until, access_changed_at, grace_until,
-	provisioned_at, purged_at, fail_reason, resource_alert, outage_remedy, commit_image, created_at, updated_at`
+	suspended_at, provisioned_at, purged_at, fail_reason, resource_alert, outage_remedy, commit_image, created_at, updated_at`
 
 // 登录名 = 租约号 = "l-" + 8 位小写 base32(a-z2-7), 5 字节随机数恰好编码为 8 位。
 var leaseNoEnc = base32.StdEncoding.WithPadding(base32.NoPadding)
