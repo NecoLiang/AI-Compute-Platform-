@@ -50,7 +50,8 @@ func (s *Service) PublicModels() ([]PublicModel, error) {
 	return out, nil
 }
 
-// PlanRequest deploy-plans 的查询参数。GPUMemUtilPct=0 表示取默认值 90。
+// PlanRequest deploy-plans 的查询参数。GPUMemUtilPct 须为 80–95(未提供时由 handler 填默认值 90),
+// 0 等越界值一律 40001, 不在服务层静默替换为默认值。
 type PlanRequest struct {
 	BuyerID       int64
 	OrderNo       string
@@ -66,9 +67,6 @@ func (s *Service) DeployPlans(ctx context.Context, req PlanRequest) (*Result, er
 	}
 	if req.ModelID <= 0 {
 		return nil, newErr(errcode.ParamInvalid, "model_id 必填")
-	}
-	if req.GPUMemUtilPct == 0 {
-		req.GPUMemUtilPct = DefaultGPUMemUtilPct
 	}
 	if req.GPUMemUtilPct < MinGPUMemUtilPct || req.GPUMemUtilPct > MaxGPUMemUtilPct {
 		return nil, newErr(errcode.ParamInvalid, "gpu_mem_util 须在 0.80–0.95 之间")

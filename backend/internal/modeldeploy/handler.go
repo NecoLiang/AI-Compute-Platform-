@@ -235,10 +235,12 @@ func (h *Handler) ListModels(c *gin.Context) {
 // utilPattern gpu_mem_util 以小数提交, 最多两位, 如 0.9 / 0.90 / 0.85。
 var utilPattern = regexp.MustCompile(`^0\.([0-9])([0-9])?$`)
 
-// parseGPUMemUtil 把 "0.85" 解析为 85; 空串返回 0(取默认值)。
-func parseGPUMemUtil(s string) (int, bool) {
-	if s == "" {
-		return 0, true
+// parseGPUMemUtil 把 "0.85" 解析为 85。参数未提供(present=false)时取默认值 90;
+// 一旦提供(包括空串、"0"、"0.0"), 就必须是 0.80–0.95 之间的合法小数, 否则 ok=false(40001),
+// 不会把越界值静默替换为默认值。
+func parseGPUMemUtil(s string, present bool) (int, bool) {
+	if !present {
+		return DefaultGPUMemUtilPct, true
 	}
 	m := utilPattern.FindStringSubmatch(s)
 	if m == nil {
@@ -247,6 +249,9 @@ func parseGPUMemUtil(s string) (int, bool) {
 	pct := int(m[1][0]-'0') * 10
 	if m[2] != "" {
 		pct += int(m[2][0] - '0')
+	}
+	if pct < MinGPUMemUtilPct || pct > MaxGPUMemUtilPct {
+		return 0, false
 	}
 	return pct, true
 }
@@ -258,7 +263,7 @@ func (h *Handler) DeployPlans(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, "model_id 必填且须为正整数")
 		return
 	}
-	pct, okU := parseGPUMemUtil(c.Query("gpu_mem_util"))
+	pct, okU := parseGPUMemUtil(c.GetQuery("gpu_mem_util"))
 	if !okU {
 		response.Error(c, errcode.ParamInvalid, "gpu_mem_util 须为 0.80–0.95 之间的小数, 最多两位")
 		return

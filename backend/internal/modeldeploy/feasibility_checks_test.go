@@ -156,14 +156,18 @@ func TestBuildInputMapsSnapshot(t *testing.T) {
 }
 
 func TestParseGPUMemUtil(t *testing.T) {
-	for s, want := range map[string]int{"": 0, "0.9": 90, "0.90": 90, "0.85": 85, "0.8": 80, "0.95": 95, "0.99": 99} {
-		if got, ok := parseGPUMemUtil(s); !ok || got != want {
+	if got, ok := parseGPUMemUtil("", false); !ok || got != DefaultGPUMemUtilPct {
+		t.Errorf("未提供应取默认值 90: %d,%v", got, ok)
+	}
+	for s, want := range map[string]int{"0.9": 90, "0.90": 90, "0.85": 85, "0.8": 80, "0.80": 80, "0.95": 95} {
+		if got, ok := parseGPUMemUtil(s, true); !ok || got != want {
 			t.Errorf("parseGPUMemUtil(%q)=%d,%v", s, got, ok)
 		}
 	}
-	for _, s := range []string{"90", "0.955", "1.0", ".9", "0.9a", "-0.9"} {
-		if _, ok := parseGPUMemUtil(s); ok {
-			t.Errorf("parseGPUMemUtil(%q) 应拒绝", s)
+	// 显式提供的越界值(含 0)必须拒绝, 不能静默回落到默认值 0.90。
+	for _, s := range []string{"", "0", "0.0", "0.00", "0.7", "0.79", "0.96", "0.99", "90", "0.955", "1.0", ".9", "0.9a", "-0.9"} {
+		if got, ok := parseGPUMemUtil(s, true); ok {
+			t.Errorf("parseGPUMemUtil(%q) 应拒绝, 得到 %d", s, got)
 		}
 	}
 }

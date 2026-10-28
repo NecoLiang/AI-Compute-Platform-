@@ -3,6 +3,7 @@ package modeldeploy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -38,9 +39,24 @@ func TestDeployPlansUnwiredReturns50000(t *testing.T) {
 		"/api/v1/orders/ORD20261028AB12/deploy-plans?model_id=1&gpu_mem_util=0.99": 40001,
 		"/api/v1/orders/ORD20261028AB12/deploy-plans?model_id=1&gpu_mem_util=0.7":  40001,
 		"/api/v1/orders/ORD20261028AB12/deploy-plans?model_id=1&gpu_mem_util=90":   40001,
+		"/api/v1/orders/ORD20261028AB12/deploy-plans?model_id=1&gpu_mem_util=0.0":  40001, // 曾被静默当成 0.90
+		"/api/v1/orders/ORD20261028AB12/deploy-plans?model_id=1&gpu_mem_util=0":    40001,
+		"/api/v1/orders/ORD20261028AB12/deploy-plans?model_id=1&gpu_mem_util=":     40001, // 提供了但为空
 	} {
 		if env := call(t, r, http.MethodGet, path, nil); env.Code != code {
 			t.Errorf("%s: want %d got %+v", path, code, env)
+		}
+	}
+}
+
+// 服务层同样不把 0/越界利用率静默替换为默认值(T-098 提交部署会直接带 gpu_mem_util 调服务层)。
+func TestDeployPlansServiceRejectsOutOfRangeUtil(t *testing.T) {
+	svc := NewService(nil, nil)
+	for _, pct := range []int{0, 79, 96, -90} {
+		_, err := svc.DeployPlans(context.Background(), PlanRequest{BuyerID: 9, OrderNo: "ORD20261028AB12", ModelID: 1, GPUMemUtilPct: pct})
+		var be *Error
+		if !errors.As(err, &be) || be.Code != 40001 {
+			t.Errorf("pct=%d 应 40001, 得到 %v", pct, err)
 		}
 	}
 }
