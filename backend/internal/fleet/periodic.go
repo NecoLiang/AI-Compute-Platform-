@@ -38,6 +38,11 @@ func (s *Service) RunPeriodic(ctx context.Context) {
 			} else if n > 0 {
 				slog.Info("已清理过期访问会话记录", "rows", n)
 			}
+			if n, err := s.repo.PurgeOldXidEvents(lastPurge.Add(-xidEventRetention)); err != nil {
+				slog.Error("清理过期 Xid 事件明细失败", "error", err)
+			} else if n > 0 {
+				slog.Info("已清理过期 Xid 事件明细", "rows", n)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -189,9 +194,18 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	if _, err := p.runFor(ctx, cmdDockerAlive, 15*time.Second); err != nil {
 		return "Docker 守护进程不可用: " + err.Error(), false
 	}
-	cmd, _ := xidCommand("-2min")
-	xout, _ := p.runFor(ctx, cmd, 15*time.Second)
-	xid := ParseXid(xout, 2*time.Minute)
+	// Xid: 自上次成功扫描起(见 xidWindowSince), 事件与覆盖区间在下方事务内落库。
+	lastScan, err := s.repo.lastXidScanAt(n.ID)
+	if err != nil {
+		slog.Error("fleet 读取 Xid 扫描时间失败", "node_id", n.ID, "error", err)
+		return "", true // 平台侧故障不计入节点失败
+	}
+	since, window := xidSince(xidWindowSince(lastScan, time.Now()))
+	cmd, _ := xidCommand(since)
+	xout, _ := p.runFor(ctx, cmd, 15*time.Second) // 以解析结果为准(错误输出带 @@err 前缀)
+	xidAt := time.Now()
+	xid := ParseXid(xout, window)
+	tel, telAt := s.collectTelemetry(ctx, p)
 
 	slots, err := s.repo.listSlots(s.repo.db, n.ID)
 	if err != nil {
@@ -255,6 +269,12 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		if prev, err = s.repo.recordLightOK(tx, n.ID, free, avgUtil(gpus, false), avgUtil(gpus, true)); err != nil {
 			return err
 		}
+		if err := s.repo.recordTelemetryTx(tx, n.ID, n.Generation, tel, telAt); err != nil {
+			return err
+		}
+		if err := s.repo.recordXidScanTx(tx, n.ID, n.Generation, xid, xidAt); err != nil {
+			return err
+		}
 		if changed > 0 || prev != "online" {
 			return s.recomputeStockTx(tx, n.ProductID)
 		}
@@ -276,6 +296,26 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		slog.Info("fleet 节点恢复在线", "node_id", n.ID)
 	}
 	return "", true
+}
+
+// collectTelemetry 逐卡遥测(cmdTelemetry, 不认识 clocks_throttle_reasons 的新驱动改用 clocks_event_reasons)。
+// 失败只记日志、返回 nil: 不影响本次探活成败, 遥测列随之变旧, 一键部署可行性读取时按"未知"处理。
+func (s *Service) collectTelemetry(ctx context.Context, p *probeRun) ([]GPUTelemetry, time.Time) {
+	out, err := p.runFor(ctx, cmdTelemetry, 20*time.Second)
+	if err != nil && isInvalidFieldErr(out+err.Error()) {
+		out, err = p.runFor(ctx, cmdTelemetryEvent, 20*time.Second)
+	}
+	at := time.Now()
+	if err != nil {
+		slog.Warn("fleet 逐卡遥测采集失败", "node_id", p.n.ID, "error", err)
+		return nil, at
+	}
+	tel, err := ParseTelemetry(out)
+	if err != nil {
+		slog.Warn("fleet 逐卡遥测解析失败", "node_id", p.n.ID, "error", err)
+		return nil, at
+	}
+	return tel, at
 }
 
 // avgUtil 平均利用率(百分比)。

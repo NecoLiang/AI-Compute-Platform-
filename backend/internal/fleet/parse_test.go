@@ -374,4 +374,3 @@ func TestParseBenchAndThrottle(t *testing.T) {
 	assert.NotZero(t, th["GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d"]&throttleFailMask)
 	assert.True(t, strings.Contains(DescribeThrottle(0x40), "硬件温控"))
 }
-

@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -71,6 +72,7 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P6", false, err.Error())
 	} else {
 		p.inv.TopoGroups = topo
+		p.topoLinks, _ = ParseTopoMatrix(out, len(gpus)) // 与 ParseTopo 同一表头解析, 此处不会失败
 		groups := map[string]bool{}
 		for _, g := range topo {
 			groups[g] = true
@@ -80,6 +82,24 @@ func (p *probeRun) inventory(ctx context.Context) {
 
 	p.health(ctx, 24*time.Hour, "P7")
 	p.host(ctx)
+	p.modelCache(ctx)
+}
+
+// modelCache 模型缓存目录所在文件系统容量(一键部署 F4 输入, 不是检查项, 不影响探活结论)。
+func (p *probeRun) modelCache(ctx context.Context) {
+	var df CacheDF
+	note := ""
+	cmd, err := cacheDFCommand(p.s.cfg.ModelCacheDir)
+	if err != nil {
+		note = err.Error()
+	} else if out, err := p.run(ctx, cmd); err != nil {
+		note = "读取模型缓存目录容量失败: " + err.Error()
+	} else if df, err = ParseCacheDF(out); err != nil {
+		note = err.Error()
+	}
+	if err := p.s.recordCacheDF(p.n.ID, p.gen, df, note, time.Now()); err != nil {
+		slog.Error("fleet 记录模型缓存目录容量失败", "node_id", p.n.ID, "error", err)
+	}
 }
 
 // health P7: ECC 不可纠正错误、退役页/行重映射、Xid; 有问题的卡记入 inv.Faulty(不计入可售)。
@@ -109,7 +129,11 @@ func (p *probeRun) health(ctx context.Context, window time.Duration, checkID str
 	since, window := xidSince(window)
 	cmd, _ := xidCommand(since)
 	xout, _ := p.run(ctx, cmd) // 以解析结果为准(错误输出带 @@err 前缀)
+	xidAt := time.Now()
 	xid := ParseXid(xout, window)
+	if err := p.s.recordXidScan(p.n.ID, p.gen, xid, xidAt); err != nil {
+		slog.Error("fleet 记录 Xid 扫描失败", "node_id", p.n.ID, "error", err)
+	}
 	if !xid.Known {
 		notes = append(notes, "Xid 未知: "+xid.Note)
 	}

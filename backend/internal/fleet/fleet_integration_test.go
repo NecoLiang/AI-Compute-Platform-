@@ -141,6 +141,7 @@ func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 		Enabled: true, Workers: 1, ControllerEgressIPs: []string{"10.0.0.1"},
 		ProbeImage: testProbeImage, MinDriverVersion: "535.104",
 		Probe:          config.FleetProbe{MinPerfRatio: 0.7},
+		ModelCacheDir:  "/data/omnis-models",
 		BaseImages:     []config.BaseImage{{Name: "pytorch", Ref: testBaseImage}},
 		HostReserveCPU: 2, HostReserveMemGB: 8,
 	}
