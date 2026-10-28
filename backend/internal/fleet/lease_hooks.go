@@ -16,10 +16,15 @@ import (
 
 // 任务优先级(小者优先, docs/25 §25.9 node_tasks.priority)。
 const (
-	prioStop      = 1
-	prioProvision = 3
-	prioPurge     = 8
+	prioStop         = 1
+	prioKillSessions = 1
+	prioProvision    = 3
+	prioPurge        = 8
 )
+
+// cleanupMaxAttempts stop/purge/kill_sessions 的最大尝试次数(释放卡槽、断开访问不应因节点短暂失联很快转死信;
+// 退避 1m,2m,4m…封顶 1h, 10 次合计约 6 小时)。
+const cleanupMaxAttempts = 10
 
 // LeaseHooks 供 main 注入 compute.SetLeaseHooks。RenewTx 留空: 托管续租属 T-088。
 func (s *Service) LeaseHooks() compute.LeaseHooks {
@@ -106,11 +111,14 @@ func (s *Service) onLeasePaidTx(tx *sqlx.Tx, o *compute.Order) error {
 	return err
 }
 
-// graceFor 宽限期: 时/日计费 grace.short, 周/月计费 grace.long(docs/25 §25.7.1)。
+// graceFor 宽限期(Q-33): 时/日计费 grace.short, 周/月计费 grace.long, 包夜 grace.nightly(docs/25 §25.7.1)。
+// 宽限期内不收存储费。
 func (s *Service) graceFor(pricingMode string) time.Duration {
 	switch pricingMode {
 	case compute.PricingWeekly, compute.PricingMonthly:
 		return s.cfg.Grace.Long
+	case compute.PricingNightly:
+		return s.cfg.Grace.Nightly
 	default:
 		return s.cfg.Grace.Short
 	}
@@ -122,9 +130,10 @@ func (s *Service) graceFor(pricingMode string) time.Duration {
 //	provisioning                → purging, 卡槽 →draining, 入队 purge(可能已建出部分容器)
 //	active/parked/suspended + completed            → grace(宽限计时), 卡槽 leased→draining, 入队 stop
 //	active/parked/suspended + cancelled/refunded   → purging(宽限 0), 卡槽 →draining, 入队 purge
-//	已处于 grace/purging/终态   → 幂等无操作
+//	grace + cancelled/refunded  → purging(退款中到期进入宽限, 退款完成后不再保留数据), 入队 purge
+//	已处于 grace(completed)/purging/终态 → 幂等无操作
 //
-// stop/purge 的执行器属 T-087, 未接入前任务保持 pending、卡槽保持 draining(不会被再次分配)。
+// stop/purge/kill_sessions 执行器见 lease_tasks.go(T-087): 容器停止/清除完成后卡槽 draining → free。
 func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error {
 	l, err := s.repo.lockLeaseByOrder(tx, o.ID)
 	if err != nil {
@@ -168,10 +177,17 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 			if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotLeased, SlotReserved}, SlotDraining); err != nil {
 				return err
 			}
-			if _, err := s.repo.insertLeaseTask(tx, l.NodeID, l.ID, KindStop, prioStop, LeaseTaskPayload{LeaseID: l.ID, Reason: "租期结束"}); err != nil {
+			if _, err := s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindStop, prioStop, cleanupMaxAttempts, LeaseTaskPayload{LeaseID: l.ID, Reason: "租期结束"}); err != nil {
 				return err
 			}
 		} else if err := s.purgeTx(tx, l, "订单"+to); err != nil {
+			return err
+		}
+	case LeaseGrace:
+		if to == "completed" {
+			return nil
+		}
+		if err := s.purgeTx(tx, l, "宽限期内订单"+to); err != nil {
 			return err
 		}
 	default:
@@ -189,7 +205,7 @@ func (s *Service) purgeTx(tx *sqlx.Tx, l *Lease, reason string) error {
 	if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotReserved, SlotLeased}, SlotDraining); err != nil {
 		return err
 	}
-	_, err := s.repo.insertLeaseTask(tx, l.NodeID, l.ID, KindPurge, prioPurge, LeaseTaskPayload{LeaseID: l.ID, Reason: reason})
+	_, err := s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindPurge, prioPurge, cleanupMaxAttempts, LeaseTaskPayload{LeaseID: l.ID, Reason: reason})
 	return err
 }
 

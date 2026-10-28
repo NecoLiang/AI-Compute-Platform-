@@ -32,6 +32,7 @@ type ProductStore interface {
 	// 网关鉴权与买家访问信息(T-085/T-086)。
 	ManagedAccessValue(q sqlx.Queryer, orderID int64) (string, error)
 	OrderForAccess(orderNo string) (*compute.Order, error)
+	ManagedOrderByID(orderID int64) (*compute.Order, error)
 }
 
 // HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
@@ -96,6 +97,7 @@ func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.A
 		benchSecs: 60, sampleN: 6, sampleGap: 10,
 	}
 	s.registerExecutor(KindProvision, taskExecutor{timeout: provisionTimeout, run: s.runProvisionTask, onDead: s.onProvisionDead})
+	s.registerLeaseExecutors()
 	return s
 }
 

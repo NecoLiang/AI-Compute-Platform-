@@ -229,6 +229,11 @@ func (s *Service) FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error) {
 }
 
 // ManagedOrderAccess 托管订单访问信息所需的订单字段(买家本人校验在 fleet 侧完成)。
+// ManagedOrderByID 托管订单只读查询(fleet 收尾通知、到期扫描用)。
+func (s *Service) ManagedOrderByID(orderID int64) (*Order, error) {
+	return s.repo.GetOrderByID(orderID)
+}
+
 func (s *Service) OrderForAccess(orderNo string) (*Order, error) {
 	return s.repo.GetOrderByNo(orderNo)
 }

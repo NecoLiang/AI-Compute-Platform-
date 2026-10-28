@@ -63,6 +63,29 @@ func (r *Repository) insertLeaseTask(q sqlx.Execer, nodeID, leaseID int64, kind 
 	return res.LastInsertId()
 }
 
+// insertLeaseTaskMax 同 insertLeaseTask, 显式指定最大尝试次数(stop/purge/kill_sessions 关系到释放卡槽与断开访问,
+// 节点短暂失联不应很快转死信, 默认 10 次: 退避 1m,2m,4m…封顶 1h, 合计约 6 小时)。
+func (r *Repository) insertLeaseTaskMax(q sqlx.Execer, nodeID, leaseID int64, kind string, priority, maxAttempts int, payload any) (int64, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	res, err := q.Exec(`INSERT INTO node_tasks (node_id, lease_id, kind, state, priority, max_attempts, payload) VALUES (?,?,?,'pending',?,?,?)`,
+		nodeID, leaseID, kind, priority, maxAttempts, string(raw))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// liveLeaseTasks 租约上未结束(pending/running)的指定类型任务。
+func (r *Repository) liveLeaseTasks(q sqlx.Queryer, leaseID int64, kind string) ([]Task, error) {
+	var list []Task
+	err := sqlx.Select(q, &list, `SELECT `+taskColumns+` FROM node_tasks
+		WHERE lease_id=? AND kind=? AND state IN ('pending','running') ORDER BY id`, leaseID, kind)
+	return list, err
+}
+
 func (r *Repository) getTask(q sqlx.Queryer, id int64) (*Task, error) {
 	var t Task
 	err := sqlx.Get(q, &t, `SELECT `+taskColumns+` FROM node_tasks WHERE id=?`, id)
@@ -81,8 +104,23 @@ func (r *Repository) claimNext(kinds []string, lock time.Duration) (*Task, error
 	return r.claimNextFor(locks)
 }
 
-// claimNextFor 认领一条到期的 pending 任务, locks 为可认领类型 → 锁时长。同一节点同时只运行一个任务:
-// 先锁节点行, 确认无未过期的 running 任务, 再守卫式 pending→running(RowsAffected=1 才算认领成功)。
+// expressKinds 快车道任务(docs/25 §25.11 S2 实现口径): stop / kill_sessions 只执行一两条短命令且关系到
+// 断开买家访问与释放卡槽, 不应排在同节点的长任务(拉镜像最长 30 分钟)之后。快车道任务不受"同节点同时只运行
+// 一个任务"约束, 也不占用该约束; 但同一节点上同一租约同时只运行一个任务(快车道与普通任务一视同仁)。
+var expressKinds = []string{KindStop, KindKillSessions}
+
+func isExpressKind(kind string) bool {
+	for _, k := range expressKinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// claimNextFor 认领一条到期的 pending 任务, locks 为可认领类型 → 锁时长。
+// 普通任务: 同一节点同时只运行一个(快车道任务不计); 任意任务: 同一节点上同一租约同时只运行一个。
+// 先锁节点行复查上述条件, 再守卫式 pending→running(RowsAffected=1 才算认领成功)。
 // 候选按 priority(小者优先)、run_after、id 排序。
 func (r *Repository) claimNextFor(locks map[string]time.Duration) (*Task, error) {
 	if len(locks) == 0 {
@@ -94,8 +132,11 @@ func (r *Repository) claimNextFor(locks map[string]time.Duration) (*Task, error)
 	}
 	q, args, err := sqlx.In(`SELECT `+taskColumns+` FROM node_tasks
 		WHERE state='pending' AND run_after<=NOW() AND kind IN (?)
-		  AND node_id NOT IN (SELECT node_id FROM node_tasks WHERE state='running' AND locked_until>NOW())
-		ORDER BY priority, run_after, id LIMIT 8`, kinds)
+		  AND (kind IN (?) OR node_id NOT IN (SELECT node_id FROM node_tasks
+		        WHERE state='running' AND locked_until>NOW() AND kind NOT IN (?)))
+		  AND (lease_id IS NULL OR (node_id, lease_id) NOT IN (SELECT node_id, lease_id FROM node_tasks
+		        WHERE state='running' AND locked_until>NOW() AND lease_id IS NOT NULL))
+		ORDER BY priority, run_after, id LIMIT 8`, kinds, expressKinds, expressKinds)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +145,7 @@ func (r *Repository) claimNextFor(locks map[string]time.Duration) (*Task, error)
 		return nil, err
 	}
 	for _, c := range cands {
-		t, err := r.tryClaim(c.ID, c.NodeID, locks[c.Kind])
+		t, err := r.tryClaim(c, locks[c.Kind])
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +156,8 @@ func (r *Repository) claimNextFor(locks map[string]time.Duration) (*Task, error)
 	return nil, nil
 }
 
-func (r *Repository) tryClaim(taskID, nodeID int64, lock time.Duration) (*Task, error) {
+func (r *Repository) tryClaim(c Task, lock time.Duration) (*Task, error) {
+	taskID, nodeID := c.ID, c.NodeID
 	tx, err := r.db.Beginx()
 	if err != nil {
 		return nil, err
@@ -132,12 +174,31 @@ func (r *Repository) tryClaim(taskID, nodeID int64, lock time.Duration) (*Task, 
 		}
 		return nil, tx.Commit()
 	}
-	var running int
-	if err := tx.Get(&running, `SELECT COUNT(*) FROM node_tasks WHERE node_id=? AND state='running' AND locked_until>NOW()`, nodeID); err != nil {
-		return nil, err
+	if !isExpressKind(c.Kind) {
+		q, args, err := sqlx.In(`SELECT COUNT(*) FROM node_tasks WHERE node_id=? AND state='running' AND locked_until>NOW()
+			AND kind NOT IN (?)`, nodeID, expressKinds)
+		if err != nil {
+			return nil, err
+		}
+		var running int
+		if err := tx.Get(&running, q, args...); err != nil {
+			return nil, err
+		}
+		if running > 0 {
+			return nil, nil
+		}
 	}
-	if running > 0 {
-		return nil, nil
+	if c.LeaseID != nil {
+		// 同一节点上同一租约的任务互斥(节点行锁已串行化)。不同节点上的同租约任务(换节点后旧节点的残留清理)
+		// 操作的是各自节点上的资源, 不互斥。
+		var running int
+		if err := tx.Get(&running, `SELECT COUNT(*) FROM node_tasks WHERE node_id=? AND lease_id=? AND state='running' AND locked_until>NOW()`,
+			nodeID, *c.LeaseID); err != nil {
+			return nil, err
+		}
+		if running > 0 {
+			return nil, nil
+		}
 	}
 	ok, err := affected(tx.Exec(`UPDATE node_tasks SET state='running', attempts=attempts+1,
 		locked_until=NOW() + INTERVAL ? SECOND WHERE id=? AND state='pending'`, int(lock.Seconds()), taskID))

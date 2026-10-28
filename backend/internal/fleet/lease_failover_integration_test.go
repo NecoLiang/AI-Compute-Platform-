@@ -67,15 +67,19 @@ func TestWorkerClaimsOnlyRegisteredKinds(t *testing.T) {
 	db := setupFleetDB(t)
 	s := newTestFleet(t, db)
 	nodes := seedLeaseMarket(t, db, s, "container", 2, 8, 0)
-	// stop/purge 尚无执行器(T-087): 不得被认领消耗。
-	_, err := s.repo.insertLeaseTask(db, nodes[0], 0, KindStop, prioStop, LeaseTaskPayload{})
+	// park/unpark 尚无执行器(包夜属 S3): 不得被认领消耗。
+	_, err := s.repo.insertTask(db, nodes[0], "park", 5, LeaseTaskPayload{})
 	require.NoError(t, err)
-	_, err = s.repo.insertLeaseTask(db, nodes[0], 0, KindPurge, prioPurge, LeaseTaskPayload{})
+	_, err = s.repo.insertTask(db, nodes[0], "unpark", 5, LeaseTaskPayload{})
 	require.NoError(t, err)
 	task, err := s.repo.claimNextFor(s.claimLocks())
 	require.NoError(t, err)
 	assert.Nil(t, task)
 	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM node_tasks WHERE state='pending' AND attempts=0`))
+	for _, k := range []string{KindProvision, KindStop, KindPurge, KindKillSessions} {
+		_, ok := s.executorFor(k)
+		assert.True(t, ok, "%s 执行器应已注册", k)
+	}
 
 	// provision 由 NewService 注册(T-084), 按其锁时长认领。
 	_, err = s.repo.insertLeaseTask(db, nodes[1], 0, KindProvision, prioProvision, LeaseProvisionPayload{LeaseID: 1})
@@ -86,7 +90,7 @@ func TestWorkerClaimsOnlyRegisteredKinds(t *testing.T) {
 	assert.Equal(t, KindProvision, task.Kind)
 	require.NotNil(t, task.LockedUntil)
 	assert.WithinDuration(t, time.Now().Add(taskLeaseTTL), *task.LockedUntil, 30*time.Second)
-	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM node_tasks WHERE kind IN ('stop','purge') AND state='pending'`))
+	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM node_tasks WHERE kind IN ('park','unpark') AND state='pending'`))
 }
 
 func TestProvisionRetryThenReallocateThenFail(t *testing.T) {

@@ -168,7 +168,7 @@ func (s *Service) releaseOldNodeTx(tx *sqlx.Tx, l *Lease, lastErr string) error 
 		WHERE lease_id=? AND node_id=? AND state IN ('reserved','leased')`, l.ID, l.NodeID); err != nil {
 		return err
 	}
-	_, err := s.repo.insertLeaseTask(tx, l.NodeID, l.ID, KindPurge, prioPurge, LeaseTaskPayload{
+	_, err := s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindPurge, prioPurge, cleanupMaxAttempts, LeaseTaskPayload{
 		LeaseID: l.ID, Reason: truncate("开通失败清理残留: "+lastErr, 200), CleanupOnly: true,
 		ContainerName: *l.ContainerName, VolumeName: deref(l.VolumeName)})
 	return err
