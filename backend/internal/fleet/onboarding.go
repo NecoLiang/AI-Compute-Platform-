@@ -203,9 +203,9 @@ func (s *Service) UpdateSSH(ctx context.Context, supplierID, nodeID int64, in SS
 		if !ok {
 			return errcode.New(errcode.Conflict, "节点状态已变化, 请刷新后重试")
 		}
-		// 进行中的探活针对的是旧连接信息: 作废, 由供给方重新发起。
+		// 排队中与进行中的探活针对的是旧连接信息(代次已 +1): 作废, 由供给方重新发起。
 		if _, err := tx.Exec(`UPDATE node_tasks SET state='failed', last_error='连接信息已修改', locked_until=NULL
-			WHERE node_id=? AND kind='probe' AND state='pending'`, nodeID); err != nil {
+			WHERE node_id=? AND kind='probe' AND state IN ('pending','running')`, nodeID); err != nil {
 			return err
 		}
 		if err := s.repo.audit(tx, supplierID, "node.ssh_updated", "supplier_node", nodeID,
@@ -301,7 +301,7 @@ func (s *Service) bootstrap(ctx context.Context, supplierID, nodeID int64, in SS
 	}
 	client, info, err := d.Connect(conn, in.User, auth, pinned)
 	if errors.Is(err, ErrHostKeyMismatch) {
-		s.handleKeyMismatch(nodeID, pinned, info.Fingerprint)
+		s.handleKeyMismatch(nodeID, n.Generation, pinned, info.Fingerprint)
 		return errcode.New(errcode.Conflict, "主机指纹与已确认指纹不一致, 已停止调度; 若机器重装过系统, 请核对新指纹后确认")
 	}
 	if err != nil {
@@ -317,7 +317,7 @@ func (s *Service) bootstrap(ctx context.Context, supplierID, nodeID int64, in SS
 		return fail("写入 ~/.ssh/authorized_keys 失败(" + truncate(strings.TrimSpace(r.Stderr), 200) + ")")
 	}
 	if pinned == "" && info.Fingerprint != "" {
-		if err := s.repo.recordObservedFingerprint(s.repo.db, nodeID, info.Fingerprint); err != nil {
+		if err := s.repo.recordObservedFingerprint(s.repo.db, nodeID, n.Generation, info.Fingerprint); err != nil {
 			return err
 		}
 	}
@@ -326,14 +326,15 @@ func (s *Service) bootstrap(ctx context.Context, supplierID, nodeID int64, in SS
 }
 
 // handleKeyMismatch P2 指纹与钉死值不一致: key_mismatch、停止新分配、通知供给方、写系统审计。
-func (s *Service) handleKeyMismatch(nodeID int64, pinned, observed string) {
+// gen 为发起连接时读到的节点代次: 期间节点被停用/恢复/改连接信息/重装确认则不再写回。
+func (s *Service) handleKeyMismatch(nodeID int64, gen int, pinned, observed string) {
 	var n *Node
 	err := s.inTx(func(tx *sqlx.Tx) error {
 		var err error
 		if n, err = s.repo.lockNode(tx, nodeID); err != nil || n == nil {
 			return err
 		}
-		ok, err := s.repo.markKeyMismatch(tx, nodeID, pinned, observed)
+		ok, err := s.repo.markKeyMismatch(tx, nodeID, gen, pinned, observed)
 		if err != nil || !ok {
 			n = nil
 			return err
@@ -410,19 +411,57 @@ func (s *Service) ConfirmHostKey(supplierID, nodeID int64, fingerprint, ip strin
 	return taskID, err
 }
 
-// enqueueProbeTx 入队探活(同一节点已有未结束的 probe 则复用), 完整探活时 unverified/failed/key_mismatch → verifying。
+// enqueueProbeTx 入队探活并返回负责本次请求的任务 id。调用方须已在 tx 内锁住节点行。
+//
+// 复用规则(CR-S1 M4): 只复用"同一代次"的未结束 probe; 请求完整探活时只复用完整探活(port_recheck 不能代替完整探活,
+// 否则节点会停在 verifying 却没有完整探活来结束它)。旧代次的排队任务与被完整探活取代的排队复检直接置 failed;
+// 旧代次的在跑任务不动, 其结论在提交时被代次守卫作废。完整探活确有任务后才把 unverified/failed/key_mismatch/needs_reimage → verifying。
 func (s *Service) enqueueProbeTx(tx *sqlx.Tx, n *Node, mode, trigger string, priority int) (int64, error) {
+	if mode != ProbePortRecheck {
+		mode = ProbeFull
+	}
+	var gen int
+	if err := tx.Get(&gen, `SELECT generation FROM supplier_nodes WHERE id=? FOR UPDATE`, n.ID); err != nil {
+		return 0, err
+	}
+	active, err := s.repo.activeProbes(tx, n.ID)
+	if err != nil {
+		return 0, err
+	}
+	var taskID int64
+	for _, t := range active {
+		var pl ProbePayload
+		if err := jsonUnmarshal(t.Payload, &pl); err != nil {
+			pl.Generation = -1 // 无法解析: 视为旧代次
+		}
+		tMode := ProbeFull
+		if pl.Mode == ProbePortRecheck {
+			tMode = ProbePortRecheck
+		}
+		switch {
+		case pl.Generation != gen:
+			if err := s.repo.failPendingTask(tx, t.ID, "节点状态已变化, 任务作废"); err != nil {
+				return 0, err
+			}
+		case taskID == 0 && (tMode == ProbeFull || mode == ProbePortRecheck):
+			taskID = t.ID
+		case mode == ProbeFull && tMode == ProbePortRecheck:
+			if err := s.repo.failPendingTask(tx, t.ID, "已被完整探活取代"); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if taskID == 0 {
+		if taskID, err = s.repo.insertTask(tx, n.ID, KindProbe, priority,
+			ProbePayload{Mode: mode, Trigger: trigger, Generation: gen}); err != nil {
+			return 0, err
+		}
+	}
 	if mode == ProbeFull {
 		if _, err := s.repo.setVerifyStatus(tx, n.ID,
 			[]string{VerifyUnverified, VerifyFailed, VerifyKeyMismatch, VerifyNeedsReimage}, VerifyVerifying); err != nil {
 			return 0, err
 		}
 	}
-	if t, err := s.repo.activeProbe(tx, n.ID); err != nil || t != nil {
-		if t != nil {
-			return t.ID, nil
-		}
-		return 0, err
-	}
-	return s.repo.insertTask(tx, n.ID, KindProbe, priority, ProbePayload{Mode: mode, Trigger: trigger})
+	return taskID, nil
 }

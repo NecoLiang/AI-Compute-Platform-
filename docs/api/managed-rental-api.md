@@ -94,7 +94,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
   -d '{"host":"203.0.113.10","port":22,"user":"root","bootstrap_password":"<仅本次使用>"}'
 ```
 
-- 保存后节点回到 `unverified`，作废排队中的探活任务；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。`verified` 节点修改后立即退出可售。
+- 保存后节点回到 `unverified`，作废排队中与进行中的探活任务（进行中的探活结论按节点代次作废，不会改动节点状态）；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。`verified` 节点修改后立即退出可售。
 - `host`：节点的**公网** IP 或域名。平台按目标地址拒绝名单校验（回环、RFC1918、CGNAT `100.64.0.0/10`（含云元数据 `100.100.100.200`）、链路本地（含 `169.254.169.254`）、ULA `fc00::/7`、组播、保留/文档段，以及运营配置的 `fleet.deny_cidrs`）：IP 直接判断，域名在提交时解析，任一解析结果命中即拒绝 → 40001「host 不允许: 须为节点的公网地址…」；域名无法解析 → 40001「host 无法解析…」；`localhost` 40001。拒绝提示不回显解析出的地址。之后每次连接还会在拨号时按实际地址再校验一次（防 DNS rebinding）。`user`：小写字母数字下划线短横线，≤32 位。
 - `bootstrap_password`（可选）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。若该主机已有钉死指纹且不一致，返回 40900 并转 `key_mismatch`。
 - `suspended` 节点 40900。
@@ -103,7 +103,8 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 
 ## POST /supplier/nodes/:id/verify · 发起完整探活 ✅
 
-**响应**：`{"task_id":123}`。节点 → `verifying`；已有排队/执行中的探活时返回同一 `task_id`。
+**响应**：`{"task_id":123}`。节点 → `verifying`；已有本代次排队/执行中的**完整**探活时返回同一 `task_id`（排队中的端口复测不能代替完整探活：会被作废并另行入队完整探活；在跑的端口复测结束后再执行完整探活）。
+完整探活若因平台侧原因无法完成（平台配置缺失、重试耗尽等），节点 `verifying → failed` 并收到站内信「节点探活未能完成」，可再次发起。
 **错误**：40001 未填 SSH 信息；40900 `suspended` / `key_mismatch`（先确认新指纹）/ `needs_reimage`（先重装确认）。
 
 首次连接（指纹未确认）时探活只执行 P1–P3：记录观测指纹，写一份 `fail` 报告（P2 详情给出指纹与核对命令），节点回 `unverified`，站内信「请确认节点主机指纹」；**不执行任何 nvidia-smi / docker 命令**。
@@ -151,7 +152,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 
 ## POST /supplier/nodes/:id/reimage-confirm · 重装确认 ✅
 
-仅 `needs_reimage` 可调（否则 40900）。清除指纹钉死后入队完整探活：新系统首次连接会再次进入「确认主机指纹」。响应 `{"task_id":125}`。
+仅 `needs_reimage` 可调（否则 40900）。节点 → `verifying`，清除指纹钉死后入队完整探活（重装前已在跑的探活结论作废）：新系统首次连接会再次进入「确认主机指纹」。响应 `{"task_id":125}`。
 
 ---
 
@@ -246,7 +247,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 ### POST /admin/nodes/:id/suspend · 停用节点 ✅
 
-`{"reason":"≤200 字，可选"}` → `{"verify_status":"suspended"}`。停止新分配、释放空闲/停用/无租约故障卡槽（卡 UUID 与指纹占用随之释放）、作废排队任务、重算库存、通知供给方、写审计。存量租约不受影响。40400 非托管节点；40900 已停用。
+`{"reason":"≤200 字，可选"}` → `{"verify_status":"suspended"}`。停止新分配、释放空闲/停用/无租约故障卡槽（卡 UUID 与指纹占用随之释放）、作废排队任务、重算库存、通知供给方、写审计。作废该节点**排队中与进行中**的探活任务（任务 `failed`；进行中的探活即使随后通过也不会把节点改回 `verified`，`result.discarded=true`）；租约类任务（stop/purge/kill_sessions/provision）不作废，存量租约不受影响，排队中的开通在执行时发现节点已停用会走重试→换节点/退款。40400 非托管节点；40900 已停用。
 
 ### POST /admin/nodes/:id/resume · 恢复节点 ✅
 
@@ -259,7 +260,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 ### POST /admin/node-tasks/:id/retry · 重试死信 ✅
 
-仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
+仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=probe`：payload 按节点当前代次重写，完整探活同时把节点置 `verifying`；节点已删除、`suspended`/`needs_reimage`/`key_mismatch` 或已有未结束的探活时 40900。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
 
 ### GET /admin/leases?state=&node_id=&buyer_id=&page=&page_size= · 租约检索 ✅（S2 T-086）
 
@@ -320,7 +321,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 在租/预留/排空的卡只做只读检查（P4/P7），侵入项只用空闲卡与未分配端口。
 
-**结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间 SSH 信息被修改或节点被停用 → 结论作废（任务 `result.discarded=true`），不改节点状态。
+**结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间节点被停用/恢复、重装确认、SSH 信息被修改或指纹被确认（节点代次变化）→ 结论作废（任务 `result.discarded=true`，不写报告），不改节点状态；代次已变化后才开始执行的旧任务直接 `failed`、不连接节点。只有 `verifying`（本代次完整探活）或 `verified`（周期补跑）的节点能被探活结论置为 `verified`。
 
 **周期**：`verified` 节点每 60s SSH 轻量探活（`nvidia-smi` 利用率/温度/ECC + Docker 守护进程 + 近 2 分钟 Xid），成功写心跳与 `available_cards`；距上次成功超过 90s → `offline` + 通知，恢复后自动上线。空闲卡掉卡或出现致命错误 → `faulty` + 通知；在租卡异常仅记运营告警（租约侧处理在 S2）。完整探活每 12h、端口复测每 24h 自动入队。
 

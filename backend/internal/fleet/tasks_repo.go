@@ -22,6 +22,20 @@ func (r *Repository) activeProbe(q sqlx.Queryer, nodeID int64) (*Task, error) {
 	return &t, err
 }
 
+// activeProbes 节点上全部未结束的 probe 任务(按 id 升序)。
+func (r *Repository) activeProbes(q sqlx.Queryer, nodeID int64) ([]Task, error) {
+	var list []Task
+	err := sqlx.Select(q, &list, `SELECT `+taskColumns+` FROM node_tasks
+		WHERE node_id=? AND kind='probe' AND state IN ('pending','running') ORDER BY id`, nodeID)
+	return list, err
+}
+
+// failPendingTask 作废一条仍在排队的任务(running 不动: 由执行方自行结束)。
+func (r *Repository) failPendingTask(q sqlx.Execer, id int64, reason string) error {
+	_, err := q.Exec(`UPDATE node_tasks SET state='failed', last_error=?, locked_until=NULL WHERE id=? AND state='pending'`, reason, id)
+	return err
+}
+
 func (r *Repository) insertTask(q sqlx.Execer, nodeID int64, kind string, priority int, payload any) (int64, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {

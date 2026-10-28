@@ -172,7 +172,7 @@ func (s *Service) dialManaged(ctx context.Context, n *Node) (Runner, error) {
 	pinned := *n.HostKeyFingerprint
 	client, info, err := s.dialer.Connect(conn, *n.SSHUser, []ssh.AuthMethod{ssh.PublicKeys(signer)}, pinned)
 	if errors.Is(err, ErrHostKeyMismatch) {
-		s.handleKeyMismatch(n.ID, pinned, info.Fingerprint)
+		s.handleKeyMismatch(n.ID, n.Generation, pinned, info.Fingerprint)
 		return nil, fmt.Errorf("节点 #%d 主机指纹 %s 与已确认指纹不一致, 已停止调度", n.ID, info.Fingerprint)
 	}
 	if err != nil {

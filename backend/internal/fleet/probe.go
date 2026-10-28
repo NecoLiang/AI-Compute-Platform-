@@ -33,8 +33,12 @@ const (
 var fullChecks = []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P13"}
 var recheckChecks = []string{"P1", "P2", "P3", "P11", "P12"}
 
-// errProbeAborted 任务无法执行(节点已删除/停用/缺凭证): 任务置 failed, 不写报告。
-type errProbeAborted struct{ msg string }
+// errProbeAborted 任务无法执行(节点已删除/停用/缺凭证/代次已变): 任务置 failed, 不写报告。
+// stale=true 表示任务已过时(节点代次已变), 节点状态归新代次的操作所有, 中止时不做任何回写。
+type errProbeAborted struct {
+	msg   string
+	stale bool
+}
 
 func (e errProbeAborted) Error() string { return e.msg }
 
@@ -44,6 +48,7 @@ type probeRun struct {
 	n        *Node
 	mode     string
 	trigger  string
+	gen      int // 入队时的节点代次(ProbePayload.Generation)
 	product  *compute.Product
 	cat      *CatalogEntry
 	checks   map[string]*Check
@@ -125,24 +130,26 @@ func (s *Service) runProbe(ctx context.Context, nodeID int64, pl ProbePayload) (
 	}
 	switch {
 	case n == nil:
-		return nil, errProbeAborted{"节点已删除"}
+		return nil, errProbeAborted{msg: "节点已删除"}
 	case n.VerifyStatus == VerifySuspended:
-		return nil, errProbeAborted{"节点已被运营停用"}
+		return nil, errProbeAborted{msg: "节点已被运营停用"}
+	case n.Generation != pl.Generation:
+		return nil, errProbeAborted{msg: "节点状态已变化(停用/恢复/重装确认/修改连接信息/确认指纹), 本次探活作废", stale: true}
 	case !n.sshReady():
-		return nil, errProbeAborted{"节点缺少 SSH 连接信息"}
+		return nil, errProbeAborted{msg: "节点缺少 SSH 连接信息"}
 	case n.MgmtPrivkeyEnc == nil:
-		return nil, errProbeAborted{"节点缺少管理密钥"}
+		return nil, errProbeAborted{msg: "节点缺少管理密钥"}
 	case len(s.credKey) == 0:
-		return nil, errProbeAborted{errKeyUnavailable.Error()}
+		return nil, errProbeAborted{msg: errKeyUnavailable.Error()}
 	}
 	p := newProbeRun(s, n, mode)
-	p.trigger = pl.Trigger
+	p.trigger, p.gen = pl.Trigger, pl.Generation
 	if mode == ProbeFull {
 		if p.product, err = s.products.ManagedProduct(n.ProductID); err != nil {
 			return nil, err
 		}
 		if p.product == nil {
-			return nil, errProbeAborted{"节点所属商品不存在"}
+			return nil, errProbeAborted{msg: "节点所属商品不存在"}
 		}
 		if p.cat, err = s.repo.catalogEntry(p.product.GpuModel); err != nil {
 			return nil, err
@@ -187,7 +194,7 @@ func (p *probeRun) connect(ctx context.Context) error {
 	signer, err := loadNodeSigner(*n.MgmtPrivkeyEnc, p.s.credKey)
 	if err != nil {
 		_ = conn.Close()
-		return errProbeAborted{"节点管理私钥不可用: " + err.Error()}
+		return errProbeAborted{msg: "节点管理私钥不可用: " + err.Error()}
 	}
 	pinned := ""
 	if n.hostKeyConfirmed() {
@@ -207,7 +214,7 @@ func (p *probeRun) connect(ctx context.Context) error {
 	}
 	if pinned == "" {
 		p.await = true
-		if err := p.s.repo.recordObservedFingerprint(p.s.repo.db, n.ID, info.Fingerprint); err != nil {
+		if err := p.s.repo.recordObservedFingerprint(p.s.repo.db, n.ID, p.gen, info.Fingerprint); err != nil {
 			if client != nil {
 				_ = client.Close()
 			}

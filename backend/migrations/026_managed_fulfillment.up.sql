@@ -23,6 +23,8 @@ ALTER TABLE supplier_nodes
     ADD COLUMN host_fp_claim VARCHAR(80) NULL COMMENT 'verified 时 = host_key_fingerprint, 否则 NULL; 防一机多挂',
     ADD COLUMN verify_status ENUM('unverified','verifying','verified','failed','key_mismatch','needs_reimage','suspended')
         NOT NULL DEFAULT 'unverified',
+    ADD COLUMN generation INT NOT NULL DEFAULT 0
+        COMMENT '节点代次: 停用/恢复/重装确认/改连接信息/确认指纹时 +1; 探活任务携带入队时的代次, 不一致的结论作废',
     ADD COLUMN schedulable TINYINT NOT NULL DEFAULT 1 COMMENT '0=排空, 不接新分配',
     ADD COLUMN verified_at TIMESTAMP NULL,
     ADD COLUMN last_probe_ok_at TIMESTAMP NULL,

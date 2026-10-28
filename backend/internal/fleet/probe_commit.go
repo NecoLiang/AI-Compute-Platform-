@@ -24,7 +24,11 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 	n := p.n
 
 	if p.mismatch != "" {
-		s.handleKeyMismatch(n.ID, *n.HostKeyFingerprint, p.mismatch)
+		if stale, err := s.probeStale(p); err != nil || stale {
+			out.Discarded = stale
+			return out, err
+		}
+		s.handleKeyMismatch(n.ID, p.gen, *n.HostKeyFingerprint, p.mismatch)
 		id, err := s.repo.insertReport(s.repo.db, n.ID, kind, false, p.list(), nil)
 		if err != nil {
 			return nil, err
@@ -35,15 +39,27 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 
 	if p.await {
 		err := s.inTx(func(tx *sqlx.Tx) error {
+			cur, err := s.repo.lockNode(tx, n.ID)
+			if err != nil {
+				return err
+			}
+			if cur == nil || cur.Generation != p.gen {
+				out.Discarded = true
+				return nil
+			}
 			id, err := s.repo.insertReport(tx, n.ID, kind, false, p.list(), nil)
 			if err != nil {
 				return err
 			}
 			out.ReportID = id
-			return s.repo.markAwaitingFingerprint(tx, n.ID)
+			return s.repo.markAwaitingFingerprint(tx, n.ID, p.gen)
 		})
 		if err != nil {
 			return nil, err
+		}
+		if out.Discarded {
+			slog.Info("探活结论作废: 节点代次已变化", "node_id", n.ID)
+			return out, nil
 		}
 		out.AwaitingHostKey, out.Failed = p.fp, p.failed()
 		s.notify(n.SupplierID, "请确认节点主机指纹",
@@ -60,6 +76,10 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 
 	if len(p.failed()) == 0 {
 		if p.mode == ProbePortRecheck {
+			if stale, err := s.probeStale(p); err != nil || stale {
+				out.Discarded = stale
+				return out, err
+			}
 			id, err := s.repo.insertReport(s.repo.db, n.ID, kind, true, p.list(), nil)
 			if err != nil {
 				return nil, err
@@ -73,7 +93,7 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 			if err != nil {
 				return err
 			}
-			if cur == nil {
+			if cur == nil || cur.Generation != p.gen {
 				out.Discarded = true
 				return nil
 			}
@@ -83,14 +103,14 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 			} else if other > 0 {
 				return passConflict{"P2", fmt.Sprintf("该主机(指纹 %s)已作为节点 #%d 上架, 同一台机器不能重复上架", p.fp, other)}
 			}
-			ok, err := s.repo.markVerified(tx, n.ID, guardOf(n), p.fp, inv)
+			ok, err := s.repo.markVerified(tx, n.ID, guardOf(n), p.gen, p.fp, inv)
 			if isDuplicate(err) {
 				return passConflict{"P2", fmt.Sprintf("该主机(指纹 %s)已被其他节点占用, 同一台机器不能重复上架", p.fp)}
 			}
 			if err != nil {
 				return err
 			}
-			if !ok { // 探活期间连接信息被修改 / 节点被停用: 结论作废
+			if !ok { // 探活期间连接信息/指纹/代次变化或节点不在 verifying/verified: 结论作废
 				out.Discarded = true
 				return nil
 			}
@@ -151,17 +171,25 @@ func (s *Service) commitFail(p *probeRun, kind string, inv *Inventory, out *Prob
 		if err != nil {
 			return err
 		}
+		if cur == nil || cur.Generation != p.gen {
+			out.Discarded = true
+			return nil
+		}
 		id, err := s.repo.insertReport(tx, n.ID, kind, false, p.list(), inv)
 		if err != nil {
 			return err
 		}
 		out.ReportID = id
-		if cur == nil || connOnly {
+		if connOnly {
 			return nil
 		}
 		wasVerified = cur.VerifyStatus == VerifyVerified
-		if err := s.repo.markFailed(tx, n.ID, guardOf(n)); err != nil {
+		ok, err := s.repo.markFailed(tx, n.ID, guardOf(n), p.gen)
+		if err != nil {
 			return err
+		}
+		if !ok {
+			return errDiscard
 		}
 		if wasVerified {
 			if err := s.repo.audit(tx, 0, "node.verify_failed", "supplier_node", n.ID,
@@ -172,8 +200,16 @@ func (s *Service) commitFail(p *probeRun, kind string, inv *Inventory, out *Prob
 		}
 		return s.recomputeStockTx(tx, cur.ProductID)
 	})
+	if errors.Is(err, errDiscard) {
+		out.Discarded, out.ReportID = true, 0
+		err = nil
+	}
 	if err != nil {
 		return nil, err
+	}
+	if out.Discarded {
+		slog.Info("探活结论作废: 节点代次或连接信息已变化", "node_id", n.ID)
+		return out, nil
 	}
 	out.Failed = failed
 	s.refreshHealth(n)
@@ -189,4 +225,16 @@ func (s *Service) commitFail(p *probeRun, kind string, inv *Inventory, out *Prob
 		s.notify(n.SupplierID, "节点"+what+"未通过", msg, n.ID)
 	}
 	return out, nil
+}
+
+// errDiscard 事务内发现结论已过时: 回滚(连同已写的报告)并按作废处理。
+var errDiscard = errors.New("探活结论作废")
+
+// probeStale 节点已删除或代次已变(停用/恢复/重装确认/改连接信息/确认指纹之后), 本次探活结论不再写回。
+func (s *Service) probeStale(p *probeRun) (bool, error) {
+	cur, err := s.repo.GetNode(p.n.ID)
+	if err != nil {
+		return false, err
+	}
+	return cur == nil || cur.Generation != p.gen, nil
 }

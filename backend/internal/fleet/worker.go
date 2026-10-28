@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -34,7 +35,7 @@ type taskExecutor struct {
 // executors 已接入的任务类型。provision 由 T-084 注册(registerExecutor)。
 func (s *Service) executorFor(kind string) (taskExecutor, bool) {
 	if kind == KindProbe {
-		return taskExecutor{lock: probeLock, run: s.runProbeTask}, true
+		return taskExecutor{lock: probeLock, run: s.runProbeTask, onDead: s.probeDead}, true
 	}
 	e, ok := s.extraExecutors[kind]
 	return e, ok
@@ -164,12 +165,48 @@ func (s *Service) runProbeTask(ctx context.Context, t *Task) (any, error) {
 		return nil, errTaskAborted{"payload 无法解析: " + err.Error()}
 	}
 	out, err := s.runProbe(ctx, t.NodeID, pl)
+	var aborted errProbeAborted
+	if errors.As(err, &aborted) && !aborted.stale && pl.Mode != ProbePortRecheck {
+		s.abandonVerifying(t, pl.Generation, aborted.msg)
+	}
 	if err != nil {
 		return nil, err
 	}
 	slog.Info("fleet 探活完成", "task_id", t.ID, "node_id", t.NodeID, "mode", out.Mode, "pass", out.Pass,
 		"failed", out.Failed, "awaiting_host_key", out.AwaitingHostKey != "")
 	return out, nil
+}
+
+// probeDead 探活重试耗尽: 本代次的完整探活不会再执行, 节点不能停在 verifying。
+func (s *Service) probeDead(t *Task, lastErr string) {
+	var pl ProbePayload
+	if err := jsonUnmarshal(t.Payload, &pl); err != nil || pl.Mode == ProbePortRecheck {
+		return
+	}
+	s.abandonVerifying(t, pl.Generation, "探活多次执行失败")
+}
+
+// abandonVerifying 本代次的完整探活未能完成(中止/死信): verifying → failed 并通知供给方重新发起。
+// 代次守卫保证不会覆盖之后的停用/恢复/改连接信息等操作; 节点还有其他未结束的探活时不动(由它结束 verifying)。
+// 对供给方只给通用提示, 细节在日志与任务 last_error。
+func (s *Service) abandonVerifying(t *Task, gen int, reason string) {
+	nodeID := t.NodeID
+	ok, err := s.repo.abandonVerifying(nodeID, gen, t.ID)
+	if err != nil {
+		slog.Error("fleet 回退 verifying 失败", "node_id", nodeID, "error", err)
+		return
+	}
+	if !ok {
+		return
+	}
+	slog.Warn("fleet 完整探活未能完成, 节点 verifying → failed", "node_id", nodeID, "reason", reason)
+	n, err := s.repo.GetNode(nodeID)
+	if err != nil || n == nil {
+		return
+	}
+	s.refreshHealth(n)
+	s.notify(n.SupplierID, "节点探活未能完成",
+		fmt.Sprintf("节点「%s」的探活未能完成, 请稍后在节点页重新发起探活; 如持续失败请联系平台运营。", n.NodeName), nodeID)
 }
 
 func (s *Service) finish(t *Task, state string, result any, lastErr string) {

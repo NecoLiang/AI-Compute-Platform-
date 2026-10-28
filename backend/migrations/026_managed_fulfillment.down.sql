@@ -35,6 +35,7 @@ ALTER TABLE supplier_nodes
     DROP COLUMN host_key_confirmed_at,
     DROP COLUMN host_fp_claim,
     DROP COLUMN verify_status,
+    DROP COLUMN generation,
     DROP COLUMN schedulable,
     DROP COLUMN verified_at,
     DROP COLUMN last_probe_ok_at,

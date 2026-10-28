@@ -165,7 +165,7 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	}
 	client, info, err := s.dialer.Connect(conn, *n.SSHUser, []ssh.AuthMethod{ssh.PublicKeys(signer)}, *n.HostKeyFingerprint)
 	if errors.Is(err, ErrHostKeyMismatch) {
-		s.handleKeyMismatch(n.ID, *n.HostKeyFingerprint, info.Fingerprint)
+		s.handleKeyMismatch(n.ID, n.Generation, *n.HostKeyFingerprint, info.Fingerprint)
 		return "", true
 	}
 	if err != nil {
