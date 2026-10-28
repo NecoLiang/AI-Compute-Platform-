@@ -3,8 +3,8 @@
 **Base**: `http://localhost:8080/api/v1` | **Auth**: 供给方接口需 supplier 角色（只能操作自己商品下的节点）；运营接口需 operator/admin
 **设计**：`docs/25`（§25.4 节点接入、§25.8.1 节点状态机、§25.10 API 摘要）。本文件为正式接口契约。
 
-> **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）。
-> 买家公钥、连接信息、会话记录与运营租约/会话检索（T-086）见「买家连接」「运营接口」相应小节。
+> **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）；S2（T-086）买家公钥、连接信息、会话记录（「买家连接」）与运营租约/会话检索（「运营接口」）。
+> 托管订单的下单、开通、取消退款口径见 [compute-api.md](compute-api.md)「托管订单（S2）」与 [payment-api.md](payment-api.md)「托管订单（S2）」。续租、冻结、到期清理（T-087/T-088）尚未接入。
 
 **开关**：所有接口仅在 `fleet.enabled=true` 时注册。关闭时（默认）这些路径未注册（HTTP 404），`POST /supplier/nodes` 传 `mgmt_mode:"ssh"` 返回 40001「托管履约未启用(fleet.enabled=false)」，托管商品不可提交审核与下单（40001），人工模式行为不变。
 
@@ -154,6 +154,88 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 
 ---
 
+## 买家连接（S2 T-086）✅
+
+登录即可调用（buyer 组，任何角色），归属在服务层校验。仅 `fleet.enabled=true` 时注册。
+买家通过访问网关 `ssh -p <gateway_port> <login>@<gateway_host>` 登录：公钥（本节管理）或访问凭证（密码，沿用 compute 的 `GET /orders/:id/access-credential` 与 `POST /orders/:id/access-credential/reveal`）。
+
+### GET /user/ssh-keys · 我的公钥 ✅
+
+只返回未删除的公钥，按添加时间倒序。
+
+```json
+{"code":0,"message":"success","data":[
+  {"id":3,"name":"alice@laptop","key_type":"ssh-ed25519",
+   "public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+   "fingerprint":"SHA256:9oQf0m4vJ4bXo3m2pY0Yt2bKq9Hk7cY2l7XvN1yq5jE",
+   "created_at":"2026-10-28T10:00:00+08:00"}],
+ "request_id":"..."}
+```
+
+### POST /user/ssh-keys · 添加公钥 ✅
+
+```
+curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"办公笔记本","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... alice@laptop"}'
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `public_key` | 是 | `.pub` 文件的**一行**。支持 `ssh-ed25519`、`ecdsa-sha2-nistp256/384/521`、`ssh-rsa`（≥ 3072 位）。拒绝：带选项的行（`from=`/`command=` 等）、多行/多把、证书（`*-cert-v01@openssh.com`）、安全密钥（`sk-*`）、`ssh-dss`、RSA < 3072 位 |
+| `name` | 否 | ≤ 64 字（超长 40001）；缺省取公钥注释（截断到 64 字），无注释为「SSH 公钥」 |
+
+**响应**：`data` 为一条 `BuyerKey`（同上）。入库的 `public_key` 是解析后重新序列化的规范形式（**不含注释**），`fingerprint` 为 `SHA256:` 格式。
+**规则**：每个账户最多 10 把未删除的公钥（第 11 把 40900）；同一把已添加 40900「该公钥已添加」；曾删除的同一把重新添加时复用原记录（`id` 不变，`created_at` 刷新）。同一把公钥可被不同账户各自添加。写审计 `buyer_ssh_key.add`。
+**错误**：40001 `public_key` 缺失 / 格式或类型不支持 / `name` 超长；40900 重复 / 已达上限。
+
+### DELETE /user/ssh-keys/:id · 删除公钥 ✅
+
+→ `{"code":0,"message":"success","data":{"id":3,"deleted":true},"request_id":"..."}`
+- 软删除（`revoked_at`），同一事务内刷新本人 `active/parked/suspended/grace` 租约的 `access_changed_at`：网关在下一次撤销轮询（≤ 5s 轮询 + 2s 滞后）清掉按该公钥缓存的放行，之后用该公钥登录被拒。
+- **已建立的 SSH 会话不会被断开**（sshpiperd v1.6.1 插件无法切断已建立的管道，见 docs/25 §25.6.3 S2 实现口径）。
+- 写审计 `buyer_ssh_key.revoke`。40001 `id` 非法；40400 不存在 / 非本人 / 已删除。
+
+### GET /orders/:id/access · 托管订单连接信息 ✅
+
+`:id` 为订单号（与 compute 订单接口一致）。
+
+```json
+{"code":0,"message":"success","data":{
+  "gateway_host":"gw.omnisline.com","gateway_port":2222,
+  "login":"l-4g7bq4xc","lease_state":"active",
+  "access_until":"2026-11-28T10:00:00+08:00","grace_until":null,
+  "auth_methods":["publickey","password"]},
+ "request_id":"..."}
+```
+
+- `gateway_host/port` 来自 `accessgw.public_host/public_port`；`login` 即租约号，换节点/续租不变。**不返回节点地址与容器端口。**
+- 能否登录以 `lease_state=active` 且未过 `access_until` 为准；其他状态（`pending/provisioning/parked/suspended/grace/...`）照常返回本结构，前端据 `lease_state` 提示。
+- **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单「该订单为人工交付, 没有网关连接信息」；40400 订单尚无租约。
+
+### GET /orders/:id/sessions?page=&page_size= · 会话记录 ✅
+
+仅本人托管订单（错误同上）。分页 `page` 默认 1，`page_size` 默认 20、> 100 回落为 20；按 `started_at` 倒序。会话记录保留 180 天。
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":12,"lease_no":"l-4g7bq4xc","remote_ip":"198.51.100.1","auth_method":"publickey",
+   "key_fingerprint":"SHA256:9oQf0m4vJ4bXo3m2pY0Yt2bKq9Hk7cY2l7XvN1yq5jE","key_name":"办公笔记本",
+   "started_at":"2026-10-28T08:00:00+08:00","ended_at":"2026-10-28T09:00:00+08:00",
+   "bytes_up":0,"bytes_down":0,"end_reason":"closed"},
+  {"id":13,"lease_no":"l-4g7bq4xc","remote_ip":"2001:db8::1","auth_method":"password",
+   "key_fingerprint":null,"key_name":null,
+   "started_at":"2026-10-28T09:50:00+08:00","ended_at":null,
+   "bytes_up":0,"bytes_down":0,"end_reason":null}],
+  "total":2,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `key_name`：本人登记该指纹时的名称（公钥删除后仍显示，便于核对）；密码登录或指纹未在本人名下登记为 `null`。
+- `ended_at=null` 表示会话进行中（或网关尚未上报结束）。`bytes_up/bytes_down` 在 S2 恒为 0（sshpiperd v1.6.1 插件拿不到字节数）。系统自检会话不记录。
+
+---
+
 ## 运营接口
 
 ### GET /admin/nodes · 节点总览（扩展）✅
@@ -177,6 +259,43 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 ### POST /admin/node-tasks/:id/retry · 重试死信 ✅
 
 仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
+
+### GET /admin/leases?state=&node_id=&buyer_id=&page=&page_size= · 租约检索 ✅（S2 T-086）
+
+三个条件可组合，均缺省为全部；按 `id` 倒序；分页同上（默认 20，> 100 回落 20）。
+`state` ∈ `reserved/pending/provisioning/active/parked/suspended/grace/purging/purged/failed/cancelled`（其他值 40001）；`node_id`/`buyer_id` 须为正整数（否则 40001）。
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":5,"lease_no":"l-4g7bq4xc","order_id":88,"buyer_id":21,"product_id":12,"node_id":7,"cards":2,
+   "delivery_kind":"container","state":"active","upstream_port":40000,
+   "upstream_host_key_fp":"SHA256:...","container_name":"omnis-l-4g7bq4xc","volume_name":"omnis-l-4g7bq4xc-data",
+   "access_until":"2026-11-28T10:00:00+08:00","access_changed_at":"2026-10-28T10:00:00+08:00","grace_until":null,
+   "provisioned_at":"2026-10-28T10:00:00+08:00","purged_at":null,"fail_reason":null,
+   "resource_alert":null,"outage_remedy":"extend",
+   "created_at":"2026-10-28T09:58:00+08:00","updated_at":"2026-10-28T10:00:00+08:00"}],
+  "total":1,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `resource_alert`：轻量探活发现的在租卡异常（如卡掉线 / UUID 变化），为空表示正常。`port_claim`、`commit_image` 不出接口。
+- 40001 参数非法。
+
+### GET /admin/access-sessions?lease_no=&ip=&page=&page_size= · 会话检索 ✅（S2 T-086）
+
+`lease_no` 与 `ip` 可单独或组合，均缺省为全部；按 `started_at` 倒序；分页同上。结构同买家会话记录，另带 `buyer_id`：
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":13,"lease_no":"l-4g7bq4xc","buyer_id":21,"remote_ip":"2001:db8::1","auth_method":"password",
+   "key_fingerprint":null,"key_name":null,"started_at":"2026-10-28T09:50:00+08:00","ended_at":null,
+   "bytes_up":0,"bytes_down":0,"end_reason":null}],
+  "total":1,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `lease_no` 须为 `l-` + 8 位小写字母/数字 2–7（否则 40001）；格式合法但不存在时返回空列表。
+- `ip` 按规范形式匹配（`2001:0db8:0:0::1` 与 `2001:db8::1` 等价）；非法 IP 40001。
 
 ---
 

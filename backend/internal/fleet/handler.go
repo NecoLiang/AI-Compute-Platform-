@@ -36,6 +36,8 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/admin/nodes/:id/resume", h.Resume)
 	r.GET("/admin/node-tasks", h.Tasks)
 	r.POST("/admin/node-tasks/:id/retry", h.RetryTask)
+	r.GET("/admin/leases", h.AdminLeases)
+	r.GET("/admin/access-sessions", h.AdminSessions)
 }
 
 // fail 业务错误原样返回; 未分类错误记日志并返回 50000(不向前端暴露 SQL 细节)。
@@ -269,4 +271,118 @@ func (h *Handler) RetryTask(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"task_id": id, "state": TaskPending})
+}
+
+// RegisterBuyerRoutes 买家公钥与托管订单连接信息(登录即可, 归属在服务层校验)。
+func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
+	r.GET("/user/ssh-keys", h.ListKeys)
+	r.POST("/user/ssh-keys", h.AddKey)
+	r.DELETE("/user/ssh-keys/:id", h.DeleteKey)
+	r.GET("/orders/:id/access", h.OrderAccess)
+	r.GET("/orders/:id/sessions", h.OrderSessions)
+}
+
+func pageQuery(c *gin.Context) (int, int) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	return normPage(page, size)
+}
+
+func (h *Handler) ListKeys(c *gin.Context) {
+	list, err := h.svc.ListBuyerKeys(c.GetInt64("user_id"))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.Success(c, list)
+}
+
+func (h *Handler) AddKey(c *gin.Context) {
+	var req struct {
+		Name      string `json:"name"`
+		PublicKey string `json:"public_key" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, "public_key 必填")
+		return
+	}
+	k, err := h.svc.AddBuyerKey(c.GetInt64("user_id"), req.Name, req.PublicKey, c.ClientIP())
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.Success(c, k)
+}
+
+func (h *Handler) DeleteKey(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.DeleteBuyerKey(c.GetInt64("user_id"), id, c.ClientIP()); err != nil {
+		fail(c, err)
+		return
+	}
+	response.Success(c, gin.H{"id": id, "deleted": true})
+}
+
+func (h *Handler) OrderAccess(c *gin.Context) {
+	a, err := h.svc.OrderAccess(c.GetInt64("user_id"), c.Param("id"))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.Success(c, a)
+}
+
+func (h *Handler) OrderSessions(c *gin.Context) {
+	page, size := pageQuery(c)
+	list, total, page, size, err := h.svc.OrderSessions(c.GetInt64("user_id"), c.Param("id"), page, size)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.SuccessPage(c, list, total, page, size)
+}
+
+// queryID 可选的正整数查询参数; 缺省为 0, 非法 40001。
+func queryID(c *gin.Context, name string) (int64, bool) {
+	v := c.Query(name)
+	if v == "" {
+		return 0, true
+	}
+	id, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.ParamInvalid, name+" 非法")
+		return 0, false
+	}
+	return id, true
+}
+
+func (h *Handler) AdminLeases(c *gin.Context) {
+	nodeID, ok := queryID(c, "node_id")
+	if !ok {
+		return
+	}
+	buyerID, ok := queryID(c, "buyer_id")
+	if !ok {
+		return
+	}
+	page, size := pageQuery(c)
+	list, total, page, size, err := h.svc.AdminLeases(c.Query("state"), nodeID, buyerID, page, size)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.SuccessPage(c, list, total, page, size)
+}
+
+func (h *Handler) AdminSessions(c *gin.Context) {
+	page, size := pageQuery(c)
+	list, total, page, size, err := h.svc.AdminSessions(c.Query("lease_no"), c.Query("ip"), page, size)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.SuccessPage(c, list, total, page, size)
 }

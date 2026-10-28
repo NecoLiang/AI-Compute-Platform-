@@ -97,6 +97,7 @@
 - 凭证：`GET /orders/:id/access-credential`（脱敏）、`POST .../reveal`（明文，二次确认后调用）
 - 🆕 订单详情可加「存证时间线」：复用 `/blockchain/verify?type=order|delivery&id=<orderNo>`
 - 支付：`POST /payment/pay` → 响应含 `pay_url`；`GET /payment/status/:order_no` ⬜（轮询支付结果，待接）
+- 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
 
 ### `/console/buyer/invoices` 发票 ✅
 - `GET/PUT /invoices/title`、`GET /invoices/billable-orders`、`POST /invoices/apply`、`GET /invoices?status`、`GET /invoices/:invoice_no/download`(PDF 二进制)
@@ -106,6 +107,9 @@
 
 ### `/console/buyer/messages` 通知 ✅
 - `GET /notifications?type(order|ticket|system)`、`POST /notifications/:id/read`、`POST /notifications/read-all`、`DELETE /notifications/:id`；列表响应的 `unread` 是全类型未读数（角标用）
+
+### SSH 公钥（v1.2，`fleet.enabled=true`，页面待建，建议 `/console/buyer/ssh-keys` 或并入 profile）🆕
+- `GET /user/ssh-keys`、`POST /user/ssh-keys` `{name?, public_key}`、`DELETE /user/ssh-keys/:id`；每账户最多 10 把，只收 ed25519 / ecdsa / RSA≥3072 的单行公钥，错误信息直接展示。删除后约 7 秒内新登录被拒，已建立的会话不会断开（页面需提示）。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
 
 ### `/console/buyer/profile` `/console/buyer/billing` ⬜
 - profile 已使用 `/auth/me` 和 KYC 状态，只读；`GET /user/profile` 返回当前数据库资料，`PUT` HTTP 501 明确未开放。billing 已接支付记录及结算查询；查询可用不代表真实支付已接入。
@@ -175,7 +179,7 @@
 | `/admin/settings` | `GET/PUT /admin/config`；`GET/POST/PUT /admin/gpu-catalog` ⬜（型号库维护界面待接，字段见 gpu-catalog-api.md） | ✅ |
 | `/admin/cms` | `GET/POST /admin/cms/notices` | ✅ |
 | 节点总览（建议并入 `/admin/settings` 或新页）🆕 | `GET /admin/nodes?status`、`GET /admin/schedule-advice?order_no=`、`POST /admin/blockchain/requeue-failed`(存证死信补推) | 🆕 |
-| 托管节点运维（v1.2，`fleet.enabled=true`，页面待建）🆕 | `GET /admin/nodes`（托管节点带 `managed` 摘要）、`POST /admin/nodes/:id/suspend\|resume`、`GET /admin/node-tasks?state&node_id`、`POST /admin/node-tasks/:id/retry`，见 [managed-rental-api.md](managed-rental-api.md#运营接口) | 🆕 后端就绪 |
+| 托管节点运维（v1.2，`fleet.enabled=true`，页面待建）🆕 | `GET /admin/nodes`（托管节点带 `managed` 摘要）、`POST /admin/nodes/:id/suspend\|resume`、`GET /admin/node-tasks?state&node_id`、`POST /admin/node-tasks/:id/retry`、`GET /admin/leases?state&node_id&buyer_id`（租约检索，含 `resource_alert`）、`GET /admin/access-sessions?lease_no&ip`（登录会话检索），见 [managed-rental-api.md](managed-rental-api.md#运营接口) | 🆕 后端就绪 |
 
 ---
 

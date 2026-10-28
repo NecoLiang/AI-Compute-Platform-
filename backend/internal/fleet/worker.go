@@ -134,16 +134,24 @@ func (s *Service) execute(ctx context.Context, t *Task) {
 				"attempt", t.Attempts, "retry_in", retryBackoff(t.Attempts), "error", err)
 		}
 	default:
-		slog.Info("fleet 任务完成", "task_id", t.ID, "node_id", t.NodeID, "kind", t.Kind, "lease_id", t.LeaseID,
+		slog.Info("fleet 任务完成", "task_id", t.ID, "node_id", t.NodeID, "kind", t.Kind, "lease_id", taskLeaseID(t),
 			"elapsed", time.Since(start).Round(time.Second))
 		s.finish(t, TaskSucceeded, out, "")
 	}
 }
 
+// taskLeaseID 日志用: 无租约的任务记 0(直接记 *int64 会打印成指针地址)。
+func taskLeaseID(t *Task) int64 {
+	if t.LeaseID == nil {
+		return 0
+	}
+	return *t.LeaseID
+}
+
 // taskDead 任务进入死信: 运营告警 + 类型自定义的善后(provision 换节点/退款)。
 func (s *Service) taskDead(t *Task, lastErr string) {
 	slog.Error("运营告警: fleet 任务进入死信", "task_id", t.ID, "node_id", t.NodeID, "kind", t.Kind,
-		"lease_id", t.LeaseID, "attempts", t.Attempts, "error", lastErr)
+		"lease_id", taskLeaseID(t), "attempts", t.Attempts, "error", lastErr)
 	if e, ok := s.executorFor(t.Kind); ok && e.onDead != nil {
 		e.onDead(t, lastErr)
 	}

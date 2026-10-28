@@ -253,6 +253,9 @@ func main() {
 	notification.NewHandler(notificationSvc).RegisterBuyerRoutes(buyer)
 	equipment.NewHandler(equipmentSvc).RegisterBuyerRoutes(buyer)
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
+	if fleetSvc != nil {
+		fleet.NewHandler(fleetSvc).RegisterBuyerRoutes(buyer)
+	}
 	if cfg.Server.Mode != "release" {
 		dev := r.Group("/api/v1/dev")
 		dev.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))

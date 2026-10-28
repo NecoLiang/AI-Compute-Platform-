@@ -333,3 +333,29 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 - `GET /products`、`GET /products/:id` 的商品对象均包含 `health=unknown|healthy|degraded|offline`。offline 不可下单；unknown 不显示健康徽章，其他状态不改变既有准入规则。
 - 库存按订单实际 `stock_reserved` 归还并清零，与终态流转同事务；零占用订单不增加库存。历史 NULL 占用必须先核对，释放失败保持原状态，禁止猜测回填。该内部字段不对外返回。
 - 增量迁移、历史核对与应用回退见 [发布说明](trade-controls-release.md)。
+
+## 托管订单（S2，`fulfillment_mode=managed`）
+
+v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.fulfillment_mode='managed'` 的商品与订单；人工订单（`manual`）的所有接口行为不变。设计见 docs/25 §25.5、docs/26 §26.5；租约与连接信息接口见 [managed-rental-api.md](managed-rental-api.md)「买家连接」。
+
+**下单 `POST /orders`**（请求/响应结构不变）
+- `fleet.enabled=false`：40001「托管履约未启用(fleet.enabled=false): 托管商品暂不可提交审核或下单」。
+- fleet 已启用但租约钩子未接入：50000「托管履约模块未启用: 租约开通(docs/25 S2)尚未接入, 托管商品暂不可下单」。
+- 买断计费（`pricing_mode=perpetual`）的托管商品：40001「托管商品不支持买断计费」。
+- 不扣 `products.stock`（托管库存由卡槽派生），订单 `stock_reserved=0`；同一事务内建租约（`reserved`）并在**同一台节点**上预留 `quantity` 张卡槽（docs/26 §26.5.2），随后重算派生库存。事务使用 READ COMMITTED。
+- 没有一台节点能凑齐所需卡数：40900「所选卡数暂无整机余量」（总空闲卡数可能大于所需，但分散在不同节点）。
+- 整机交付（`delivery_mode=bare_metal`）的托管商品：50000「整机托管开通尚未接入(T-089), 暂不可下单」。
+
+**状态流转**
+| 订单状态 | 托管口径 |
+|---|---|
+| `pending_payment` | 卡槽已预留（租约 `reserved`）；超时/取消释放卡槽与租约（租约 → `cancelled`） |
+| `paid` | 收款确认同一事务内租约 → `pending` 并入队开通任务 |
+| `provisioning` | 开通任务开始执行（无需供给方回填凭证，**不走** `POST /orders/:id/deliver` 与 `POST /orders/:id/confirm`） |
+| `active` | 容器创建且经访问网关系统自检通过。`lease_start_at` = 自检通过时刻，`lease_end_at` 按计费周期换算；交付记录直接为 `delivered`（无签收环节）并写 `selftest_passed_at` |
+| `cancelled` | 开通彻底失败（换节点后仍失败）：`lease_start_at` 保持 `null`，吊销凭证，由支付侧自动全额原路退款（见 payment-api.md「托管订单（S2）」） |
+
+- 交付信息（`GET /orders/:id/access-credential`）：`ip_address` 为网关地址（`accessgw.public_host`）、`ssh_port` 为网关端口、`username` 为租约号（登录名）；**不含节点 IP/端口**。访问凭证 `access_value` 即网关密码登录口令，沿用 reveal 接口查看。推荐改用 SSH 公钥（`POST /user/ssh-keys`）。
+- 订单进入 `cancelled/refunded/completed` 时同一事务内释放卡槽并迁移租约（`releaseHoldTx`，已释放幂等）；人工订单仍按 `stock_reserved` 归还库存。
+
+**续租**：托管订单 `GET /orders/:id/renewal-quote` 与 `POST /orders/:id/renew` 返回 50000「托管订单续租尚未接入(docs/25 §25.7.2, T-088), 暂不可续租」，不走人工续租路径。

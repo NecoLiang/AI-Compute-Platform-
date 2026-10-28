@@ -74,6 +74,7 @@ func (p *miniPiper) handle(c net.Conn) {
 	id := hex.EncodeToString(sc.SessionID())
 	route, ok := p.gw.Upstream(id)
 	if !ok {
+		p.t.Logf("miniPiper: no upstream route for %s", id)
 		return
 	}
 	up, err := ssh.Dial("tcp", net.JoinHostPort(route.Host, strconv.Itoa(route.Port)), &ssh.ClientConfig{
@@ -81,7 +82,8 @@ func (p *miniPiper) handle(c net.Conn) {
 		HostKeyCallback: func(_ string, _ net.Addr, k ssh.PublicKey) error { return p.gw.VerifyHostKey(id, k.Marshal()) },
 	})
 	if err != nil {
-		return // sshpiperd: PipeCreateErrorCallback
+		p.t.Logf("miniPiper: upstream dial %s:%d: %v", route.Host, route.Port, err) // sshpiperd: PipeCreateErrorCallback
+		return
 	}
 	defer up.Close()
 	p.gw.PipeStart(id)
@@ -106,7 +108,14 @@ func (p *miniPiper) handle(c net.Conn) {
 }
 
 func relayChannel(ch ssh.Channel, creqs <-chan *ssh.Request, uch ssh.Channel, ureqs <-chan *ssh.Request) {
-	defer ch.Close()
+	// reqMu: 上游可能在 exec 应答转发给客户端之前就发完 exit-status 并关闭通道; 关闭下游通道前须等在途请求的
+	// 应答转发完, 否则客户端收到 EOF(负载高时偶发)。真实 sshpiperd 按报文顺序转发, 无此问题。
+	var reqMu sync.Mutex
+	defer func() {
+		reqMu.Lock()
+		_ = ch.Close()
+		reqMu.Unlock()
+	}()
 	defer uch.Close()
 	go func() {
 		_, _ = io.Copy(uch, ch)
@@ -114,10 +123,12 @@ func relayChannel(ch ssh.Channel, creqs <-chan *ssh.Request, uch ssh.Channel, ur
 	}()
 	go func() {
 		for r := range creqs {
+			reqMu.Lock()
 			ok, _ := uch.SendRequest(r.Type, r.WantReply, r.Payload)
 			if r.WantReply {
 				_ = r.Reply(ok, nil)
 			}
+			reqMu.Unlock()
 		}
 	}()
 	var wg sync.WaitGroup
