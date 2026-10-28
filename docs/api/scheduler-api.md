@@ -63,6 +63,19 @@ curl -X POST http://localhost:8080/api/v1/node/heartbeat \
 
 打分规则（透明可解释）：健康度 40 + 容量适配 30（best-fit，优先恰好容纳减少碎片）+ 负载 20 + 稳定性 10。
 
+**托管商品容量口径（T-093，docs/26 §26.5.5）**：每个节点项新增两个字段，人工商品行为不变。
+- `capacity_source`：`heartbeat` 表示人工商品，`available_cards/total_cards` 取节点心跳上报；`gpu_slots` 表示托管商品（`fulfillment_mode=managed`），按该商品节点的 `gpu_slots` 计算：`total_cards` = 卡槽总数，`available_cards` = 空闲卡槽 + **本订单租约已占卡槽**（给本订单做建议时，这些卡本来就归它）。
+- `max_group_free`：托管节点同一拓扑组（`topo_group`）内最多可用卡数（同样含本订单已占），衡量碎片；人工商品为 `null`。
+- 打分权重不变（同一 `scoreNode`：健康 40 + 容量 30 + 负载 20 + 稳定 10），仅把容量输入换成卡槽口径。`reasons` 追加卡槽说明：「卡槽: 可用 a/共 t 卡, 拓扑组可用分布 {topo_group}:{可用} …, 同组最多 m 卡」「该订单租约已在本节点预留 n 张卡」「n 卡可在同一拓扑组内分配 / 需跨拓扑组拼接, 卡间通信带宽较低」。
+- 托管节点的可调度条件与下单卡槽分配一致，不满足即 `verdict=unavailable, score=0`，首条 reason 依次为：节点离线（同人工）→「节点未通过验收(…), 不可调度」→「节点已暂停调度」→「托管节点非在线状态, 不可调度」→「节点尚无卡槽记录(未完成接入自检)」→ 整机交付「整机交付需整台 N 卡全部空闲且订单卡数等于整机卡数」→ 无磁盘配额「节点不支持磁盘配额, 只能整机(N 卡)出租」/「…当前非全部空闲」。
+
+```json
+{"node_id":2,"node_name":"node-b","status":"online","available_cards":4,"total_cards":8,
+ "score":92,"verdict":"recommended","capacity_source":"gpu_slots","max_group_free":4,
+ "reasons":["节点在线, 心跳正常","容量适配: 需求 4/可用 4, 适配得分 30/30","…",
+   "卡槽: 可用 4/共 8 卡, 拓扑组可用分布 g0:4 g1:0, 同组最多 4 卡","4 卡可在同一拓扑组内分配"]}
+```
+
 ## GET /admin/nodes?status=&page=&page_size= · 节点总览（运营）✅
 
 托管节点额外返回 `managed`（最近探活结论、卡槽统计、SSH 地址、指纹确认状态），字段见 [managed-rental-api.md](managed-rental-api.md#get-adminnodes--节点总览扩展)；运营停用/恢复与任务重试接口也在该文件。
