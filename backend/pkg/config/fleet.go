@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	tfcrypto "tokenfactory/pkg/crypto"
 	"tokenfactory/pkg/netguard"
 
 	"github.com/spf13/viper"
@@ -201,6 +202,9 @@ func validateFleet(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.Security.CredentialKey) == "" {
 		missing = append(missing, "security.credential_key")
+	} else if _, err := tfcrypto.ParseKeyHex(cfg.Security.CredentialKey); err != nil {
+		// 节点管理私钥用它加密落库; 非法密钥不能"带病启动"(否则节点接入/探活全部 50000)。
+		invalid = append(invalid, "security.credential_key 须为 64 位 hex(32 字节)")
 	}
 	if gw.PublicHost == "" {
 		missing = append(missing, "accessgw.public_host")

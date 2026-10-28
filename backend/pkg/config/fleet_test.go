@@ -110,3 +110,27 @@ func TestFleetDenyCIDRs(t *testing.T) {
 		t.Fatalf("invalid deny_cidrs must be rejected: %v", err)
 	}
 }
+
+// CR-S1 Minor: fleet.enabled=true 时 security.credential_key 格式非法必须启动失败(不再只打日志带病运行)。
+func TestFleetEnabledRejectsMalformedCredentialKey(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	valid := strings.ReplaceAll(validFleetYAML, "%s", digest)
+	for name, key := range map[string]string{
+		"non-hex":   strings.Repeat("zz", 32),
+		"too-short": "0123456789abcdef",
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(valid, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", key, 1)
+			_, err := Load(writeFleetConfig(t, body))
+			if err == nil || !strings.Contains(err.Error(), "security.credential_key 须为 64 位 hex") {
+				t.Fatalf("malformed credential_key must fail to load, got %v", err)
+			}
+		})
+	}
+	// fleet 关闭时不校验(行为不变)。
+	body := strings.Replace(valid, "enabled: true", "enabled: false", 1)
+	body = strings.Replace(body, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "not-hex", 1)
+	if _, err := Load(writeFleetConfig(t, body)); err != nil {
+		t.Fatalf("fleet disabled must not validate credential_key: %v", err)
+	}
+}

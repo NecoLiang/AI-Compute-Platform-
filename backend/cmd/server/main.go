@@ -137,8 +137,9 @@ func main() {
 	if cfg.Fleet.Enabled {
 		credKey, kerr := tfcrypto.ParseKeyHex(cfg.Security.CredentialKey)
 		if kerr != nil {
-			slog.Error("fleet.enabled=true 但 security.credential_key 不可用: 节点管理密钥相关操作将返回 50000", "error", kerr)
-			credKey = nil
+			// config.Load 已校验; 这里兜底: 托管履约依赖它加密节点管理私钥, 不可用即启动失败, 不降级运行。
+			slog.Error("fleet.enabled=true 但 security.credential_key 不可用", "error", kerr)
+			os.Exit(1)
 		}
 		fleetSvc = fleet.NewService(fleet.NewRepository(sqlDB),
 			fleet.Deps{Products: computeSvc, Health: schedulerSvc, Notifier: notificationSvc},
