@@ -255,6 +255,17 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 		assert.False(t, strings.HasPrefix(c, "nvidia-smi") || strings.HasPrefix(c, "docker"), "指纹确认前不得执行探活命令: %s", c)
 	}
 	assert.Equal(t, 1, countRows(t, db, `SELECT COUNT(*) FROM notifications WHERE user_id=10 AND title='请确认节点主机指纹'`))
+	// 待确认指纹的报告没有 inventory(NULL): 供给方报告列表与运营列表附加信息都必须能读出。
+	reps, err := s.ProbeReports(10, id, 10)
+	require.NoError(t, err)
+	require.Len(t, reps, 1)
+	assert.Equal(t, "fail", reps[0].Result)
+	assert.JSONEq(t, "null", string(reps[0].Inventory))
+	extras, err := s.ManagedNodeExtras([]int64{id})
+	require.NoError(t, err)
+	assert.Contains(t, extras, id)
+	_, err = s.ProbeReports(11, id, 10)
+	assert.Equal(t, errcode.NotFound, codeOf(err))
 
 	// ⑦ 确认指纹: 不一致 40001; 一致则钉死并自动入队完整探活。
 	_, err = s.ConfirmHostKey(10, id, "SHA256:not-the-right-one", "203.0.113.9")

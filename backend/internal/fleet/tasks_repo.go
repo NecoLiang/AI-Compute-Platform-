@@ -206,9 +206,10 @@ func (r *Repository) insertReport(q sqlx.Execer, nodeID int64, kind string, pass
 	return res.LastInsertId()
 }
 
+// inventory 可空(连接阶段失败/待确认指纹的报告不含清单), 以 JSON null 返回, 否则 json.RawMessage 扫描失败。
 func (r *Repository) listReports(nodeID int64, limit int) ([]ProbeReport, error) {
 	var list []ProbeReport
-	err := r.db.Select(&list, `SELECT id, node_id, kind, result, checks, inventory, created_at FROM node_probe_reports
+	err := r.db.Select(&list, `SELECT id, node_id, kind, result, checks, COALESCE(inventory, 'null') AS inventory, created_at FROM node_probe_reports
 		WHERE node_id=? ORDER BY id DESC LIMIT ?`, nodeID, limit)
 	return list, err
 }
@@ -219,7 +220,7 @@ func (r *Repository) latestReports(nodeIDs []int64) (map[int64]ProbeReport, erro
 	if len(nodeIDs) == 0 {
 		return out, nil
 	}
-	q, args, err := sqlx.In(`SELECT p.id, p.node_id, p.kind, p.result, p.checks, p.inventory, p.created_at
+	q, args, err := sqlx.In(`SELECT p.id, p.node_id, p.kind, p.result, p.checks, COALESCE(p.inventory, 'null') AS inventory, p.created_at
 		FROM node_probe_reports p JOIN (SELECT node_id, MAX(id) mid FROM node_probe_reports WHERE node_id IN (?) GROUP BY node_id) m
 		ON p.id=m.mid`, nodeIDs)
 	if err != nil {
