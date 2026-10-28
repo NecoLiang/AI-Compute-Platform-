@@ -19,6 +19,8 @@ type Config struct {
 	AI         AIConfig
 	WeChat     WeChatConfig
 	Yeepay     YeepayConfig
+	Fleet      FleetConfig
+	AccessGW   AccessGWConfig
 }
 
 // YeepayConfig 易宝支付(平台商收付款)接入。app_key/商编/私钥/回调地址要么全空(未接入:
@@ -239,6 +241,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.Port == "" {
 		cfg.Server.Port = "8080"
+	}
+	if err := loadFleet(v, cfg); err != nil {
+		return nil, err
 	}
 	if cfg.Server.Mode == "release" {
 		if cfg.SMS.LocalPreview || cfg.Security.CapTestToken != "" {
