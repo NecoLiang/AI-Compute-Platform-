@@ -201,6 +201,13 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	xout, _ := p.runFor(ctx, cmd, 15*time.Second) // 以解析结果为准(错误输出带 @@err 前缀)
 	xidAt := time.Now()
 	xid := ParseXid(xout, window)
+	// 致命 Xid 告警按"近 1 小时"保持(与 docs/27 F6 同口径): 本次扫描 ∪ 已入库事件, 不因下一次干净的扫描提前解除。
+	recentFatal, err := s.repo.recentFatalXids(n.ID, xidAt.Add(-fatalXidHold))
+	if err != nil {
+		slog.Error("fleet 读取近期致命 Xid 失败", "node_id", n.ID, "error", err)
+		return "", true // 平台侧故障不计入节点失败
+	}
+	mergeFatalXids(recentFatal, xid.fatalSince(xidAt, xidAt.Add(-fatalXidHold)))
 
 	slots, err := s.repo.listSlots(s.repo.db, n.ID)
 	if err != nil {
@@ -226,7 +233,7 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		} else if g.ECCUncorrected != nil && *g.ECCUncorrected > 0 {
 			why = append(why, fmt.Sprintf("不可纠正 ECC 错误 %d 次", *g.ECCUncorrected))
 		}
-		if x := xid.FatalXidsFor(sl.PCIBusID); len(x) > 0 {
+		if x := recentFatal[NormalizeBusID(sl.PCIBusID)]; len(x) > 0 {
 			why = append(why, fmt.Sprintf("致命 Xid %v", x))
 		}
 		if len(why) == 0 {

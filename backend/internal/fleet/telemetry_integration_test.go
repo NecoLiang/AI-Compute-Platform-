@@ -141,7 +141,8 @@ func lastCmdWith(f *fakeNode, prefix string) string {
 	return ""
 }
 
-// 在租卡出现致命 Xid: 不改卡槽状态, 写 leases.resource_alert(既有路径, T-105 输入)。
+// 在租卡出现致命 Xid: 不改卡槽状态, 写 leases.resource_alert(既有路径, T-105 输入);
+// 告警保持到最后一次致命 Xid 之后 1 小时(与 F6 同口径), 之后的干净扫描不提前清除。
 func TestLightProbeFatalXidOnLeasedSlot(t *testing.T) {
 	e := newProvEnv(t, true)
 	e.outcome(t, runOne(t, e.s))
@@ -159,6 +160,42 @@ func TestLightProbeFatalXidOnLeasedSlot(t *testing.T) {
 	require.NotNil(t, nt.XidFrom)
 	assert.True(t, nt.XidFrom.Before(time.Now().Add(-time.Hour)), "首次轻探活扫描 61 分钟, 覆盖完整 1 小时")
 	assert.Contains(t, lastCmdWith(e.fake, `echo "@@id`), "--since '-61min'")
+
+	// 下一次扫描窗口里已没有该事件(干净扫描): 告警仍保持。
+	e.fake.SetXidLines()
+	e.s.lightProbe(context.Background(), n)
+	l, _ = e.s.repo.getLease(e.db, e.lease.ID)
+	require.NotNil(t, l.ResourceAlert)
+	assert.Equal(t, "GPU1 致命 Xid [48]", *l.ResourceAlert)
+	// 同卡再次出现致命 Xid(不同 xid): 合并去重。
+	e.fake.SetXidLines(fakeXidLine(time.Now().Add(-10*time.Second), "0000:01:00", 79))
+	e.s.lightProbe(context.Background(), n)
+	l, _ = e.s.repo.getLease(e.db, e.lease.ID)
+	assert.Equal(t, "GPU1 致命 Xid [48 79]", *l.ResourceAlert)
+	// 最后一次致命 Xid 超过 1 小时 → 下一次轻探活清除。
+	e.fake.SetXidLines()
+	e.db.MustExec(`UPDATE gpu_xid_events SET occurred_at=NOW() - INTERVAL 61 MINUTE WHERE node_id=?`, e.node)
+	e.s.lightProbe(context.Background(), n)
+	l, _ = e.s.repo.getLease(e.db, e.lease.ID)
+	assert.True(t, l.ResourceAlert == nil || *l.ResourceAlert == "", "%v", l.ResourceAlert)
+}
+
+// 本次扫描的事件按节点时钟偏差换算后再按 1 小时截取; 不可用的扫描不贡献事件。
+func TestXidScanFatalSince(t *testing.T) {
+	at := time.Now().Truncate(time.Second)
+	nodeNow := at.Add(-10 * time.Minute) // 节点时钟慢 10 分钟
+	scan := XidScan{Known: true, NodeNow: nodeNow, List: []XidEvent{
+		{Bus: "0000:18:00", Xid: 79, At: nodeNow.Add(-30 * time.Minute)},
+		{Bus: "0000:18:00", Xid: 13, At: nodeNow.Add(-1 * time.Minute)},
+		{Bus: "0000:2a:00", Xid: 48, At: nodeNow.Add(-70 * time.Minute)},
+	}}
+	got := scan.fatalSince(at, at.Add(-time.Hour))
+	assert.Equal(t, map[string][]int{"0000:18:00": {79}}, got)
+	scan.Known = false
+	assert.Empty(t, scan.fatalSince(at, at.Add(-time.Hour)))
+	m := map[string][]int{"a": {79, 48}}
+	mergeFatalXids(m, map[string][]int{"a": {48}, "b": {74}})
+	assert.Equal(t, map[string][]int{"a": {48, 79}, "b": {74}}, m)
 }
 
 // 无权读内核日志 / 读取出错: 覆盖中断(xid_covered_from=NULL)并记原因, 上次成功时间不动; 恢复后从本次窗口重新累计。

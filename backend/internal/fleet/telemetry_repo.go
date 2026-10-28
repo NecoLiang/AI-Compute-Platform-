@@ -17,6 +17,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -212,5 +214,58 @@ func (r *Repository) PurgeOldXidEvents(before time.Time) (int64, error) {
 		if n < 5000 {
 			return total, nil
 		}
+	}
+}
+
+// fatalXidHold 致命 Xid 告警(空闲卡 faulty / 在租卡 resource_alert)自最后一次致命 Xid 起保持的时长,
+// 与一键部署 F6"近 1 小时无致命 Xid"同口径。不可纠正 ECC 不在此列: 以 volatile 计数为准, 归零即恢复。
+const fatalXidHold = time.Hour
+
+// recentFatalXids 节点 since(平台时钟)之后入库的致命 Xid: 归一化 PCI 地址 → 去重升序 xid。
+func (r *Repository) recentFatalXids(nodeID int64, since time.Time) (map[string][]int, error) {
+	var rows []struct {
+		Bus string `db:"pci_bus_id"`
+		Xid int    `db:"xid"`
+	}
+	if err := r.db.Select(&rows, `SELECT DISTINCT pci_bus_id, xid FROM gpu_xid_events WHERE node_id=? AND occurred_at >= ?`,
+		nodeID, dbSecond(since)); err != nil {
+		return nil, err
+	}
+	out := map[string][]int{}
+	for _, e := range rows {
+		if FatalXids[e.Xid] {
+			out[NormalizeBusID(e.Bus)] = append(out[NormalizeBusID(e.Bus)], e.Xid)
+		}
+	}
+	mergeFatalXids(out, nil)
+	return out, nil
+}
+
+// fatalSince 本次扫描中发生在 since(平台时钟)之后的致命 Xid; 节点时钟按 scanAt-NodeNow 换算(同 recordXidScanTx)。
+func (x XidScan) fatalSince(scanAt, since time.Time) map[string][]int {
+	out := map[string][]int{}
+	if !x.Known {
+		return out
+	}
+	var skew time.Duration
+	if !x.NodeNow.IsZero() {
+		skew = scanAt.Sub(x.NodeNow)
+	}
+	for _, e := range x.List {
+		if FatalXids[e.Xid] && !dbSecond(e.At.Add(skew)).Before(dbSecond(since)) {
+			out[e.Bus] = append(out[e.Bus], e.Xid)
+		}
+	}
+	return out
+}
+
+// mergeFatalXids 把 add 并入 dst, 每张卡的 xid 去重升序。
+func mergeFatalXids(dst, add map[string][]int) {
+	for bus, xs := range add {
+		dst[bus] = append(dst[bus], xs...)
+	}
+	for bus, xs := range dst {
+		sort.Ints(xs)
+		dst[bus] = slices.Compact(xs)
 	}
 }
