@@ -53,6 +53,8 @@ services:
       - ./migrations/023_lead_created_by.up.sql:/docker-entrypoint-initdb.d/023.sql:ro
       - ./migrations/024_equipment_review.up.sql:/docker-entrypoint-initdb.d/024.sql:ro
       - ./migrations/025_yeepay_payment.up.sql:/docker-entrypoint-initdb.d/025.sql:ro
+      - ./migrations/026_managed_fulfillment.up.sql:/docker-entrypoint-initdb.d/026.sql:ro
+      - ./migrations/030_model_deployment.up.sql:/docker-entrypoint-initdb.d/030.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s
