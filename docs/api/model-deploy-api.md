@@ -5,7 +5,7 @@
 | 状态 | 范围 |
 |---|---|
 | ✅ 已实现（T-096） | 模型目录 CRUD、真机验证记录、上线/退役（运营） |
-| ✅ 已实现（T-097） | `GET /models`；`GET /orders/:id/deploy-plans` 判定函数与接口（**托管租约数据源未接入前固定返回 50000**） |
+| ✅ 已实现（T-097） | `GET /models`；`GET /orders/:id/deploy-plans` 判定函数与接口；托管租约数据源已由 `internal/fleet` 接入（仅 `fleet.enabled=true` 时注入，否则固定 50000）。**F3/F6 所需按卡实时数据尚未采集，目前一律判"无法判定"、`feasible=false`**，见下文"数据源接入现状" |
 | ⏳ 未实现（T-098/T-099） | `POST/GET /orders/:id/deployments*`、`GET /admin/deployments`（依赖 S2 托管租约与节点任务） |
 
 统一信封 `{code,message,data,request_id}`；错误码只用 40001/40100/40101/40300/40400/40900/42900/50000。
@@ -165,7 +165,7 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
 
 ## 部署方案判定（买家，订单本人）
 
-### GET /orders/:id/deploy-plans?model_id=&gpu_mem_util= ✅（数据源待 S2 接入）
+### GET /orders/:id/deploy-plans?model_id=&gpu_mem_util= ✅（数据源已接入，部分输入待采集）
 
 `:id` 为订单号（`ORD…`/`REN…`）。只读，不写库；提交部署（T-098）时服务端会**重新判定**，不信任本结果。
 
@@ -174,8 +174,11 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
 | model_id | 是 | `GET /models` 返回的 id；非 active 条目 40400 |
 | gpu_mem_util | 否 | 显存利用率上限 `u`，小数最多两位，`0.80`–`0.95`；**不带该参数**时取 `0.90`。一旦带上（包括空值、`0`、`0.0`）就必须在范围内，否则 40001，不会回落到默认值 |
 
-> **当前状态**：托管租约与实时卡数据由 S2 `internal/fleet` 提供（实现 `modeldeploy.LeaseSource` 并注入）。接入前，参数合法的请求一律返回
+> **当前状态**：托管租约与卡数据由 `internal/fleet`（`fleet.ModelDeployLeases`）提供，`main.go` 仅在 `fleet.enabled=true` 时注入。
+> `fleet.enabled=false`（未注入）时，参数合法的请求一律返回
 > `{"code":50000,"message":"托管租约能力尚未上线(S2 未接入), 暂无法计算部署方案"}`，不使用任何假数据。
+> 注入后，探活尚未采集的输入不给默认值，对应检查写明"无法判定"及原因，因此**目前所有订单 `feasible=false`**（F3、F6 恒为 error），
+> 详见"数据源接入现状"。
 
 **响应**
 
@@ -230,10 +233,12 @@ M1 为 `error`：“目录条目 … 参数超出合理范围(…), 无法判定
 | M2 | 推荐组合上下文是否紧张 | warning |
 | F1 | 型号库 `compute_capability` ≥ 条目 `min_compute_capability`；型号未登记即"无法判定" | error，message 末尾列出"其他可用目录条目"：所有 `min_compute_capability` ≤ 该卡型的其他 active 条目（按 model_key 字典序）。目录无"基础模型"字段，**不限于同一模型的量化变体** |
 | F2 | 节点实测驱动 ≥ `min_driver_version`；驱动未知即"无法判定" | error |
-| F3 | 各卡当前显存占用 ≤ 2% | error |
-| F4 | 节点已缓存该模型，或缓存区剩余 + 可按 LRU 清理 ≥ 权重×1.1 | error |
-| F5 | 存在 tp>1 的可行组合且卡间无 NVLink | warning |
-| F6 | 无故障卡、近 1 小时无致命 Xid | error |
+| F3 | 各卡当前显存占用 ≤ 2%；数据源未采集即"无法判定" | error |
+| F4 | 节点已缓存该模型，或缓存区剩余 + 可按 LRU 清理 ≥ 权重×1.1；未缓存且剩余空间未采集即"无法判定" | error |
+| F5 | 存在 tp>1 的可行组合且卡间无 NVLink；NVLink 未知时提示"无法判定" | warning |
+| F6 | 无故障卡、近 1 小时无致命 Xid；有故障卡先报故障，否则 Xid 历史未采集即"无法判定" | error |
+
+`basis.undetermined`（可选）：`{输入键: 原因}`，列出本次判定中数据源声明未采集的输入（键见下表）。
 | F7 | `commercial_use` 非 `allowed`（`restricted` 与 `unknown`） | confirm，`ack=license_ack` |
 | F8 | 租约卡型（型号库 `model_name` 精确匹配）在该条目下无 `result=pass` 验证记录 | confirm，`ack=untested_ack` |
 
@@ -244,9 +249,9 @@ M1 为 `error`：“目录条目 … 参数超出合理范围(…), 无法判定
 | 40001 | 订单号格式无效；model_id 缺失/非法；gpu_mem_util 格式或范围错误；订单不是托管租用 |
 | 40400 | 订单不存在或不属于当前用户；模型不存在或未上线 |
 | 40900 | 托管租约未处于 active |
-| 50000 | 托管租约数据源未接入（见上）；内部错误 |
+| 50000 | 托管租约数据源未接入（`fleet.enabled=false`）；租约卡槽数与卡数不一致、节点/商品缺失等数据不一致；内部错误 |
 
-### 数据源接口（供 S2 实现）
+### 数据源接口
 
 `backend/internal/modeldeploy/lease_source.go`：
 
@@ -257,7 +262,36 @@ type LeaseSource interface {
 // 哨兵错误(可 %w 包装): ErrOrderNotFound→40400, ErrNotManaged→40001, ErrLeaseNotActive→40900
 ```
 
-实现方负责订单归属、托管履约与租约 active 校验；卡数据取自 `gpu_slots`（lease_id 归属）与最近一次探活/采样，不得用商品声明值代替。快照字段：`GPUModel`（型号库 model_name）、`DriverVersion`、`NVLink`、`Cards[]{VRAMTotalBytes,VRAMUsedBytes,Faulty,FatalXidLastHour}`、`ModelCached`、`CacheFreeBytes`、`CacheEvictableBytes`。接入方式：`main.go` 中 `modelDeploySvc.SetLeaseSource(<fleet 实现>)`。
+实现方负责订单归属、托管履约与租约 active 校验；卡数据取自 `gpu_slots`（lease_id 归属）与最近一次探活/采样，不得用商品声明值代替。快照字段：`GPUModel`（型号库 model_name）、`DriverVersion`、`NVLink`、`Cards[]{VRAMTotalBytes,VRAMUsedBytes,Faulty,FatalXidLastHour}`、`ModelCached`、`CacheFreeBytes`、`CacheEvictableBytes`、`Unknown`。
+
+`Unknown map[string]string`：实现方**尚未采集**的输入必须列在这里（值为面向买家的原因），不得以 0/false 冒充实测值。允许的键：
+`vram_usage`（F3）、`model_cache`（F4）、`nvlink`（F5）、`fatal_xid`（F6）；出现其他键视为实现错误（50000）。
+
+### 数据源接入现状（integration 分支）
+
+实现：`backend/internal/fleet/model_deploy_source.go`（`fleet.ModelDeployLeases`，只读）。接线：`backend/cmd/server/main.go`
+`if fleetSvc != nil { modelDeploySvc.SetLeaseSource(fleetSvc.ModelDeployLeaseSource()) }`。
+
+| 快照字段 | 来源（真实数据） |
+|---|---|
+| 订单归属 / 托管履约 | `orders`（`compute.OrderForAccess`）；他人订单与不存在同为 40400；非托管 40001 |
+| 租约与状态 | `leases`（按该订单 `order_id`），非 `active` → 40900 |
+| `GPUModel` | `products.gpu_model`（托管商品提审时 P5 已核对节点实测型号与之一致） |
+| `DriverVersion` | `supplier_nodes.driver_version`（P4 nvidia-smi 实测，12h 完整探活刷新）；为空 → F2"无法判定" |
+| `Cards[].UUID / VRAMTotalBytes` | `gpu_slots.gpu_uuid` / `vram_mb`×2^20（P4 实测 memory.total，MiB） |
+| `Cards[].Faulty` | `gpu_slots.state='faulty'` |
+| `ModelCached` | `node_model_cache` 中 `state='ready' AND verified_at IS NOT NULL` 的行 |
+| `NVLink` | `gpu_slots.topo_group`（P6 拓扑分组）：单卡、跨组、同组但非 `-nvlink` 组 → 确定为否；同属 `-nvlink` 组 → 未知 |
+
+| 未采集输入（`Unknown` 键） | 原因 | 影响 |
+|---|---|---|
+| `vram_usage` | 轻量探活只取 `utilization.memory`（显存带宽占用率，且只落节点平均值），没有按卡 `memory.used` | F3 恒 error"无法判定" |
+| `fatal_xid` | 轻量探活只扫最近 2 分钟内核日志（journalctl -k）、不留按卡记录（命中只写 `leases.resource_alert`） | 无故障卡时 F6 恒 error"无法判定" |
+| `model_cache` | `supplier_nodes.model_cache_gb` 仅为供给方声明，探活未核实缓存目录剩余/可清理空间 | 节点未缓存该模型时 F4 error"无法判定"；已缓存则通过 |
+| `nvlink` | 只保存分组结果、未保存逐对连接类型，同一 nvlink 组可能混有经 PCIe 交换并入的卡 | F5 warning"无法判定"（不阻断） |
+
+要让 deploy-plans 给出可行方案，需在探活中补采：按卡 `memory.used`、按卡近 1 小时 Xid 历史、模型缓存目录实际剩余空间（及可清理量），
+并在数据源中去掉对应 `Unknown` 键、填入 `VRAMUsedBytes` / `FatalXidLastHour` / `CacheFreeBytes` / `CacheEvictableBytes`。
 
 ---
 

@@ -36,6 +36,19 @@ func TestEvaluateChecksF1toF8(t *testing.T) {
 		{"F5 无 NVLink 仅提示", "F5", func(in *Input) { in.NVLink = false }, false, LevelWarning, true, "PCIe"},
 		{"F6 卡故障", "F6", func(in *Input) { in.Cards[0].Faulty = true }, false, LevelError, false, "故障"},
 		{"F6 致命 Xid", "F6", func(in *Input) { in.Cards[1].FatalXidLastHour = true }, false, LevelError, false, "Xid"},
+		// 数据源声明未采集的输入: 对应检查写明"无法判定"及原因, 不用零值字段代替。
+		{"F3 显存占用未采集", "F3", func(in *Input) { in.Unknown = map[string]string{InputVRAMUsage: "未按卡采集"} }, false, LevelError, false, "无法判定: 未按卡采集"},
+		{"F4 未缓存且剩余空间未采集", "F4", func(in *Input) {
+			in.ModelCached, in.CacheFreeBytes = false, 1000*gib64
+			in.Unknown = map[string]string{InputModelCache: "未采集"}
+		}, false, LevelError, false, "无法判定"},
+		{"F4 已缓存时不依赖剩余空间", "F4", func(in *Input) { in.Unknown = map[string]string{InputModelCache: "未采集"} }, true, LevelInfo, true, ""},
+		{"F5 互联未采集仅提示", "F5", func(in *Input) { in.NVLink = true; in.Unknown = map[string]string{InputNVLink: "只有分组"} }, false, LevelWarning, true, "无法判定"},
+		{"F6 Xid 未采集", "F6", func(in *Input) { in.Unknown = map[string]string{InputFatalXid: "无记录"} }, false, LevelError, false, "无法判定: 无记录"},
+		{"F6 故障优先于 Xid 未采集", "F6", func(in *Input) {
+			in.Cards[0].Faulty = true
+			in.Unknown = map[string]string{InputFatalXid: "无记录"}
+		}, false, LevelError, false, "1 张卡被标记故障"},
 		{"F7 restricted 需确认", "F7", func(in *Input) { in.Model.CommercialUse = CommercialRestricted }, false, LevelConfirm, true, "许可"},
 		{"F7 unknown 需确认", "F7", func(in *Input) { in.Model.CommercialUse = CommercialUnknown }, false, LevelConfirm, true, "尚未核实"},
 		{"F8 无验证记录", "F8", func(in *Input) { in.VerifiedGPUModels = nil }, false, LevelConfirm, true, "未在 H100-80G 上实测"},

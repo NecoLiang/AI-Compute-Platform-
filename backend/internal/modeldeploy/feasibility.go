@@ -82,6 +82,8 @@ type Input struct {
 	GPUMemUtilPct       int      // u×100, 80–95
 	VerifiedGPUModels   []string // 该条目 result=pass 的卡型
 	Alternatives        []Alternative
+	// Unknown 尚未采集的实时输入(键见 Input* 常量, 值为原因), 对应检查判"无法判定"。
+	Unknown map[string]string
 }
 
 // Check 单项检查结果。
@@ -132,6 +134,8 @@ type Basis struct {
 	MaxModelLen          int    `json:"max_model_len"`
 	NVLink               bool   `json:"nvlink"`
 	ModelCached          bool   `json:"model_cached"`
+	// Undetermined 判定时尚未采集的输入及原因(随判定明细留档, 便于事后复核)。
+	Undetermined map[string]string `json:"undetermined,omitempty"`
 }
 
 // Result 判定结果。Feasible=false 时 Plans 为空, Memory/Checks 仍完整给出原因。
@@ -182,7 +186,7 @@ func Evaluate(in Input) (Result, error) {
 			WeightsBytes: m.WeightsBytes, KVBytesPerToken: m.KVBytesPerToken,
 			KVReplicatedAcrossTP: m.KVReplicatedAcrossTP, RuntimeOverheadBytes: m.RuntimeOverheadBytes,
 			MinContextTokens: m.MinContextTokens, MaxModelLen: m.MaxModelLen,
-			NVLink: in.NVLink, ModelCached: in.ModelCached,
+			NVLink: in.NVLink, ModelCached: in.ModelCached, Undetermined: in.Unknown,
 		},
 	}
 
@@ -485,6 +489,9 @@ func checkF3(in Input) Check {
 	if len(in.Cards) == 0 {
 		return fail("F3", LevelError, "租约内没有可用的卡")
 	}
+	if why, unknown := in.Unknown[InputVRAMUsage]; unknown {
+		return fail("F3", LevelError, "各卡当前显存占用无法判定: "+why)
+	}
 	busy := 0
 	for _, c := range in.Cards {
 		// 显存总量/占用缺失或越界的卡不能视为空闲; 先限定 0 ≤ used ≤ total ≤ 1 TiB, 再做乘法比较, 不会溢出。
@@ -503,6 +510,9 @@ func checkF3(in Input) Check {
 func checkF4(in Input) Check {
 	if in.ModelCached {
 		return ok("F4", "节点已缓存该模型权重")
+	}
+	if why, unknown := in.Unknown[InputModelCache]; unknown {
+		return fail("F4", LevelError, "节点未缓存该模型, 且模型缓存区剩余空间无法判定: "+why)
 	}
 	if in.CacheFreeBytes < 0 || in.CacheEvictableBytes < 0 {
 		return fail("F4", LevelError, "节点模型缓存区容量数据异常, 无法判定, 请稍后重试或联系平台运营")
@@ -531,6 +541,9 @@ func checkF5(in Input, plans []Plan) Check {
 	if !multi {
 		return ok("F5", "可行组合均不涉及卡间张量并行")
 	}
+	if why, unknown := in.Unknown[InputNVLink]; unknown {
+		return fail("F5", LevelWarning, "卡间是否 NVLink 互联无法判定("+why+"), 多卡张量并行(tp>1)的性能可能受 PCIe 带宽限制")
+	}
 	if in.NVLink {
 		return ok("F5", "卡间 NVLink 互联")
 	}
@@ -550,6 +563,9 @@ func checkF6(in Input) Check {
 	}
 	if faulty > 0 || xid > 0 {
 		return fail("F6", LevelError, fmt.Sprintf("租约内 %d 张卡被标记故障、%d 张卡近 1 小时出现致命 Xid, 暂不能部署", faulty, xid))
+	}
+	if why, unknown := in.Unknown[InputFatalXid]; unknown {
+		return fail("F6", LevelError, "无故障标记, 但近 1 小时是否出现致命 Xid 无法判定: "+why)
 	}
 	return ok("F6", "各卡健康")
 }

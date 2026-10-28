@@ -197,3 +197,17 @@ func TestModelsAndDeployPlansIntegration(t *testing.T) {
 		}
 	}
 }
+
+// 数据源声明的未采集输入: 已知键原样带入(空原因补通用说明), 未知键报错而不是静默丢弃。
+func TestUnknownInputsStrict(t *testing.T) {
+	got, err := unknownInputs(map[string]string{InputVRAMUsage: "未采集", InputFatalXid: ""})
+	if err != nil || got[InputVRAMUsage] != "未采集" || got[InputFatalXid] == "" {
+		t.Fatalf("got %v %v", got, err)
+	}
+	if _, err := unknownInputs(map[string]string{"vram": "typo"}); err == nil {
+		t.Fatal("未知键应报错")
+	}
+	if got, err := unknownInputs(nil); got != nil || err != nil {
+		t.Fatalf("空输入应返回 nil: %v %v", got, err)
+	}
+}

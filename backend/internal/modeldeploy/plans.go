@@ -130,6 +130,10 @@ func buildInput(e *ModelEntry, snap *LeaseSnapshot, cc string, utilPct int, veri
 		cards[i] = Card{VRAMTotalBytes: c.VRAMTotalBytes, VRAMUsedBytes: c.VRAMUsedBytes,
 			Faulty: c.Faulty, FatalXidLastHour: c.FatalXidLastHour}
 	}
+	unknown, err := unknownInputs(snap.Unknown)
+	if err != nil {
+		return Input{}, err
+	}
 	alts := make([]Alternative, 0, len(actives))
 	for _, a := range actives {
 		alts = append(alts, Alternative{ModelKey: a.ModelKey, MinComputeCapability: a.MinComputeCapability})
@@ -146,5 +150,27 @@ func buildInput(e *ModelEntry, snap *LeaseSnapshot, cc string, utilPct int, veri
 		Cards: cards, NVLink: snap.NVLink, ModelCached: snap.ModelCached,
 		CacheFreeBytes: snap.CacheFreeBytes, CacheEvictableBytes: snap.CacheEvictableBytes,
 		GPUMemUtilPct: utilPct, VerifiedGPUModels: verified, Alternatives: alts,
+		Unknown: unknown,
 	}, nil
+}
+
+// unknownInputs 复制实现方声明的未采集输入。未知键视为实现方缺陷直接报错(按 50000 处理),
+// 不静默丢弃——否则对应字段的零值会被当成真实数据参与判定。原因为空时补通用说明。
+func unknownInputs(src map[string]string) (map[string]string, error) {
+	if len(src) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(src))
+	for k, why := range src {
+		switch k {
+		case InputVRAMUsage, InputModelCache, InputNVLink, InputFatalXid:
+		default:
+			return nil, fmt.Errorf("lease source reported unknown input key %q", k)
+		}
+		if why == "" {
+			why = "托管租约数据源未提供该项实时数据"
+		}
+		out[k] = why
+	}
+	return out, nil
 }

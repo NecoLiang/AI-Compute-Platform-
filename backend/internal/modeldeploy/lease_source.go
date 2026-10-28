@@ -39,7 +39,19 @@ type LeaseSnapshot struct {
 	CacheFreeBytes      int64
 	CacheEvictableBytes int64
 	ObservedAt          time.Time
+	// Unknown 实现方尚未采集或本次取不到的输入: 键为下方 Input* 常量, 值为面向买家的原因。
+	// 列在这里的输入, 快照中对应字段一律不可信, 判定时相应检查项写明"无法判定"并说明原因
+	// (F3/F4/F6 为 error 阻断; F5 本身只是提示, 无法判定时同样只提示)。实现方不得用默认值或商品声明值代替。
+	Unknown map[string]string
 }
+
+// LeaseSnapshot.Unknown 的键。
+const (
+	InputVRAMUsage  = "vram_usage"  // CardSnapshot.VRAMUsedBytes(F3)
+	InputModelCache = "model_cache" // CacheFreeBytes/CacheEvictableBytes(F4; ModelCached=true 时不需要)
+	InputNVLink     = "nvlink"      // NVLink(F5)
+	InputFatalXid   = "fatal_xid"   // CardSnapshot.FatalXidLastHour(F6)
+)
 
 // CardSnapshot 租约内单卡的实时状态。
 type CardSnapshot struct {

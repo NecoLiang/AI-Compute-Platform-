@@ -174,8 +174,12 @@ func main() {
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
 	// 模型一键部署目录(docs/27, S5): 型号算力架构取自 GPU 型号库。
 	modelDeploySvc := modeldeploy.NewService(modeldeploy.NewRepository(sqlDB), catalogSvc)
-	// 托管租约数据源由 S2 internal/fleet 提供(实现 modeldeploy.LeaseSource 后调用 SetLeaseSource 注入)。
-	// 接入前不注入: deploy-plans 明确返回 50000, 不使用任何假数据。
+	// 托管租约数据源由 S2 internal/fleet 提供, 仅 fleet.enabled=true 时注入。未启用时不注入:
+	// deploy-plans 明确返回 50000, 不使用任何假数据。尚未采集的实时输入(按卡显存占用、近 1h Xid、
+	// 缓存区剩余空间、逐对 NVLink)由数据源标为未知, 判定结果写明"无法判定"(docs/api/model-deploy-api.md)。
+	if fleetSvc != nil {
+		modelDeploySvc.SetLeaseSource(fleetSvc.ModelDeployLeaseSource())
+	}
 
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
