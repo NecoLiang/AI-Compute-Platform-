@@ -159,7 +159,7 @@ func runTasks(t *testing.T, s *Service) []Task {
 	t.Helper()
 	var done []Task
 	for i := 0; i < 10; i++ {
-		task, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+		task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 		require.NoError(t, err)
 		if task == nil {
 			break
@@ -571,7 +571,7 @@ func TestProbeDiscardedWhenSSHChanged(t *testing.T) {
 	fake.OnCommand("docker run --rm --name omnis-probe-", func() {
 		db.MustExec(`UPDATE supplier_nodes SET ssh_user='omnis' WHERE id=?`, id)
 	})
-	task, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	require.NotNil(t, task)
 	s.execute(context.Background(), task)

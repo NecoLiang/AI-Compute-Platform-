@@ -77,6 +77,8 @@ type Service struct {
 	sampleGap int
 
 	extraExecutors map[string]taskExecutor // probe 之外的任务执行器(T-084 provision 等), 启动前注册
+	taskTTL        time.Duration           // 任务锁租约, 0 = taskLeaseTTL(测试可缩短)
+	taskBeat       time.Duration           // 心跳续期间隔, 0 = taskHeartbeat
 }
 
 // NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。
@@ -93,7 +95,7 @@ func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.A
 		dialer:    dialer,
 		benchSecs: 60, sampleN: 6, sampleGap: 10,
 	}
-	s.registerExecutor(KindProvision, taskExecutor{lock: provisionLock, run: s.runProvisionTask, onDead: s.onProvisionDead})
+	s.registerExecutor(KindProvision, taskExecutor{timeout: provisionTimeout, run: s.runProvisionTask, onDead: s.onProvisionDead})
 	return s
 }
 

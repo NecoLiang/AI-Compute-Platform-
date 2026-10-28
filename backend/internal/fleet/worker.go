@@ -12,8 +12,12 @@ import (
 // 只认领已注册执行器的任务类型; 尚无执行器的类型(stop/purge/kill_sessions 属 T-087)保持 pending 不被消耗。
 
 const (
-	probeLock     = 45 * time.Minute // 完整探活含拉镜像(≤30min)+压测, 锁要覆盖最坏耗时
-	provisionLock = 45 * time.Minute // 开通: 镜像缺失时需拉取(≤30min) + 建容器 + 网关自检
+	probeTimeout     = 44 * time.Minute // 完整探活单次执行上限: 拉镜像(≤30min)+压测
+	provisionTimeout = 44 * time.Minute // 开通单次执行上限: 镜像缺失时需拉取(≤30min) + 建容器 + 网关自检
+	// 任务锁是短租约 + 心跳续期(CR-S1): worker 存活时每 TTL/3 续期; worker 崩溃后锁在 TTL 内过期,
+	// 由 reclaimLoop(每分钟)回收, 同一节点的后续任务(含重新发起的探活)不再被孤儿 running 任务挡住 45 分钟。
+	taskLeaseTTL  = 3 * time.Minute
+	taskHeartbeat = time.Minute
 	pollInterval  = 2 * time.Second
 	retryBase     = time.Minute
 	retryCap      = time.Hour
@@ -24,18 +28,18 @@ type errTaskAborted struct{ msg string }
 
 func (e errTaskAborted) Error() string { return e.msg }
 
-// taskExecutor 一种任务类型的执行器。run 返回 (结果, 错误): errTaskAborted/errProbeAborted → failed;
+// taskExecutor 一种任务类型的执行器。timeout 为单次执行上限(与锁租约无关)。run 返回 (结果, 错误): errTaskAborted/errProbeAborted → failed;
 // 其他错误 → 指数退避重试, 达到 max_attempts → dead 并调用 onDead(若有)。
 type taskExecutor struct {
-	lock   time.Duration
-	run    func(ctx context.Context, t *Task) (any, error)
-	onDead func(t *Task, lastErr string)
+	timeout time.Duration
+	run     func(ctx context.Context, t *Task) (any, error)
+	onDead  func(t *Task, lastErr string)
 }
 
 // executors 已接入的任务类型。provision 由 T-084 注册(registerExecutor)。
 func (s *Service) executorFor(kind string) (taskExecutor, bool) {
 	if kind == KindProbe {
-		return taskExecutor{lock: probeLock, run: s.runProbeTask, onDead: s.probeDead}, true
+		return taskExecutor{timeout: probeTimeout, run: s.runProbeTask, onDead: s.probeDead}, true
 	}
 	e, ok := s.extraExecutors[kind]
 	return e, ok
@@ -48,13 +52,60 @@ func (s *Service) registerExecutor(kind string, e taskExecutor) {
 	s.extraExecutors[kind] = e
 }
 
-// claimLocks 各可执行类型的锁时长(认领时按任务类型设置 locked_until)。
+// claimLocks 可认领的任务类型 → 认领时的锁租约(locked_until = NOW()+TTL, 执行期间心跳续期)。
 func (s *Service) claimLocks() map[string]time.Duration {
-	out := map[string]time.Duration{KindProbe: probeLock}
-	for k, e := range s.extraExecutors {
-		out[k] = e.lock
+	ttl := s.leaseTTL()
+	out := map[string]time.Duration{KindProbe: ttl}
+	for k := range s.extraExecutors {
+		out[k] = ttl
 	}
 	return out
+}
+
+func (s *Service) leaseTTL() time.Duration {
+	if s.taskTTL > 0 {
+		return s.taskTTL
+	}
+	return taskLeaseTTL
+}
+
+func (s *Service) heartbeatEvery() time.Duration {
+	if s.taskBeat > 0 {
+		return s.taskBeat
+	}
+	return taskHeartbeat
+}
+
+// heartbeat 执行期间按间隔续期任务锁。续期命中 0 行(任务已被停用/改连接信息作废, 或锁过期被回收)→ 立即取消执行;
+// 续期持续出错且距上次成功已接近 TTL → 也取消(锁即将过期, 避免与回收后重新认领的执行并发)。
+func (s *Service) heartbeat(ctx context.Context, cancelRun context.CancelFunc, t *Task) {
+	ttl, every := s.leaseTTL(), s.heartbeatEvery()
+	tk := time.NewTicker(every)
+	defer tk.Stop()
+	lastOK := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tk.C:
+		}
+		ok, err := s.repo.renewLock(t.ID, t.Attempts, ttl)
+		switch {
+		case err != nil:
+			slog.Warn("fleet 任务锁续期失败", "task_id", t.ID, "error", err)
+			if time.Since(lastOK) >= ttl-every {
+				slog.Error("fleet 任务锁续期持续失败, 中止执行以免与回收后的重跑并发", "task_id", t.ID, "node_id", t.NodeID)
+				cancelRun()
+				return
+			}
+		case !ok:
+			slog.Warn("fleet 任务已不由本 worker 持有(被作废或锁过期回收), 中止执行", "task_id", t.ID, "node_id", t.NodeID, "kind", t.Kind)
+			cancelRun()
+			return
+		default:
+			lastOK = time.Now()
+		}
+	}
 }
 
 // retryBackoff 第 attempts 次失败后的等待: 1m × 2^(attempts−1), 上限 1h。
@@ -112,9 +163,17 @@ func (s *Service) execute(ctx context.Context, t *Task) {
 		return
 	}
 	start := time.Now()
-	rctx, cancel := context.WithTimeout(ctx, e.lock-time.Minute)
+	rctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
+	hbCtx, stopHB := context.WithCancel(rctx)
+	hbDone := make(chan struct{})
+	go func() {
+		defer close(hbDone)
+		s.heartbeat(hbCtx, cancel, t)
+	}()
 	out, err := e.run(rctx, t)
+	stopHB()
+	<-hbDone
 	var aborted errTaskAborted
 	var probeAborted errProbeAborted
 	switch {
@@ -218,7 +277,7 @@ func (s *Service) finish(t *Task, state string, result any, lastErr string) {
 	}
 }
 
-// reclaimLoop 每分钟回收锁过期的 running 任务(worker 崩溃/重启), 转 dead 的走死信善后。
+// reclaimLoop 每分钟回收锁过期的 running 任务(worker 崩溃/重启: 心跳停止后锁在 TTL 内过期), 转 dead 的走死信善后。
 func (s *Service) reclaimLoop(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()

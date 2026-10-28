@@ -77,7 +77,7 @@ func TestSuspendDuringRunningProbeCannotVerify(t *testing.T) {
 	fake.OnCommand("docker run --rm --name omnis-probe-", once(func() {
 		require.NoError(t, s.Suspend(1, id, "运行中停用", ""))
 	}))
-	task, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	require.Equal(t, taskID, task.ID)
 	s.execute(context.Background(), task)
@@ -110,7 +110,7 @@ func TestStaleProbeAfterSuspendResumeIsAborted(t *testing.T) {
 	fake := newFakeNode(t, genPW)
 	id, taskID := onboardPending(t, s, fake, "gpu-gen-2", 47520)
 
-	stale, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	stale, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	require.Equal(t, taskID, stale.ID)
 	require.NoError(t, s.Suspend(1, id, "", ""))
@@ -226,7 +226,7 @@ func TestFullProbeNotSatisfiedByPortRecheck(t *testing.T) {
 
 	// 2) 在跑的复检: 完整探活另行入队, 排在复检之后执行。
 	recheck = enqueue(ProbePortRecheck)
-	running, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	running, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	require.Equal(t, recheck, running.ID)
 	db.MustExec(`UPDATE supplier_nodes SET verify_status='failed' WHERE id=?`, id)
@@ -235,7 +235,7 @@ func TestFullProbeNotSatisfiedByPortRecheck(t *testing.T) {
 	assert.NotEqual(t, recheck, full)
 	assert.Equal(t, TaskRunning, taskState(t, db, recheck))
 	assert.Equal(t, VerifyVerifying, verifyStatus(t, s, id))
-	none, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	none, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	assert.Nil(t, none, "同一节点串行: 复检未结束前不认领完整探活")
 	s.execute(context.Background(), running)
@@ -270,7 +270,7 @@ func TestAbortedOrDeadFullProbeLeavesVerifying(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, VerifyVerifying, verifyStatus(t, s, id))
 	db.MustExec(`UPDATE node_tasks SET max_attempts=1 WHERE id=?`, full)
-	task, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	require.Equal(t, full, task.ID)
 	ctx, cancel := context.WithCancel(context.Background())

@@ -18,7 +18,7 @@ import (
 // onDead 用生产的 onProvisionDead。
 func failingProvision(s *Service, calls *int) {
 	s.registerExecutor(KindProvision, taskExecutor{
-		lock: 2 * time.Minute,
+		timeout: time.Minute,
 		run: func(context.Context, *Task) (any, error) {
 			*calls++
 			return nil, errors.New("节点 docker 不可达")
@@ -85,7 +85,7 @@ func TestWorkerClaimsOnlyRegisteredKinds(t *testing.T) {
 	require.NotNil(t, task)
 	assert.Equal(t, KindProvision, task.Kind)
 	require.NotNil(t, task.LockedUntil)
-	assert.WithinDuration(t, time.Now().Add(provisionLock), *task.LockedUntil, 30*time.Second)
+	assert.WithinDuration(t, time.Now().Add(taskLeaseTTL), *task.LockedUntil, 30*time.Second)
 	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM node_tasks WHERE kind IN ('stop','purge') AND state='pending'`))
 }
 

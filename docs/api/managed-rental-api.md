@@ -256,7 +256,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ### GET /admin/node-tasks?state=&node_id=&page=&page_size= · 节点任务 ✅
 
 `state` ∈ `pending/running/succeeded/failed/dead`（其他值 40001），缺省为全部。分页信封 `data:{list,total,page,page_size}`。
-`Task`：`id, node_id, lease_id, deployment_id, kind, state, priority, attempts, max_attempts, run_after, locked_until, payload, result, last_error, created_at, updated_at`；`payload/result` 为 JSON（未完成任务 `result` 为 `null`）。探活任务 `result`：`{"mode":"full","pass":true,"report_id":31,"failed_checks":[],"awaiting_host_key":"SHA256:...","discarded":false}`。
+`Task`：`id, node_id, lease_id, deployment_id, kind, state, priority, attempts, max_attempts, run_after, locked_until, payload, result, last_error, created_at, updated_at`；`payload/result` 为 JSON（未完成任务 `result` 为 `null`）。`running` 任务的 `locked_until` 是心跳租约（约 3 分钟，执行期间每分钟续期）；已过期仍为 `running` 表示 worker 已中断，1 分钟内被回收。探活任务 `result`：`{"mode":"full","pass":true,"report_id":31,"failed_checks":[],"awaiting_host_key":"SHA256:...","discarded":false}`。
 
 ### POST /admin/node-tasks/:id/retry · 重试死信 ✅
 

@@ -165,6 +165,21 @@ func (r *Repository) finishTask(id int64, attempts int, state string, result any
 		WHERE id=? AND state='running' AND attempts=?`, state, raw, nullStr(truncate(lastErr, 500)), id, attempts))
 }
 
+// renewLock 心跳续期: 只续仍由本次认领持有的任务(state='running' AND attempts=?)。
+// 同一秒内两次续期写入值相同时 MySQL 返回 RowsAffected=0, 因此未改变时按守卫条件复查是否仍持有。
+func (r *Repository) renewLock(id int64, attempts int, ttl time.Duration) (bool, error) {
+	ok, err := affected(r.db.Exec(`UPDATE node_tasks SET locked_until = NOW() + INTERVAL ? SECOND
+		WHERE id=? AND state='running' AND attempts=?`, int(ttl.Seconds()), id, attempts))
+	if err != nil || ok {
+		return ok, err
+	}
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM node_tasks WHERE id=? AND state='running' AND attempts=?`, id, attempts); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // retryLater 可重试的失败: running → pending 并延后; 达到上限 → dead。
 // 只有本次调用确实把任务转为 dead 才返回 dead=true(锁已过期被回收的陈旧回写不触发死信善后, 避免重复执行)。
 func (r *Repository) retryLater(id int64, attempts int, delay time.Duration, lastErr string) (dead bool, err error) {
