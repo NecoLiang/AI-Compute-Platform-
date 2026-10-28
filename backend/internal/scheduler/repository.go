@@ -200,6 +200,41 @@ func (r *Repository) ProductFulfillmentMode(productID int64) (string, error) {
 	return mode, err
 }
 
+// SlotGroup 托管节点一个拓扑组的卡槽计数(docs/26 §26.5.5)。Own=已由本订单租约预留/占用的卡。
+type SlotGroup struct {
+	NodeID    int64  `db:"node_id"`
+	TopoGroup string `db:"topo_group"`
+	Quota     bool   `db:"quota"`
+	Total     int    `db:"total"`
+	Free      int    `db:"free"`
+	Own       int    `db:"own"`
+}
+
+// ManagedSlotGroups 托管商品各节点按拓扑组的卡槽计数。leaseID=0 表示订单尚无租约(Own 恒为 0)。
+// 只读快照, 不加锁; 真正的分配以下单事务内的卡槽预留为准。
+func (r *Repository) ManagedSlotGroups(productID, leaseID int64) ([]SlotGroup, error) {
+	var list []SlotGroup
+	err := r.db.Select(&list, `SELECT s.node_id, s.topo_group, MAX(COALESCE(n.disk_quota_supported,0))=1 AS quota,
+		COUNT(*) AS total,
+		COALESCE(SUM(s.state='free'),0) AS free,
+		COALESCE(SUM(s.state IN ('reserved','leased') AND s.lease_id=?),0) AS own
+		FROM gpu_slots s JOIN supplier_nodes n ON n.id=s.node_id
+		WHERE n.product_id=? GROUP BY s.node_id, s.topo_group ORDER BY s.node_id, s.topo_group`, leaseID, productID)
+	return list, err
+}
+
+// ManagedOrderContext 托管订单的交付方式与租约(无租约时 leaseID=0)。
+func (r *Repository) ManagedOrderContext(orderNo string, productID int64) (delivery string, leaseID int64, err error) {
+	if err = r.db.Get(&delivery, "SELECT delivery_mode FROM products WHERE id=?", productID); err != nil {
+		return "", 0, err
+	}
+	err = r.db.Get(&leaseID, `SELECT l.id FROM leases l JOIN orders o ON o.id=l.order_id WHERE o.order_no=?`, orderNo)
+	if err == sql.ErrNoRows {
+		return delivery, 0, nil
+	}
+	return delivery, leaseID, err
+}
+
 // ProductSupplierID 商品归属校验用。
 func (r *Repository) ProductSupplierID(productID int64) (int64, error) {
 	var sid int64
