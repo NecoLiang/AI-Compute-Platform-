@@ -543,3 +543,64 @@ func TestProbeDiscardedWhenSSHChanged(t *testing.T) {
 	assert.NotEqual(t, VerifyVerified, n.VerifyStatus)
 	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM gpu_slots WHERE node_id=?`, id))
 }
+
+// 同一台物理机不能重复上架(docs/25 §25.4.2): 卡 UUID 由 P4 拦截; 指纹由提交时的 host_fp_claim 校验与唯一键拦截。
+func TestSameHostCannotBeListedTwice(t *testing.T) {
+	db := setupFleetDB(t)
+	seedManaged(t, db)
+	s := newTestFleet(t, db)
+	s.gateway = &stubGateway{}
+	const pw = "pw-dup-123456"
+	fake := newFakeNode(t, pw)
+	ctx := context.Background()
+
+	onboard := func(name string, portStart int) int64 {
+		v, err := s.RegisterManagedNode(10, scheduler.ManagedNodeReq{ProductID: 1, NodeName: name, TotalCards: 2,
+			LeasePortStart: portStart, LeasePortEnd: portStart + 9})
+		require.NoError(t, err)
+		id := v.(*Node).ID
+		_, err = s.UpdateSSH(ctx, 10, id, SSHInput{Host: "127.0.0.1", Port: fake.Port(), User: "root", BootstrapPassword: pw}, "")
+		require.NoError(t, err)
+		_, err = s.ConfirmHostKey(10, id, fake.Fingerprint(), "")
+		require.NoError(t, err)
+		return id
+	}
+
+	a := onboard("gpu-a", 47200)
+	done := runTasks(t, s)
+	require.Len(t, done, 1)
+	require.True(t, outcomeOf(t, done[0]).Pass)
+
+	// 第二个节点指向同一台机器: 卡 UUID 已登记, P4 不通过, 不生成卡槽。
+	b := onboard("gpu-b", 47300)
+	done = runTasks(t, s)
+	require.Len(t, done, 1)
+	o := outcomeOf(t, done[0])
+	assert.False(t, o.Pass)
+	assert.Contains(t, o.Failed, "P4")
+	_, checks := latestChecks(t, db, b)
+	assert.Contains(t, checks["P4"].Detail, fmt.Sprintf("已被节点 #%d 登记", a))
+	nb, _ := s.repo.GetNode(b)
+	assert.Equal(t, VerifyFailed, nb.VerifyStatus)
+	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM gpu_slots WHERE node_id=?`, b))
+
+	// 即使卡 UUID 检查被绕过(此处直接删除 A 的卡槽来模拟), 指纹占用仍阻止上架。
+	db.MustExec(`DELETE FROM gpu_slots WHERE node_id=?`, a)
+	_, err := s.Verify(10, b)
+	require.NoError(t, err)
+	done = runTasks(t, s)
+	require.Len(t, done, 1)
+	o = outcomeOf(t, done[0])
+	assert.False(t, o.Pass)
+	assert.Equal(t, []string{"P2"}, o.Failed)
+	_, checks = latestChecks(t, db, b)
+	assert.Contains(t, checks["P2"].Detail, fmt.Sprintf("已作为节点 #%d 上架", a))
+	nb, _ = s.repo.GetNode(b)
+	assert.Equal(t, VerifyFailed, nb.VerifyStatus)
+	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM gpu_slots WHERE node_id=?`, b))
+
+	// 数据库唯一键兜底: 并发提交绕过应用层校验时同样失败。
+	_, err = db.Exec(`UPDATE supplier_nodes SET host_fp_claim=? WHERE id=?`, fake.Fingerprint(), b)
+	require.Error(t, err)
+	assert.True(t, isDuplicate(err), "host_fp_claim 唯一约束: %v", err)
+}
