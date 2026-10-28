@@ -52,6 +52,11 @@ func fakeXidLine(at time.Time, bus string, xid int) string {
 	return fmt.Sprintf("%s gpu-node-01 kernel: NVRM: Xid (PCI:%s): %d, pid=0, name=, test event", at.Format("2006-01-02T15:04:05-0700"), bus, xid)
 }
 
+// fakeTelLine cmdTelemetry 单卡输出(H100 空闲, 降频位 0x1 = GPU 空闲); eccUnc 为 volatile 不可纠正 ECC 计数。
+func fakeTelLine(uuid string, eccUnc int) string {
+	return fmt.Sprintf("%s, 1, 81559, 41, 69.37, 0x0000000000000001, %d, 0, 0, 0\n", uuid, eccUnc)
+}
+
 // SetXidLines 之后的 Xid 扫描都会返回这些日志行(真实节点上同一事件会在相邻窗口重复读到)。
 func (f *fakeNode) SetXidLines(lines ...string) {
 	f.mu.Lock()
@@ -95,10 +100,8 @@ var fakeDefaults = []struct {
 	{cmdRemap, true, fakeReply{Stdout: fakeUUID0 + ", 0, 0\n" + fakeUUID1 + ", 0, 0\n"}},
 	{cmdDocker, true, fakeReply{Stdout: fakeDockerInfo}},
 	{cmdPorts, true, fakeReply{Stdout: "LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*\nLISTEN 0      4096            [::]:22            [::]:*\n"}},
-	{cmdLight, true, fakeReply{Stdout: "0, " + fakeUUID0 + ", 37, 12, 41, 0\n1, " + fakeUUID1 + ", 3, 0, 33, 0\n"}},
 	{cmdDockerAlive, true, fakeReply{}},
-	{cmdTelemetry, true, fakeReply{Stdout: fakeUUID0 + ", 1, 81559, 41, 69.37, 0x0000000000000001, 0, 0\n" +
-		fakeUUID1 + ", 1, 81559, 33, 70.12, 0x0000000000000001, 0, 0\n"}},
+	{cmdTelemetry, true, fakeReply{Stdout: fakeTelLine(fakeUUID0, 0) + fakeTelLine(fakeUUID1, 0)}},
 	{"if [ -d '", false, fakeReply{Stdout: "         Avail     1B-blocks\n3298534883328 3840755982336\n"}},
 	{"echo @@nproc", false, fakeReply{Stdout: fakeHostInfo}},
 	{"docker pull -q ", false, fakeReply{Stdout: "registry.example.com/omnis/probe@sha256:" + strings.Repeat("ab", 32) + "\n"}},

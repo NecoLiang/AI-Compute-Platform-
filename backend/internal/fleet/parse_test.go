@@ -230,9 +230,9 @@ func TestXidSince(t *testing.T) {
 
 func TestParseTelemetry(t *testing.T) {
 	// H100 SXM 实际格式(nounits); 第二张卡在跑负载, 第三张为不支持 ECC/功耗的消费卡读数。
-	out := "GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 1, 81559, 31, 69.37, 0x0000000000000001, 0, 0\n" +
-		"GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d, 74210, 81559, 62, 512.80, 0x0000000000000004, 0, 12\n" +
-		"GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 412, 24564, 38, [N/A], [Not Supported], [N/A], [N/A]\n"
+	out := "GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 1, 81559, 31, 69.37, 0x0000000000000001, 0, 0, 0, 0\n" +
+		"GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d, 74210, 81559, 62, 512.80, 0x0000000000000004, 0, 12, 97, 61\n" +
+		"GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 412, 24564, 38, [N/A], [Not Supported], [N/A], [N/A], 3, [N/A]\n"
 	g, err := ParseTelemetry(out)
 	require.NoError(t, err)
 	require.Len(t, g, 3)
@@ -246,12 +246,20 @@ func TestParseTelemetry(t *testing.T) {
 	assert.Nil(t, g[2].ThrottleReasons)
 	assert.Nil(t, g[2].ECCUncorrected)
 	assert.Nil(t, g[2].ECCCorrected)
+	assert.Equal(t, 97, *g[1].UtilGPU)
+	assert.Equal(t, 61, *g[1].UtilMem)
+	assert.Nil(t, g[2].UtilMem)
+	assert.Equal(t, []int{33, 30}, []int{avgUtil(g, false), avgUtil(g, true)}, "N/A 不计入平均")
 
 	_, err = ParseTelemetry("Field \"clocks_throttle_reasons.active\" is not a valid field to query.\n")
 	assert.Error(t, err)
 	assert.True(t, isInvalidFieldErr("Field \"clocks_throttle_reasons.active\" is not a valid field to query."))
-	_, err = ParseTelemetry("GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 90000, 81559, 31, 69.37, 0x0, 0, 0\n")
+	_, err = ParseTelemetry("GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 90000, 81559, 31, 69.37, 0x0, 0, 0, 0, 0\n")
 	assert.Error(t, err, "已用大于总量")
+	_, err = ParseTelemetry("GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 1, 81559, 31, 69.37, 0x0, 0, 0\n")
+	assert.Error(t, err, "列数不足")
+	_, err = ParseTelemetry("No devices were found\n")
+	assert.Error(t, err)
 	_, err = ParseTelemetry("")
 	assert.Error(t, err)
 }

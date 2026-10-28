@@ -210,7 +210,8 @@ func restoreProvOverrides(t *testing.T, e *provEnv) {
 	e.fake.Override("for i in $(seq 1 30); do if", fakeReply{Stdout: line + "\n"})
 }
 
-// 新驱动不认 clocks_throttle_reasons → 改用 clocks_event_reasons; 遥测采集失败不影响探活, 遥测列保持旧值(读取方按时间判过期)。
+// 新驱动不认 clocks_throttle_reasons → 改用 clocks_event_reasons; nvidia-smi 失败即本次轻探活失败(90s 内仍在线),
+// 遥测列保持旧值(读取方按时间判过期)。
 func TestTelemetryFallbackAndFailure(t *testing.T) {
 	e := newProvEnv(t, true)
 	e.outcome(t, runOne(t, e.s))
@@ -218,8 +219,8 @@ func TestTelemetryFallbackAndFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	e.fake.Override(cmdTelemetry, fakeReply{Stdout: "Field \"clocks_throttle_reasons.active\" is not a valid field to query.\n", Code: 2})
-	e.fake.Override(cmdTelemetryEvent, fakeReply{Stdout: fakeUUID0 + ", 70000, 81559, 61, 512.30, 0x0000000000000000, 0, 3\n" +
-		fakeUUID1 + ", [N/A], 81559, 60, 498.00, 0x0000000000000004, 0, 0\n"})
+	e.fake.Override(cmdTelemetryEvent, fakeReply{Stdout: fakeUUID0 + ", 70000, 81559, 61, 512.30, 0x0000000000000000, 0, 3, 97, 40\n" +
+		fakeUUID1 + ", [N/A], 81559, 60, 498.00, 0x0000000000000004, 0, 0, 95, 38\n"})
 	e.s.lightProbe(context.Background(), n)
 	slots := slotTelemetry(t, e.db, e.node)
 	require.NotNil(t, slots[0].TelemetryAt)
@@ -233,6 +234,7 @@ func TestTelemetryFallbackAndFailure(t *testing.T) {
 	e.s.lightProbe(context.Background(), n)
 	slots = slotTelemetry(t, e.db, e.node)
 	assert.True(t, slots[0].TelemetryAt.Equal(at), "采集失败不刷新遥测时间")
+	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM supplier_nodes WHERE id=? AND probe_fail_count>0`, e.node))
 	var status string
 	require.NoError(t, e.db.Get(&status, `SELECT status FROM supplier_nodes WHERE id=?`, e.node))
 	assert.Equal(t, "online", status)

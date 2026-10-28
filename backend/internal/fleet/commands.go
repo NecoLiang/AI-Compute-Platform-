@@ -13,24 +13,22 @@ import (
 )
 
 const (
-	cmdGPUList   = "nvidia-smi --query-gpu=index,uuid,name,memory.total,pci.bus_id,driver_version --format=csv,noheader,nounits"
-	cmdSMIHeader = "nvidia-smi"
-	cmdTopo      = "nvidia-smi topo -m"
-	cmdECC       = "nvidia-smi --query-gpu=index,ecc.errors.uncorrected.volatile.total,retired_pages.pending --format=csv,noheader,nounits"
-	cmdRemap     = "nvidia-smi --query-remapped-rows=gpu_uuid,remapped_rows.pending,remapped_rows.failure --format=csv,noheader,nounits"
-	cmdDocker    = "docker info --format '{{json .}}'"
-	cmdPorts     = "ss -Htln"
-	// cmdLight 周期轻量探活: 利用率/温度/ECC; 与 docker 守护进程存活一并检查。
-	cmdLight       = "nvidia-smi --query-gpu=index,uuid,utilization.gpu,utilization.memory,temperature.gpu,ecc.errors.uncorrected.volatile.total --format=csv,noheader,nounits"
+	cmdGPUList     = "nvidia-smi --query-gpu=index,uuid,name,memory.total,pci.bus_id,driver_version --format=csv,noheader,nounits"
+	cmdSMIHeader   = "nvidia-smi"
+	cmdTopo        = "nvidia-smi topo -m"
+	cmdECC         = "nvidia-smi --query-gpu=index,ecc.errors.uncorrected.volatile.total,retired_pages.pending --format=csv,noheader,nounits"
+	cmdRemap       = "nvidia-smi --query-remapped-rows=gpu_uuid,remapped_rows.pending,remapped_rows.failure --format=csv,noheader,nounits"
+	cmdDocker      = "docker info --format '{{json .}}'"
+	cmdPorts       = "ss -Htln"
 	cmdDockerAlive = "docker ps -q --filter label=omnis.lease"
-	// cmdTelemetry 轻探活附带的逐卡遥测(docs/27 §27.3 F3 输入, 落 gpu_slots 遥测列): 显存已用/总量、温度、功耗、
-	// 降频原因位图、ECC 不可纠正/可纠正计数。与 cmdLight 分开执行: 遥测失败只让数据变旧(上层按"未知"处理),
-	// 不改变探活成败口径。
+	// cmdTelemetry 周期轻量探活唯一的 nvidia-smi 查询(与 docker 守护进程存活一并检查): 逐卡显存已用/总量、温度、功耗、
+	// 降频原因位图、ECC 不可纠正/可纠正(volatile, 告警口径)、利用率。执行或解析失败即本次轻探活失败;
+	// 成功则落 gpu_slots 遥测列(docs/27 §27.3 F3 输入)并用于掉卡/ECC 告警与节点平均利用率。
 	cmdTelemetry = "nvidia-smi --query-gpu=uuid,memory.used,memory.total,temperature.gpu,power.draw,clocks_throttle_reasons.active," +
-		"ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total --format=csv,noheader,nounits"
+		"ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total,utilization.gpu,utilization.memory --format=csv,noheader,nounits"
 	// cmdTelemetryEvent 新驱动把 clocks_throttle_reasons 更名为 clocks_event_reasons; 前者报 "is not a valid field" 时改用此式。
 	cmdTelemetryEvent = "nvidia-smi --query-gpu=uuid,memory.used,memory.total,temperature.gpu,power.draw,clocks_event_reasons.active," +
-		"ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total --format=csv,noheader,nounits"
+		"ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total,utilization.gpu,utilization.memory --format=csv,noheader,nounits"
 )
 
 var (

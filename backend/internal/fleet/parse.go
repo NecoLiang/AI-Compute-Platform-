@@ -802,18 +802,21 @@ type GPUTelemetry struct {
 	TempC           *int
 	PowerW          *float64
 	ThrottleReasons *uint64
-	ECCUncorrected  *int64
+	ECCUncorrected  *int64 // volatile(自驱动加载以来), 告警口径: 计数归零即恢复
 	ECCCorrected    *int64
+	UtilGPU         *int
+	UtilMem         *int
 }
 
-// ParseTelemetry 解析 cmdTelemetry(--format=csv,noheader,nounits) 输出, 8 列:
-// uuid, memory.used, memory.total, temperature.gpu, power.draw, clocks_throttle_reasons.active, ecc 不可纠正, ecc 可纠正。
+// ParseTelemetry 解析 cmdTelemetry(--format=csv,noheader,nounits) 输出, 10 列:
+// uuid, memory.used, memory.total, temperature.gpu, power.draw, clocks_throttle_reasons.active, ecc 不可纠正, ecc 可纠正,
+// utilization.gpu, utilization.memory。
 func ParseTelemetry(out string) ([]GPUTelemetry, error) {
 	var res []GPUTelemetry
 	seen := map[string]bool{}
 	for _, l := range nonEmptyLines(out) {
 		f := splitCSV(l)
-		if len(f) != 8 || !uuidRe.MatchString(f[0]) {
+		if len(f) != 10 || !uuidRe.MatchString(f[0]) {
 			return nil, fmt.Errorf("遥测输出格式异常: %q", truncate(l, 160))
 		}
 		if seen[f[0]] {
@@ -854,6 +857,12 @@ func ParseTelemetry(out string) ([]GPUTelemetry, error) {
 		if t.ECCCorrected, err = optInt64(f[7], "可纠正 ECC"); err != nil {
 			return nil, err
 		}
+		if t.UtilGPU, err = optPct(f[8], "GPU 利用率"); err != nil {
+			return nil, err
+		}
+		if t.UtilMem, err = optPct(f[9], "显存带宽利用率"); err != nil {
+			return nil, err
+		}
 		if t.VRAMUsedMiB != nil && t.VRAMTotalMiB != nil && *t.VRAMUsedMiB > *t.VRAMTotalMiB {
 			return nil, fmt.Errorf("显存已用 %d MiB 大于总量 %d MiB", *t.VRAMUsedMiB, *t.VRAMTotalMiB)
 		}
@@ -875,6 +884,19 @@ func optInt64(s, what string) (*int64, error) {
 		return nil, fmt.Errorf("%s无法解析: %q", what, truncate(s, 30))
 	}
 	return &v, nil
+}
+
+// optPct 0–100 的百分比; [N/A] 返回 nil。
+func optPct(s, what string) (*int, error) {
+	v, err := optInt64(s, what)
+	if err != nil || v == nil {
+		return nil, err
+	}
+	if *v > 100 {
+		return nil, fmt.Errorf("%s超出 0–100: %q", what, truncate(s, 30))
+	}
+	n := int(*v)
+	return &n, nil
 }
 
 // isInvalidFieldErr nvidia-smi 对不认识的查询字段报 `Field "…" is not a valid field to query.`。

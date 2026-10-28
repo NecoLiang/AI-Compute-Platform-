@@ -183,11 +183,7 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	defer client.Close()
 	p := &probeRun{s: s, n: n, client: client}
 
-	out, err := p.runFor(ctx, cmdLight, 20*time.Second)
-	if err != nil {
-		return "nvidia-smi 执行失败: " + err.Error(), false
-	}
-	gpus, err := ParseLight(out)
+	gpus, telAt, err := s.lightTelemetry(ctx, p)
 	if err != nil {
 		return err.Error(), false
 	}
@@ -205,14 +201,13 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	xout, _ := p.runFor(ctx, cmd, 15*time.Second) // 以解析结果为准(错误输出带 @@err 前缀)
 	xidAt := time.Now()
 	xid := ParseXid(xout, window)
-	tel, telAt := s.collectTelemetry(ctx, p)
 
 	slots, err := s.repo.listSlots(s.repo.db, n.ID)
 	if err != nil {
 		slog.Error("fleet 读取卡槽失败", "node_id", n.ID, "error", err)
 		return "", true // 平台侧故障不计入节点失败
 	}
-	seen := map[string]LightGPU{}
+	seen := map[string]GPUTelemetry{}
 	for _, g := range gpus {
 		seen[g.UUID] = g
 	}
@@ -228,8 +223,8 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		g, ok := seen[sl.GPUUUID]
 		if !ok {
 			why = append(why, "掉卡(nvidia-smi 未列出)")
-		} else if g.UncorrectedECC > 0 {
-			why = append(why, fmt.Sprintf("不可纠正 ECC 错误 %d 次", g.UncorrectedECC))
+		} else if g.ECCUncorrected != nil && *g.ECCUncorrected > 0 {
+			why = append(why, fmt.Sprintf("不可纠正 ECC 错误 %d 次", *g.ECCUncorrected))
 		}
 		if x := xid.FatalXidsFor(sl.PCIBusID); len(x) > 0 {
 			why = append(why, fmt.Sprintf("致命 Xid %v", x))
@@ -269,7 +264,7 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		if prev, err = s.repo.recordLightOK(tx, n.ID, free, avgUtil(gpus, false), avgUtil(gpus, true)); err != nil {
 			return err
 		}
-		if err := s.repo.recordTelemetryTx(tx, n.ID, n.Generation, tel, telAt); err != nil {
+		if err := s.repo.recordTelemetryTx(tx, n.ID, n.Generation, gpus, telAt); err != nil {
 			return err
 		}
 		if err := s.repo.recordXidScanTx(tx, n.ID, n.Generation, xid, xidAt); err != nil {
@@ -298,40 +293,41 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	return "", true
 }
 
-// collectTelemetry 逐卡遥测(cmdTelemetry, 不认识 clocks_throttle_reasons 的新驱动改用 clocks_event_reasons)。
-// 失败只记日志、返回 nil: 不影响本次探活成败, 遥测列随之变旧, 一键部署可行性读取时按"未知"处理。
-func (s *Service) collectTelemetry(ctx context.Context, p *probeRun) ([]GPUTelemetry, time.Time) {
+// lightTelemetry 轻探活的逐卡读数(cmdTelemetry, 不认识 clocks_throttle_reasons 的新驱动改用 clocks_event_reasons)。
+// 执行或解析失败即本次轻探活失败(与原先单独的利用率/ECC 查询口径一致); 遥测列随之不刷新, 一键部署可行性读取时按过期处理。
+func (s *Service) lightTelemetry(ctx context.Context, p *probeRun) ([]GPUTelemetry, time.Time, error) {
 	out, err := p.runFor(ctx, cmdTelemetry, 20*time.Second)
 	if err != nil && isInvalidFieldErr(out+err.Error()) {
 		out, err = p.runFor(ctx, cmdTelemetryEvent, 20*time.Second)
 	}
 	at := time.Now()
 	if err != nil {
-		slog.Warn("fleet 逐卡遥测采集失败", "node_id", p.n.ID, "error", err)
-		return nil, at
+		return nil, at, fmt.Errorf("nvidia-smi 执行失败: %w", err)
 	}
 	tel, err := ParseTelemetry(out)
 	if err != nil {
-		slog.Warn("fleet 逐卡遥测解析失败", "node_id", p.n.ID, "error", err)
-		return nil, at
+		return nil, at, err
 	}
-	return tel, at
+	return tel, at, nil
 }
 
 // avgUtil 平均利用率(百分比)。
-func avgUtil(gpus []LightGPU, mem bool) int {
-	if len(gpus) == 0 {
-		return 0
-	}
-	sum := 0
+func avgUtil(gpus []GPUTelemetry, mem bool) int {
+	sum, n := 0, 0
 	for _, g := range gpus {
+		v := g.UtilGPU
 		if mem {
-			sum += g.UtilMem
-		} else {
-			sum += g.UtilGPU
+			v = g.UtilMem
+		}
+		if v != nil {
+			sum += *v
+			n++
 		}
 	}
-	return sum / len(gpus)
+	if n == 0 {
+		return 0
+	}
+	return sum / n
 }
 
 // syncResourceAlerts 在租/预留卡的轻探活异常写入对应租约的 resource_alert, 卡恢复正常的租约清空(docs/25 §25.6)。
