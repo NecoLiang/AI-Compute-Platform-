@@ -291,6 +291,13 @@ func (f *fakeNode) installKey(cmd string) fakeReply {
 	return fakeReply{Stdout: "@@installed\n"}
 }
 
+// Authorize 直接授权一把公钥(等同供给方已把管理公钥写进 authorized_keys)。
+func (f *fakeNode) Authorize(key ssh.PublicKey) {
+	f.mu.Lock()
+	f.authorized = append(f.authorized, key)
+	f.mu.Unlock()
+}
+
 // OnCommand 命令执行前回调(模拟探活进行中外部状态变化)。
 func (f *fakeNode) OnCommand(prefix string, fn func()) {
 	f.mu.Lock()

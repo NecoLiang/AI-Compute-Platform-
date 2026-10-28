@@ -14,7 +14,7 @@ import (
 
 // T-083: 通用任务 worker + 开通重试耗尽善后(换节点一次 → 再失败取消订单退款)。
 
-// failingProvision 注册一个总是失败的 provision 执行器(只在测试中替代 T-084 的真实流水线, 用来驱动死信路径),
+// failingProvision 以总是失败的 provision 执行器覆盖 T-084 的真实流水线(只在测试中, 用来驱动死信路径),
 // onDead 用生产的 onProvisionDead。
 func failingProvision(s *Service, calls *int) {
 	s.registerExecutor(KindProvision, taskExecutor{
@@ -67,25 +67,26 @@ func TestWorkerClaimsOnlyRegisteredKinds(t *testing.T) {
 	db := setupFleetDB(t)
 	s := newTestFleet(t, db)
 	nodes := seedLeaseMarket(t, db, s, "container", 2, 8, 0)
-	// stop/purge 尚无执行器(T-087), provision 尚未注册: 都不得被认领消耗。
+	// stop/purge 尚无执行器(T-087): 不得被认领消耗。
 	_, err := s.repo.insertLeaseTask(db, nodes[0], 0, KindStop, prioStop, LeaseTaskPayload{})
 	require.NoError(t, err)
-	_, err = s.repo.insertLeaseTask(db, nodes[1], 0, KindProvision, prioProvision, LeaseProvisionPayload{LeaseID: 1})
+	_, err = s.repo.insertLeaseTask(db, nodes[0], 0, KindPurge, prioPurge, LeaseTaskPayload{})
 	require.NoError(t, err)
 	task, err := s.repo.claimNextFor(s.claimLocks())
 	require.NoError(t, err)
 	assert.Nil(t, task)
 	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM node_tasks WHERE state='pending' AND attempts=0`))
 
-	// 注册后按类型锁时长认领。
-	calls := 0
-	failingProvision(s, &calls)
+	// provision 由 NewService 注册(T-084), 按其锁时长认领。
+	_, err = s.repo.insertLeaseTask(db, nodes[1], 0, KindProvision, prioProvision, LeaseProvisionPayload{LeaseID: 1})
+	require.NoError(t, err)
 	task, err = s.repo.claimNextFor(s.claimLocks())
 	require.NoError(t, err)
 	require.NotNil(t, task)
 	assert.Equal(t, KindProvision, task.Kind)
 	require.NotNil(t, task.LockedUntil)
-	assert.WithinDuration(t, time.Now().Add(2*time.Minute), *task.LockedUntil, 30*time.Second)
+	assert.WithinDuration(t, time.Now().Add(provisionLock), *task.LockedUntil, 30*time.Second)
+	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM node_tasks WHERE kind IN ('stop','purge') AND state='pending'`))
 }
 
 func TestProvisionRetryThenReallocateThenFail(t *testing.T) {

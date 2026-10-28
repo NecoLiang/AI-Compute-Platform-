@@ -27,6 +27,11 @@ type ProductStore interface {
 	// 订单侧(托管开通/失败善后), 全部在 fleet 的事务内调用。
 	LockManagedOrderTx(tx *sqlx.Tx, orderID int64) (*compute.Order, error)
 	FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error)
+	BeginManagedProvisioningTx(tx *sqlx.Tx, orderID int64) (*compute.Order, error)
+	ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt time.Time, acc compute.ManagedAccess) (*time.Time, error)
+	// 网关鉴权与买家访问信息(T-085/T-086)。
+	ManagedAccessValue(q sqlx.Queryer, orderID int64) (string, error)
+	OrderForAccess(orderNo string) (*compute.Order, error)
 }
 
 // HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
@@ -39,10 +44,13 @@ type Notifier interface {
 	Record(userID int64, notifType, title, content, link string) error
 }
 
-// GatewaySelfTester P11: 经访问网关对节点临时端口做一次自检登录。由访问网关模块(cmd/accessgw,
-// docs/25 S2 T-085)提供; 未接入时 P11 判为不通过并写明原因, 不伪造通过。
+// GatewaySelfTester 经访问网关的自检(docs/25 §25.4.3 P11 / §25.5.1 ⑤)。由 accessgw 模块(T-085)提供;
+// 未接入时 P11 与开通自检均判为不通过并写明原因, 不伪造通过。
 type GatewaySelfTester interface {
+	// SelfTestPort P11: 由网关主机(出口 IP 即节点放行的 IP)对节点临时端口做一次 TCP 连接。
 	SelfTestPort(ctx context.Context, nodeID int64, host string, port int) error
+	// SelfTestLease 开通 ⑤: 以系统自检身份经网关公网入口登录 provisioning 租约, 执行 nvidia-smi -L 并返回输出。
+	SelfTestLease(ctx context.Context, leaseNo string) (string, error)
 }
 
 // Deps fleet 的外部依赖, 全部由 main 注入。
@@ -60,6 +68,7 @@ type Service struct {
 	notifier  Notifier
 	gateway   GatewaySelfTester
 	cfg       config.FleetConfig
+	gw        config.AccessGWConfig
 	gwEgress  []string
 	credKey   []byte
 	dialer    *Dialer
@@ -72,13 +81,18 @@ type Service struct {
 
 // NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。
 func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.AccessGWConfig, credKey []byte) *Service {
-	return &Service{
+	s := &Service{
 		repo: repo, products: deps.Products, health: deps.Health, notifier: deps.Notifier, gateway: deps.Gateway,
-		cfg: cfg, gwEgress: gw.EgressIPs, credKey: credKey,
+		cfg: cfg, gw: gw, gwEgress: gw.EgressIPs, credKey: credKey,
 		dialer:    &Dialer{},
 		benchSecs: 60, sampleN: 6, sampleGap: 10,
 	}
+	s.registerExecutor(KindProvision, taskExecutor{lock: provisionLock, run: s.runProvisionTask, onDead: s.onProvisionDead})
+	return s
 }
+
+// SetGateway 注入网关自检实现(main 在网关客户端就绪后调用; 必须在 RunWorkers/RunPeriodic 之前)。
+func (s *Service) SetGateway(g GatewaySelfTester) { s.gateway = g }
 
 var (
 	errNodeNotFound   = errcode.New(errcode.NotFound, "节点不存在或不属于当前供应方")

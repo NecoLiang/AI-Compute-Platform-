@@ -3,6 +3,8 @@ package fleet
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,6 +25,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 )
 
 // 端到端: 真实 MySQL(TEST_MYSQL_DSN, 每次新建库并跑全部迁移) + 真实 compute/scheduler/notification 服务
@@ -68,6 +71,23 @@ type stubGateway struct {
 	mu    sync.Mutex
 	ports []int
 	err   error
+	// 开通自检(SelfTestLease): leaseOut 为网关返回的 nvidia-smi -L 输出, leaseErr 非空即自检失败,
+	// onLease 在返回前回调(模拟自检期间外部状态变化)。
+	leaseOut string
+	leaseErr error
+	leases   []string
+	onLease  func()
+}
+
+func (g *stubGateway) SelfTestLease(_ context.Context, leaseNo string) (string, error) {
+	g.mu.Lock()
+	g.leases = append(g.leases, leaseNo)
+	out, err, fn := g.leaseOut, g.leaseErr, g.onLease
+	g.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+	return out, err
 }
 
 func (g *stubGateway) SelfTestPort(_ context.Context, _ int64, _ string, port int) error {
@@ -95,21 +115,39 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+const testBaseImage = "registry.example.com/omnis/pytorch@sha256:" + "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+// testUpstreamPub 网关上游公钥(测试进程内随机生成)。
+var testUpstreamPub = func() string {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	k, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		panic(err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(k))) + " omnis-accessgw"
+}()
+
 const testProbeImage = "registry.example.com/omnis/probe@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 	t.Helper()
-	comp := compute.NewService(compute.NewRepository(db), db)
+	comp := compute.NewService(compute.NewRepository(db), db, strings.Repeat("07", 32))
 	sched := scheduler.NewService(scheduler.NewRepository(db))
 	notif := notification.NewService(notification.NewRepository(db))
 	cfg := config.FleetConfig{
 		Enabled: true, Workers: 1, ControllerEgressIPs: []string{"10.0.0.1"},
 		ProbeImage: testProbeImage, MinDriverVersion: "535.104",
-		Probe: config.FleetProbe{MinPerfRatio: 0.7},
+		Probe:          config.FleetProbe{MinPerfRatio: 0.7},
+		BaseImages:     []config.BaseImage{{Name: "pytorch", Ref: testBaseImage}},
+		HostReserveCPU: 2, HostReserveMemGB: 8,
 	}
 	key := bytes.Repeat([]byte{7}, 32)
 	s := NewService(NewRepository(db), Deps{Products: comp, Health: sched, Notifier: notif}, cfg,
-		config.AccessGWConfig{EgressIPs: []string{"10.0.0.2"}}, key)
+		config.AccessGWConfig{EgressIPs: []string{"10.0.0.2"}, PublicHost: "gw.test", PublicPort: 2222,
+			UpstreamPubkey: testUpstreamPub}, key)
 	s.dialer = &Dialer{AllowLoopback: true, DialTimeout: 2 * time.Second, Attempts: 1}
 	s.benchSecs, s.sampleN, s.sampleGap = 5, 1, 1
 	return s

@@ -28,11 +28,16 @@ func (p *probeRun) ports(ctx context.Context) {
 		return
 	}
 	listening := ParseListeningPorts(out)
+	leased, err := p.s.repo.leasedPorts(p.s.repo.db, p.n.ID)
+	if err != nil {
+		p.portsFail("读取租约端口占用失败: " + err.Error())
+		return
+	}
 	start, end := portRange(p.n)
 	port := 0
-	// 自检端口从端口段末尾向下选取, 与租约端口分配(从段首开始, S2)错开。
+	// 自检端口从端口段末尾向下选取, 与租约端口分配(从段首开始)错开; 已被租约占用的端口(含容器暂停时未监听的)一律跳过。
 	for i := end; i >= start; i-- {
-		if !listening[i] {
+		if !listening[i] && !leased[i] {
 			port = i
 			break
 		}

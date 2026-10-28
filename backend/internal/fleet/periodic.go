@@ -189,6 +189,7 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	}
 	var faulty []int
 	var notes, busyAlerts []string
+	leaseAlerts := map[int64][]string{}
 	free := 0
 	for _, sl := range slots {
 		if sl.State == SlotFaulty {
@@ -216,12 +217,15 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 			notes = append(notes, msg)
 		} else {
 			busyAlerts = append(busyAlerts, msg+"(状态 "+sl.State+")")
+			if sl.LeaseID != nil && (sl.State == SlotLeased || sl.State == SlotReserved) {
+				leaseAlerts[*sl.LeaseID] = append(leaseAlerts[*sl.LeaseID], msg)
+			}
 		}
 	}
 	if len(busyAlerts) > 0 {
-		// 在租卡的资源异常处理(leases.resource_alert/停机计时)在 S2 实现; S1 先发运营告警。
 		slog.Error("运营告警: 托管节点非空闲卡异常", "node_id", n.ID, "detail", strings.Join(busyAlerts, "; "))
 	}
+	s.syncResourceAlerts(n.ID, leaseAlerts)
 	var prev string
 	var changed int64
 	err = s.inTx(func(tx *sqlx.Tx) error {
@@ -273,4 +277,28 @@ func avgUtil(gpus []LightGPU, mem bool) int {
 		}
 	}
 	return sum / len(gpus)
+}
+
+// syncResourceAlerts 在租/预留卡的轻探活异常写入对应租约的 resource_alert, 卡恢复正常的租约清空(docs/25 §25.6)。
+// 停机认定、计时与补偿(outage_remedy)属 T-105, 以 resource_alert 为输入; 这里不迁移租约状态、不动卡槽。
+func (s *Service) syncResourceAlerts(nodeID int64, alerts map[int64][]string) {
+	var ids []int64
+	if err := s.repo.db.Select(&ids, `SELECT id FROM leases WHERE node_id=? AND state IN ('provisioning','active','parked','suspended')`,
+		nodeID); err != nil {
+		slog.Error("fleet 读取节点租约失败", "node_id", nodeID, "error", err)
+		return
+	}
+	for _, id := range ids {
+		msg := strings.Join(alerts[id], "; ")
+		changed, err := s.repo.setResourceAlert(s.repo.db, id, msg)
+		if err != nil {
+			slog.Error("fleet 写租约资源告警失败", "lease_id", id, "error", err)
+			continue
+		}
+		if changed && msg != "" {
+			slog.Error("运营告警: 在租卡资源异常", "node_id", nodeID, "lease_id", id, "detail", msg)
+		} else if changed {
+			slog.Info("在租卡资源异常已恢复", "node_id", nodeID, "lease_id", id)
+		}
+	}
 }

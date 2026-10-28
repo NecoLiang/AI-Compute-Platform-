@@ -178,3 +178,11 @@ func (r *Repository) setResourceAlert(q sqlx.Execer, leaseID int64, alert string
 	alert = truncate(alert, 127) // truncate 超长时追加省略号, 留 1 字符
 	return affected(q.Exec(`UPDATE leases SET resource_alert=? WHERE id=? AND NOT (resource_alert <=> ?)`, alert, leaseID, alert))
 }
+
+// leaseSlotsOnNode 租约在指定节点上的卡槽(换节点后原节点可能仍有 draining 残留, 开通只看当前节点)。
+func (r *Repository) leaseSlotsOnNode(q sqlx.Queryer, leaseID, nodeID int64) ([]Slot, error) {
+	var list []Slot
+	err := sqlx.Select(q, &list, `SELECT id, node_id, gpu_index, gpu_uuid, pci_bus_id, vram_mb, topo_group, state, lease_id,
+		state_changed_at FROM gpu_slots WHERE lease_id=? AND node_id=? ORDER BY gpu_index`, leaseID, nodeID)
+	return list, err
+}
