@@ -6,6 +6,7 @@
 - 平台**自维护**的权威型号字典（不依赖外部 API），供应方发布商品时下拉选择，替代自由文本。
 - 初始 29 款：国产以 **2026-05 国家安可认证目录**为骨架（`secure_certified=true`），海外取数据中心与主流消费卡。
 - `fp16_tflops` 统一口径为 **FP16 稠密 Tensor 算力**；`null` 表示暂无数值。种子数据仍有标注“待官网复核”的参考值，运营须根据 `spec_source` 继续核实。
+- `probe_baseline_tflops`（v1.2，migration 026）为托管探活 P13 的**探针实测**单卡 FP16 矩阵乘基准，与厂商标称 `fp16_tflops` 分开（实测通常只有标称的 60%~80%，拿标称比会误杀好卡）；`null`=未标定，P13 只校验稳定性不比对算力（docs/25 §25.4）。运营在真实卡上跑过平台探针后填写。
 - 新增型号走管理端接口，保存后**即刻**出现在下拉，无需发版。
 
 ---
@@ -35,6 +36,7 @@ curl "http://localhost:8080/api/v1/gpu-catalog?origin=domestic"
     "vram_gb":64,                 // 单卡显存 GB; null=待核实
     "vram_type":"HBM2e",          // 显存类型; null=待核实
     "fp16_tflops":320.0,          // FP16 稠密 Tensor 算力; null=待核实
+    "probe_baseline_tflops":null, // v1.2 托管探活 P13 实测基准; null=未标定
     "interconnect":"HCCS",        // 多卡互联; null=待核实
     "secure_certified":true,      // ⭐ 是否入选国家安可认证目录 → 前端可打「安可认证」徽章
     "status":"enabled",
@@ -67,6 +69,7 @@ curl "http://localhost:8080/api/v1/gpu-catalog?origin=domestic"
 ```
 - `vendor`/`model_name`/`origin`/`grade` 必填，其余可空；`model_name` 全局唯一（重复返回 40001「型号已存在」）。
 - 新增默认 `enabled`。
+- `probe_baseline_tflops` 可空，非空须为正数（否则 40001）。
 
 ## PUT /admin/gpu-catalog/:id · 更新型号 ✅
 

@@ -63,6 +63,7 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		order_no VARCHAR(64) NOT NULL UNIQUE,
 		buyer_id BIGINT NOT NULL DEFAULT 1,
 		product_id BIGINT NOT NULL,
+		fulfillment_mode ENUM('manual','managed') NOT NULL DEFAULT 'manual',
 		quantity INT NOT NULL,
         stock_reserved INT NULL,
 		duration INT NOT NULL DEFAULT 1,
@@ -74,6 +75,7 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		lease_start_at TIMESTAMP NULL,
 		lease_end_at TIMESTAMP NULL,
 		compliance_agreed TINYINT DEFAULT 0,
+		settle_ready_at TIMESTAMP NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	)`)

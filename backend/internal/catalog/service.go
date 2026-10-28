@@ -49,6 +49,9 @@ func validate(m *GPUModel) error {
 	if m.FP16TFLOPS != nil && *m.FP16TFLOPS <= 0 {
 		return fmt.Errorf("fp16_tflops 须为正数")
 	}
+	if m.ProbeBaselineTFLOPS != nil && *m.ProbeBaselineTFLOPS <= 0 {
+		return fmt.Errorf("probe_baseline_tflops 须为正数")
+	}
 	return nil
 }
 

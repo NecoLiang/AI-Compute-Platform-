@@ -9,9 +9,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func intp(v int) *int          { return &v }
-func f64p(v float64) *float64  { return &v }
-func strp(s string) *string    { return &s }
+func intp(v int) *int         { return &v }
+func f64p(v float64) *float64 { return &v }
+func strp(s string) *string   { return &s }
 
 // ===== 纯校验单测 =====
 
@@ -60,7 +60,7 @@ func setupCatalogDB(t *testing.T) *Service {
 		vendor VARCHAR(32) NOT NULL, model_name VARCHAR(64) NOT NULL,
 		origin ENUM('domestic','international') NOT NULL,
 		grade ENUM('datacenter','consumer') NOT NULL DEFAULT 'datacenter',
-		vram_gb INT NULL, vram_type VARCHAR(16) NULL, fp16_tflops DECIMAL(8,1) NULL,
+		vram_gb INT NULL, vram_type VARCHAR(16) NULL, fp16_tflops DECIMAL(8,1) NULL, probe_baseline_tflops DECIMAL(8,1) NULL,
 		interconnect VARCHAR(32) NULL, secure_certified TINYINT(1) NOT NULL DEFAULT 0,
 		spec_source VARCHAR(255) NULL,
 		status ENUM('enabled','disabled') NOT NULL DEFAULT 'enabled',

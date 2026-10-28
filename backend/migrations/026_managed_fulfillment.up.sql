@@ -89,3 +89,10 @@ CREATE TABLE node_tasks (
     INDEX idx_claim (state, run_after, priority),
     INDEX idx_node_state (node_id, state)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- P13 短压测基准(docs/25 §25.4): 平台探针镜像内实测的单卡 FP16 矩阵乘 TFLOPS。
+-- 与 fp16_tflops(厂商稠密标称)分开: 实测通常只有标称的 60%~80%, 拿标称比会误杀好卡。
+-- NULL = 未标定, P13 只校验稳定性不比对算力, 并在报告中注明。
+ALTER TABLE gpu_catalog
+    ADD COLUMN probe_baseline_tflops DECIMAL(8,1) NULL
+        COMMENT 'P13 探针实测基准 TFLOPS; NULL=未标定只验稳定性' AFTER fp16_tflops;

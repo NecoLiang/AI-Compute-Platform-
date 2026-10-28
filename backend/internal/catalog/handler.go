@@ -62,6 +62,7 @@ type modelReq struct {
 	VRAMGB          *int     `json:"vram_gb"`
 	VRAMType        *string  `json:"vram_type"`
 	FP16TFLOPS      *float64 `json:"fp16_tflops"`
+	ProbeBaseline   *float64 `json:"probe_baseline_tflops"`
 	Interconnect    *string  `json:"interconnect"`
 	SecureCertified bool     `json:"secure_certified"`
 	SpecSource      *string  `json:"spec_source"`
@@ -72,7 +73,7 @@ type modelReq struct {
 func (r modelReq) toModel() *GPUModel {
 	return &GPUModel{
 		Vendor: r.Vendor, ModelName: r.ModelName, Origin: r.Origin, Grade: r.Grade,
-		VRAMGB: r.VRAMGB, VRAMType: r.VRAMType, FP16TFLOPS: r.FP16TFLOPS,
+		VRAMGB: r.VRAMGB, VRAMType: r.VRAMType, FP16TFLOPS: r.FP16TFLOPS, ProbeBaselineTFLOPS: r.ProbeBaseline,
 		Interconnect: r.Interconnect, SecureCertified: r.SecureCertified,
 		SpecSource: r.SpecSource, Status: r.Status, SortWeight: r.SortWeight,
 	}

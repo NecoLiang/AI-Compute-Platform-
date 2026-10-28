@@ -75,10 +75,12 @@ type Product struct {
 }
 
 type Order struct {
-	ID               int64      `db:"id" json:"id"`
-	OrderNo          string     `db:"order_no" json:"order_no"`
-	BuyerID          int64      `db:"buyer_id" json:"buyer_id"`
-	ProductID        int64      `db:"product_id" json:"product_id"`
+	ID        int64  `db:"id" json:"id"`
+	OrderNo   string `db:"order_no" json:"order_no"`
+	BuyerID   int64  `db:"buyer_id" json:"buyer_id"`
+	ProductID int64  `db:"product_id" json:"product_id"`
+	// FulfillmentMode 下单时商品履约模式快照(migration 026): manual / managed。
+	FulfillmentMode  string     `db:"fulfillment_mode" json:"fulfillment_mode"`
 	StockReserved    *int       `db:"stock_reserved" json:"-"`
 	Quantity         int        `db:"quantity" json:"quantity"`
 	Duration         int        `db:"duration" json:"duration"`
@@ -90,8 +92,10 @@ type Order struct {
 	LeaseStart       *time.Time `db:"lease_start_at" json:"lease_start_at"`
 	LeaseEnd         *time.Time `db:"lease_end_at" json:"lease_end_at"`
 	ComplianceAgreed bool       `db:"compliance_agreed" json:"compliance_agreed"`
-	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt        time.Time  `db:"updated_at" json:"updated_at"`
+	// SettleReadyAt managed 订单停机结算完成时点, 非空才允许分账(docs/25 D-10); manual 恒为空。
+	SettleReadyAt *time.Time `db:"settle_ready_at" json:"-"`
+	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time  `db:"updated_at" json:"updated_at"`
 }
 
 // BuyerOrder keeps the existing order payload and adds the product/provider
@@ -160,13 +164,13 @@ const productColumns = `id, supplier_id, product_type,
 	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, rejected_reason, created_at, updated_at`
 
-const orderColumns = `id, order_no, buyer_id, product_id, stock_reserved, quantity, duration, unit_price,
+const orderColumns = `id, order_no, buyer_id, product_id, fulfillment_mode, stock_reserved, quantity, duration, unit_price,
 	total_amount, platform_fee, status, payment_expires_at, lease_start_at, lease_end_at,
-	COALESCE(compliance_agreed,0) AS compliance_agreed, created_at, updated_at`
+	COALESCE(compliance_agreed,0) AS compliance_agreed, settle_ready_at, created_at, updated_at`
 
-const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.stock_reserved, o.quantity, o.duration, o.unit_price,
+const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.fulfillment_mode, o.stock_reserved, o.quantity, o.duration, o.unit_price,
 	o.total_amount, o.platform_fee, o.status, o.payment_expires_at, o.lease_start_at, o.lease_end_at,
-	COALESCE(o.compliance_agreed,0) AS compliance_agreed, o.created_at, o.updated_at,
+	COALESCE(o.compliance_agreed,0) AS compliance_agreed, o.settle_ready_at, o.created_at, o.updated_at,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
 	COALESCE(p.pricing_mode,'') AS pricing_mode,
 	COALESCE(p.self_operated,0) AS self_operated,
