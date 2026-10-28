@@ -87,6 +87,33 @@ curl "http://localhost:8080/api/v1/admin/risk/alerts?level=high&page=1&page_size
 
 ---
 
+## 托管节点（v1.2，`fleet.enabled=true`）
+
+完整契约见 [managed-rental-api.md](managed-rental-api.md#运营接口)。
+
+### GET /admin/nodes · 节点总览
+托管节点附带 `managed`（最近探活结论 / 卡槽统计 / 指纹确认状态）。
+
+### POST /admin/nodes/:id/suspend · 停用节点
+`{"reason":"..."}`（可选，≤200 字）。停止新分配、释放无租约卡槽、作废排队任务、重算库存、通知供给方、写审计；存量租约不受影响。40400 非托管节点；40900 已停用。
+
+### POST /admin/nodes/:id/resume · 恢复节点
+回到 `unverified` 并自动入队完整探活，探活通过才回到 `verified`。响应 `{"verify_status":"unverified","task_id":...}`；40900 不在停用状态。
+
+### GET /admin/node-tasks?state=&node_id=&page=&page_size= · 节点任务
+`state` ∈ `pending/running/succeeded/failed/dead`。分页信封 `{list,total,page,page_size}`。
+
+### POST /admin/node-tasks/:id/retry · 重试死信
+仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。
+
+```
+curl -X POST http://localhost:8080/api/v1/admin/nodes/7/suspend \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"reason":"多次探活失败, 待供给方排查"}'
+```
+
+---
+
 ## 用户管理
 
 ### GET /admin/users · 用户列表

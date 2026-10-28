@@ -135,6 +135,20 @@
 - `DELETE /supplier/nodes/:id`
 - 页面附节点侧接入说明（30s 心跳 curl 示例见 [scheduler-api.md](scheduler-api.md)）
 
+#### 托管节点接入向导（v1.2，`fleet.enabled=true`，页面待建）🆕
+契约见 [managed-rental-api.md](managed-rental-api.md)。仅托管商品（`fulfillment_mode=managed`）走此流程；后端已就绪，前端未实现。
+
+| 步骤 | 接口 | 页面要点 |
+|---|---|---|
+| ① 添加节点 | `POST /supplier/nodes` `{product_id, node_name, total_cards, mgmt_mode:"ssh", disk_per_card_gb, lease_port_start?, lease_port_end?}` | 无 `node_key`；默认端口段 40000–40099 |
+| ② 上架说明 | `GET /supplier/nodes/:id/onboarding` | 展示 `authorized_keys_line`（复制按钮）、`requirements`、按发行版切换的 `firewall_scripts`、控制面/网关出口 IP |
+| ③ 连接信息 | `PUT /supplier/nodes/:id/ssh` `{host, port, user, bootstrap_password?}` | 一次性密码为可选项，提交后不回显不缓存；40001 失败时连接信息已保存，引导改为手动加公钥 |
+| ④ 发起探活 | `POST /supplier/nodes/:id/verify` → `task_id` | 轮询 `GET /supplier/nodes` 看 `verify_status` |
+| ⑤ 确认指纹 | `POST /supplier/nodes/:id/host-key/confirm` `{fingerprint}` | 首次连接后 `verify_status=unverified` 且 `host_key_fingerprint` 有值、未确认时出现；展示核对命令，用户粘贴机器上看到的指纹 |
+| ⑥ 探活报告 | `GET /supplier/nodes/:id/probe-reports?limit=` | P1–P13 逐项 ok/skipped/detail；`inventory` 可能为 `null` |
+| ⑦ 卡槽 | `GET /supplier/nodes/:id/slots`、`PUT /supplier/nodes/:id/slots/:gpu_index` `{state:"withheld"\|"free"}` | 只允许 free↔withheld |
+| ⑧ 运维 | `POST .../drain`、`POST .../undrain`、`POST .../reimage-confirm`、`DELETE /supplier/nodes/:id` | `key_mismatch` 走⑤重新确认；`needs_reimage` 走重装确认 |
+
 ### `/console/supplier/settlements` 结算 ✅
 - `GET /supplier/settlements?status`、`GET /supplier/settlements/summary`
 
@@ -161,6 +175,7 @@
 | `/admin/settings` | `GET/PUT /admin/config`；`GET/POST/PUT /admin/gpu-catalog` ⬜（型号库维护界面待接，字段见 gpu-catalog-api.md） | ✅ |
 | `/admin/cms` | `GET/POST /admin/cms/notices` | ✅ |
 | 节点总览（建议并入 `/admin/settings` 或新页）🆕 | `GET /admin/nodes?status`、`GET /admin/schedule-advice?order_no=`、`POST /admin/blockchain/requeue-failed`(存证死信补推) | 🆕 |
+| 托管节点运维（v1.2，`fleet.enabled=true`，页面待建）🆕 | `GET /admin/nodes`（托管节点带 `managed` 摘要）、`POST /admin/nodes/:id/suspend\|resume`、`GET /admin/node-tasks?state&node_id`、`POST /admin/node-tasks/:id/retry`，见 [managed-rental-api.md](managed-rental-api.md#运营接口) | 🆕 后端就绪 |
 
 ---
 
