@@ -2,6 +2,7 @@ package modeldeploy
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -31,6 +32,8 @@ const (
 	maxIdleVRAMUsedPct = 2
 	// contextTightFactor 建议上下文 < Lmin×该倍数时提示"上下文紧张"。
 	contextTightFactor = 2
+	// MaxCardVRAMBytes 单卡显存的合理上限。租约快照里超出该值(或 ≤0)的显存视为数据异常, 判"无法判定"。
+	MaxCardVRAMBytes int64 = 1 << 40 // 1 TiB
 )
 
 // ModelSpec 判定所需的目录参数。
@@ -152,21 +155,14 @@ func (r Result) MissingAcks(licenseAck, untestedAck bool) []Check {
 	return out
 }
 
-// Evaluate 执行 §27.3.1 显存/上下文计算与 §27.3.2 F1–F8 检查。
-// 返回 error 仅表示输入本身不合法(目录参数或利用率越界), 属于调用方缺陷, 不是"不可行"。
+// Evaluate 执行 §27.3.1 显存/上下文计算与 §27.3.2 F1–F8 检查。任何输入都不会 panic。
+// 返回 error 仅表示 gpu_mem_util 越界(调用方已校验, 属调用方缺陷)。
+// 目录参数缺失或超出合理范围(库里可能有校验收紧前写入的旧行)、租约显存/缓存数据异常时
+// 不返回 error, 而是判为不可行并在检查项中写明"无法判定"及原因。
 func Evaluate(in Input) (Result, error) {
 	m := in.Model
 	if in.GPUMemUtilPct < MinGPUMemUtilPct || in.GPUMemUtilPct > MaxGPUMemUtilPct {
 		return Result{}, fmt.Errorf("gpu_mem_util 须在 0.%d–0.%d 之间", MinGPUMemUtilPct, MaxGPUMemUtilPct)
-	}
-	if m.WeightsBytes <= 0 || m.KVBytesPerToken <= 0 || m.RuntimeOverheadBytes <= 0 ||
-		m.MinContextTokens <= 0 || m.MaxModelLen < m.MinContextTokens || len(m.ValidTP) == 0 {
-		return Result{}, fmt.Errorf("目录条目 %s 参数不完整, 无法判定", m.ModelKey)
-	}
-	for _, tp := range m.ValidTP {
-		if tp < 1 {
-			return Result{}, fmt.Errorf("目录条目 %s 的 valid_tp 非法", m.ModelKey)
-		}
 	}
 
 	k := len(in.Cards)
@@ -188,11 +184,19 @@ func Evaluate(in Input) (Result, error) {
 		},
 	}
 
-	plans, mem := evaluateMemory(in, k, vram)
-	res.Memory = mem
-	recommend(plans)
+	var plans []Plan
+	var m1 Check
+	if problem := modelSpecProblem(m); problem != "" {
+		// 目录参数不可信时不做显存计算, 避免在越界数值上得出任何结论。
+		plans, res.Memory = []Plan{}, []MemoryEval{}
+		m1 = fail("M1", LevelError, fmt.Sprintf("目录条目 %s 参数超出合理范围(%s), 无法判定, 请联系平台运营核对目录", m.ModelKey, problem))
+	} else {
+		plans, res.Memory = evaluateMemory(in, k, vram)
+		recommend(plans)
+		m1 = memoryCheck(in, k, vram, plans)
+	}
 
-	checks := []Check{memoryCheck(in, k, plans), contextCheck(in, plans)}
+	checks := []Check{m1, contextCheck(in, plans)}
 	checks = append(checks,
 		checkF1(in), checkF2(in), checkF3(in), checkF4(in), checkF5(in, plans),
 		checkF6(in), checkF7(in), checkF8(in))
@@ -212,6 +216,89 @@ func Evaluate(in Input) (Result, error) {
 	return res, nil
 }
 
+// modelSpecProblem 目录参数是否在可判定范围内(与 normalizeEntry 的上限一致); 返回空串表示正常。
+func modelSpecProblem(m ModelSpec) string {
+	switch {
+	case m.WeightsBytes <= 0 || m.WeightsBytes > MaxWeightsBytes:
+		return fmt.Sprintf("weights_bytes=%d, 应在 1–%d", m.WeightsBytes, MaxWeightsBytes)
+	case m.KVBytesPerToken <= 0 || m.KVBytesPerToken > MaxKVBytesPerToken:
+		return fmt.Sprintf("kv_bytes_per_token=%d, 应在 1–%d", m.KVBytesPerToken, MaxKVBytesPerToken)
+	case m.RuntimeOverheadBytes <= 0 || m.RuntimeOverheadBytes > MaxRuntimeOverheadBytes:
+		return fmt.Sprintf("runtime_overhead_bytes=%d, 应在 1–%d", m.RuntimeOverheadBytes, MaxRuntimeOverheadBytes)
+	case m.MinContextTokens <= 0 || m.MaxModelLen < m.MinContextTokens || m.MaxModelLen > MaxModelLenLimit:
+		return fmt.Sprintf("min_context_tokens=%d, max_model_len=%d, 应满足 0 < min_context_tokens ≤ max_model_len ≤ %d",
+			m.MinContextTokens, m.MaxModelLen, MaxModelLenLimit)
+	case len(m.ValidTP) == 0:
+		return "valid_tp 为空"
+	}
+	for _, tp := range m.ValidTP {
+		if tp < 1 || tp > MaxTP {
+			return fmt.Sprintf("valid_tp 含 %d, 应在 1–%d", tp, MaxTP)
+		}
+	}
+	return ""
+}
+
+func vramInRange(v int64) bool { return v > 0 && v <= MaxCardVRAMBytes }
+
+// addInt64 / subInt64 / mulInt64 带溢出检测的 int64 运算; ok=false 表示结果溢出。
+func addInt64(a, b int64) (int64, bool) {
+	c := a + b
+	if (b > 0 && c < a) || (b < 0 && c > a) {
+		return 0, false
+	}
+	return c, true
+}
+
+func subInt64(a, b int64) (int64, bool) {
+	c := a - b
+	if (b > 0 && c > a) || (b < 0 && c < a) {
+		return 0, false
+	}
+	return c, true
+}
+
+func mulInt64(a, b int64) (int64, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if (a == -1 && b == math.MinInt64) || (b == -1 && a == math.MinInt64) {
+		return 0, false
+	}
+	c := a * b
+	if c/b != a {
+		return 0, false
+	}
+	return c, true
+}
+
+// mulAll 连乘, 任一步溢出即 ok=false。
+func mulAll(xs ...int64) (int64, bool) {
+	r := int64(1)
+	for _, x := range xs {
+		var ok bool
+		if r, ok = mulInt64(r, x); !ok {
+			return 0, false
+		}
+	}
+	return r, true
+}
+
+// kvBudgetNum Bnum = V×U×tp − 100×W − 100×O×tp, 全程溢出检测。
+func kvBudgetNum(vram, u, w, o, tp int64) (int64, bool) {
+	a, ok1 := mulAll(vram, u, tp)
+	b, ok2 := mulAll(100, w)
+	c, ok3 := mulAll(100, o, tp)
+	if !ok1 || !ok2 || !ok3 {
+		return 0, false
+	}
+	d, ok4 := subInt64(a, b)
+	if !ok4 {
+		return 0, false
+	}
+	return subInt64(d, c)
+}
+
 // evaluateMemory §27.3.1。精确有理数运算:
 //
 //	B = V×u − W/tp − O        ⇒ Bnum = V×U×tp − 100×W − 100×O×tp,  B = Bnum / (100×tp)   (U = u×100)
@@ -219,6 +306,7 @@ func Evaluate(in Input) (Result, error) {
 //	T = B/K (KV 跨 TP 复制)   ⇒ T = Bnum / (100×tp×K)
 //
 // 可行: B > 0 且 T ≥ Lmin。
+// 调用前 modelSpecProblem 已确认目录参数在范围内; 显存数据异常或任一步溢出均记为该 tp "无法判定"。
 func evaluateMemory(in Input, k int, vram int64) ([]Plan, []MemoryEval) {
 	m := in.Model
 	u := int64(in.GPUMemUtilPct)
@@ -232,18 +320,30 @@ func evaluateMemory(in Input, k int, vram int64) ([]Plan, []MemoryEval) {
 			mem = append(mem, ev)
 			continue
 		}
+		if !vramInRange(vram) {
+			ev.Reason = fmt.Sprintf("卡显存数据缺失或超出合理范围(%d 字节), 无法判定", vram)
+			mem = append(mem, ev)
+			continue
+		}
 		t64 := int64(tp)
-		bnum := vram*u*t64 - 100*m.WeightsBytes - 100*m.RuntimeOverheadBytes*t64
+		bnum, okB := kvBudgetNum(vram, u, m.WeightsBytes, m.RuntimeOverheadBytes, t64)
+		den := []int64{100, m.KVBytesPerToken}
+		if m.KVReplicatedAcrossTP {
+			den = append(den, t64)
+		}
+		kvDen, okK := mulAll(den...)
+		if !okB || !okK || kvDen <= 0 {
+			ev.Reason = "参数超出可计算范围, 无法判定"
+			mem = append(mem, ev)
+			continue
+		}
 		ev.KVBudgetBytesPerCard = bnum / (100 * t64)
 		if bnum <= 0 {
 			ev.Reason = "每卡显存不足以容纳权重分片与运行开销"
 			mem = append(mem, ev)
 			continue
 		}
-		tokens := bnum / (100 * m.KVBytesPerToken)
-		if m.KVReplicatedAcrossTP {
-			tokens = bnum / (100 * t64 * m.KVBytesPerToken)
-		}
+		tokens := bnum / kvDen
 		ev.KVCapacityTokens = tokens
 		if tokens < lmin {
 			ev.Reason = fmt.Sprintf("KV 可容纳约 %d tokens, 低于最低上下文 %d", tokens, lmin)
@@ -306,9 +406,12 @@ func fail(id, level, msg string) Check { return Check{ID: id, Level: level, Mess
 func gib(b int64) string { return fmt.Sprintf("%.1f GiB", float64(b)/(1<<30)) }
 
 // memoryCheck M1: 至少一个 (tp, dp) 组合满足显存与最低上下文。
-func memoryCheck(in Input, k int, plans []Plan) Check {
+func memoryCheck(in Input, k int, vram int64, plans []Plan) Check {
 	if k == 0 {
 		return fail("M1", LevelError, "租约内没有可用的卡")
+	}
+	if !vramInRange(vram) {
+		return fail("M1", LevelError, fmt.Sprintf("租约卡显存数据缺失或超出合理范围(%d 字节), 无法判定, 请稍后重试或联系平台运营", vram))
 	}
 	if len(plans) == 0 {
 		return fail("M1", LevelError, fmt.Sprintf(
@@ -382,12 +485,14 @@ func checkF3(in Input) Check {
 	}
 	busy := 0
 	for _, c := range in.Cards {
-		if c.VRAMTotalBytes <= 0 || c.VRAMUsedBytes*100 > c.VRAMTotalBytes*maxIdleVRAMUsedPct {
+		// 显存总量/占用缺失或越界的卡不能视为空闲; 先限定 0 ≤ used ≤ total ≤ 1 TiB, 再做乘法比较, 不会溢出。
+		if !vramInRange(c.VRAMTotalBytes) || c.VRAMUsedBytes < 0 || c.VRAMUsedBytes > c.VRAMTotalBytes ||
+			c.VRAMUsedBytes*100 > c.VRAMTotalBytes*maxIdleVRAMUsedPct {
 			busy++
 		}
 	}
 	if busy > 0 {
-		return fail("F3", LevelError, fmt.Sprintf("%d 张卡当前显存占用超过 %d%%, 请先停止占用显存的进程", busy, maxIdleVRAMUsedPct))
+		return fail("F3", LevelError, fmt.Sprintf("%d 张卡当前显存占用超过 %d%% 或显存数据异常, 请先停止占用显存的进程", busy, maxIdleVRAMUsedPct))
 	}
 	return ok("F3", "各卡显存空闲")
 }
@@ -397,8 +502,16 @@ func checkF4(in Input) Check {
 	if in.ModelCached {
 		return ok("F4", "节点已缓存该模型权重")
 	}
-	avail := in.CacheFreeBytes + in.CacheEvictableBytes
-	if avail*10 >= in.Model.WeightsBytes*11 {
+	if in.CacheFreeBytes < 0 || in.CacheEvictableBytes < 0 {
+		return fail("F4", LevelError, "节点模型缓存区容量数据异常, 无法判定, 请稍后重试或联系平台运营")
+	}
+	avail, okA := addInt64(in.CacheFreeBytes, in.CacheEvictableBytes)
+	avail10, okB := mulInt64(avail, 10)
+	need, okC := mulInt64(in.Model.WeightsBytes, 11)
+	if !okA || !okB || !okC {
+		return fail("F4", LevelError, "节点模型缓存区容量或权重大小超出可计算范围, 无法判定")
+	}
+	if avail10 >= need {
 		return ok("F4", fmt.Sprintf("模型缓存区可用 %s(含可清理 %s), 满足权重 1.1 倍", gib(avail), gib(in.CacheEvictableBytes)))
 	}
 	return fail("F4", LevelError, fmt.Sprintf("模型缓存区可用 %s(含可清理 %s), 不足权重 %s 的 1.1 倍",

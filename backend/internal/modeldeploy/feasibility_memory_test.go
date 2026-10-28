@@ -1,7 +1,9 @@
 package modeldeploy
 
 import (
+	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -219,21 +221,197 @@ func TestEvaluateMixedVRAMUsesMinimum(t *testing.T) {
 	}
 }
 
-func TestEvaluateRejectsBrokenCatalogInput(t *testing.T) {
-	mut := []func(m *ModelSpec){
-		func(m *ModelSpec) { m.WeightsBytes = 0 },
-		func(m *ModelSpec) { m.KVBytesPerToken = 0 },
-		func(m *ModelSpec) { m.RuntimeOverheadBytes = 0 },
-		func(m *ModelSpec) { m.ValidTP = nil },
-		func(m *ModelSpec) { m.ValidTP = []int{0} },
-		func(m *ModelSpec) { m.MaxModelLen = 1024 },
+// 目录参数缺失或越界(库中可能有旧行)不报错、不 panic, 判为不可行且 M1 写明"无法判定"。
+func TestEvaluateBrokenCatalogInputIsUndecidable(t *testing.T) {
+	mut := map[string]func(m *ModelSpec){
+		"weights=0":          func(m *ModelSpec) { m.WeightsBytes = 0 },
+		"kv=0":               func(m *ModelSpec) { m.KVBytesPerToken = 0 },
+		"overhead=0":         func(m *ModelSpec) { m.RuntimeOverheadBytes = 0 },
+		"valid_tp 空":         func(m *ModelSpec) { m.ValidTP = nil },
+		"valid_tp=0":         func(m *ModelSpec) { m.ValidTP = []int{0} },
+		"max_model_len<Lmin": func(m *ModelSpec) { m.MaxModelLen = 1024 },
 	}
-	for i, f := range mut {
-		m := spec32B()
-		f(&m)
-		if _, err := Evaluate(healthyInput(m, 1, 80)); err == nil {
-			t.Errorf("用例 %d 应报错", i)
+	for name, f := range mut {
+		t.Run(name, func(t *testing.T) {
+			m := spec32B()
+			f(&m)
+			r := mustEval(t, healthyInput(m, 1, 80))
+			assertUndecidable(t, r)
+		})
+	}
+}
+
+func assertUndecidable(t *testing.T, r Result) {
+	t.Helper()
+	m1 := checkByID(t, r, "M1")
+	if r.Feasible || len(r.Plans) != 0 || m1.OK || m1.Level != LevelError || !strings.Contains(m1.Message, "无法判定") {
+		t.Fatalf("应判为不可行且 M1 写明无法判定: feasible=%v plans=%v M1=%+v", r.Feasible, r.Plans, m1)
+	}
+}
+
+// 溢出回归: 修复前 kv=2^62 使 100×K 回绕为 0 触发除零 panic; weights≈1.8e17 回绕后 184 PB 模型被判"单卡 80GB 可行"。
+func TestEvaluateOverflowInputs(t *testing.T) {
+	const maxI = math.MaxInt64
+	cases := []struct {
+		name string
+		mut  func(in *Input)
+	}{
+		{"kv=2^62 (曾除零 panic)", func(in *Input) { in.Model.KVBytesPerToken = 1 << 62 }},
+		{"kv=2^62 且 KV 跨 TP 复制", func(in *Input) {
+			in.Model.KVBytesPerToken, in.Model.KVReplicatedAcrossTP = 1<<62, true
+		}},
+		{"kv 刚超上限", func(in *Input) { in.Model.KVBytesPerToken = MaxKVBytesPerToken + 1 }},
+		{"kv=MaxInt64", func(in *Input) { in.Model.KVBytesPerToken = maxI }},
+		{"weights≈1.8e17 (184 PB, 曾误判可行)", func(in *Input) { in.Model.WeightsBytes = 184467440737095516 }},
+		{"weights 刚超 4 TiB", func(in *Input) { in.Model.WeightsBytes = MaxWeightsBytes + 1 }},
+		{"weights=MaxInt64", func(in *Input) { in.Model.WeightsBytes = maxI }},
+		{"weights 为负", func(in *Input) { in.Model.WeightsBytes = -1 }},
+		{"overhead=2^61", func(in *Input) { in.Model.RuntimeOverheadBytes = 1 << 61 }},
+		{"overhead 刚超 256 GiB", func(in *Input) { in.Model.RuntimeOverheadBytes = MaxRuntimeOverheadBytes + 1 }},
+		{"max_model_len 超上限", func(in *Input) { in.Model.MaxModelLen = MaxModelLenLimit + 1 }},
+		{"valid_tp 超 64", func(in *Input) { in.Model.ValidTP = []int{1, 1 << 40} }},
+		{"valid_tp 为负", func(in *Input) { in.Model.ValidTP = []int{-8} }},
+		{"卡显存=2^62", func(in *Input) {
+			for i := range in.Cards {
+				in.Cards[i].VRAMTotalBytes = 1 << 62
+			}
+		}},
+		{"卡显存=MaxInt64", func(in *Input) {
+			for i := range in.Cards {
+				in.Cards[i].VRAMTotalBytes = maxI
+			}
+		}},
+		{"卡显存为负", func(in *Input) { in.Cards[0].VRAMTotalBytes = -80 * gib64 }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := healthyInput(spec32B(), 8, 80)
+			c.mut(&in)
+			r, err := Evaluate(in)
+			if err != nil {
+				t.Fatalf("越界输入不应返回 error: %v", err)
+			}
+			assertUndecidable(t, r)
+		})
+	}
+}
+
+// 恰在上限上的目录参数照常计算, 不被误判为"无法判定"。
+func TestEvaluateAtBoundsStillComputes(t *testing.T) {
+	m := spec32B()
+	m.WeightsBytes, m.ValidTP = MaxWeightsBytes, []int{8, 64}
+	m.KVBytesPerToken, m.RuntimeOverheadBytes, m.MaxModelLen = MaxKVBytesPerToken, MaxRuntimeOverheadBytes, MaxModelLenLimit
+	in := healthyInput(m, 64, 1024) // 64 张 1 TiB 卡: 单卡显存恰在上限
+	r := mustEval(t, in)
+	if c := checkByID(t, r, "M1"); strings.Contains(c.Message, "无法判定") || len(r.Memory) != 2 {
+		t.Fatalf("上限值应正常计算: %+v %+v", c, r.Memory)
+	}
+	// tp=8: Bnum = 1TiB×90×8 − 100×4TiB − 100×256GiB×8 > 0; T = Bnum/(100×64MiB)
+	ev := r.Memory[0]
+	wantNum := int64(1<<40)*90*8 - 100*MaxWeightsBytes - 100*MaxRuntimeOverheadBytes*8
+	if ev.TP != 8 || ev.KVCapacityTokens != wantNum/(100*MaxKVBytesPerToken) || ev.KVBudgetBytesPerCard != wantNum/800 {
+		t.Fatalf("tp=8 计算错误: %+v", ev)
+	}
+}
+
+// 租约侧的越界数值(显存占用、缓存容量)不 panic, 对应检查判为不通过。
+func TestEvaluateLeaseDataOverflow(t *testing.T) {
+	const maxI = math.MaxInt64
+	cases := []struct {
+		name  string
+		check string
+		mut   func(in *Input)
+	}{
+		{"显存占用=MaxInt64", "F3", func(in *Input) { in.Cards[0].VRAMUsedBytes = maxI }},
+		{"显存占用为负", "F3", func(in *Input) { in.Cards[0].VRAMUsedBytes = -1 }},
+		{"显存占用超过总量", "F3", func(in *Input) { in.Cards[0].VRAMUsedBytes = 81 * gib64 }},
+		{"缓存容量相加溢出", "F4", func(in *Input) {
+			in.ModelCached, in.CacheFreeBytes, in.CacheEvictableBytes = false, maxI, maxI
+		}},
+		{"缓存容量×10 溢出", "F4", func(in *Input) { in.ModelCached, in.CacheFreeBytes = false, maxI/2 }},
+		{"缓存容量为负", "F4", func(in *Input) { in.ModelCached, in.CacheFreeBytes, in.CacheEvictableBytes = false, -1, 200*gib64 }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			in := healthyInput(spec32B(), 2, 80)
+			c.mut(&in)
+			r := mustEval(t, in)
+			if ch := checkByID(t, r, c.check); r.Feasible || ch.OK || ch.Level != LevelError {
+				t.Fatalf("%s 应不通过: %+v", c.check, ch)
+			}
+		})
+	}
+}
+
+// 极值组合扫描: 任何输入都不 panic, 且越界组合不会被判为可行。
+func TestEvaluateNeverPanics(t *testing.T) {
+	vals := []int64{math.MinInt64, -1, 0, 1, 1 << 30, 1 << 40, 1 << 62, math.MaxInt64}
+	for _, w := range vals {
+		for _, k := range vals {
+			for _, o := range vals {
+				for _, v := range vals {
+					for _, rep := range []bool{false, true} {
+						m := spec32B()
+						m.WeightsBytes, m.KVBytesPerToken, m.RuntimeOverheadBytes, m.KVReplicatedAcrossTP = w, k, o, rep
+						in := healthyInput(m, 8, 80)
+						for i := range in.Cards {
+							in.Cards[i].VRAMTotalBytes = v
+						}
+						func() {
+							defer func() {
+								if p := recover(); p != nil {
+									t.Fatalf("panic w=%d k=%d o=%d v=%d rep=%v: %v", w, k, o, v, rep, p)
+								}
+							}()
+							r := mustEval(t, in)
+							inRange := w > 0 && w <= MaxWeightsBytes && k > 0 && k <= MaxKVBytesPerToken &&
+								o > 0 && o <= MaxRuntimeOverheadBytes && v > 0 && v <= MaxCardVRAMBytes
+							if r.Feasible && !inRange {
+								t.Fatalf("越界输入被判可行 w=%d k=%d o=%d v=%d", w, k, o, v)
+							}
+						}()
+					}
+				}
+			}
 		}
+	}
+}
+
+func TestCheckedArithmetic(t *testing.T) {
+	const maxI, minI = math.MaxInt64, math.MinInt64
+	add := []struct {
+		a, b int64
+		ok   bool
+	}{{1, 2, true}, {maxI, 1, false}, {minI, -1, false}, {maxI, minI, true}, {maxI - 1, 1, true}}
+	for _, c := range add {
+		if r, ok := addInt64(c.a, c.b); ok != c.ok || (ok && r != c.a+c.b) {
+			t.Errorf("addInt64(%d,%d)=%d,%v", c.a, c.b, r, ok)
+		}
+	}
+	sub := []struct {
+		a, b int64
+		ok   bool
+	}{{1, 2, true}, {minI, 1, false}, {maxI, -1, false}, {0, minI, false}, {-1, minI, true}}
+	for _, c := range sub {
+		if r, ok := subInt64(c.a, c.b); ok != c.ok || (ok && r != c.a-c.b) {
+			t.Errorf("subInt64(%d,%d)=%d,%v", c.a, c.b, r, ok)
+		}
+	}
+	mul := []struct {
+		a, b int64
+		ok   bool
+	}{{0, maxI, true}, {3, 4, true}, {100, 1 << 62, false}, {1 << 32, 1 << 31, false}, {1 << 31, 1 << 31, true},
+		{-1, minI, false}, {minI, -1, false}, {-1, maxI, true}, {maxI, 2, false}}
+	for _, c := range mul {
+		if r, ok := mulInt64(c.a, c.b); ok != c.ok || (ok && r != c.a*c.b) {
+			t.Errorf("mulInt64(%d,%d)=%d,%v", c.a, c.b, r, ok)
+		}
+	}
+	if _, ok := mulAll(100, 1<<40, 90, 64); !ok {
+		t.Error("mulAll 安全范围内不应报溢出")
+	}
+	if _, ok := mulAll(100, 1<<62); ok {
+		t.Error("mulAll 应检测溢出")
 	}
 }
 

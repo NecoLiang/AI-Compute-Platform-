@@ -22,6 +22,19 @@ var (
 	promNamePattern    = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]{0,127}$`)
 )
 
+// 目录数值上限(docs/27 §27.2 S5 实现口径)。超出即 40001。
+// 上限远高于现实模型(最大的开源权重约 1.5 TiB、单 token KV 数 MiB), 作用是把可行性判定里的
+// 乘法(V×u×tp、100×W、100×O×tp、100×tp×K)约束在 int64 安全范围内, 杜绝溢出回绕后误判"可行"。
+const (
+	MaxWeightsBytes         int64 = 4 << 40   // 4 TiB
+	MaxManifestFileBytes    int64 = 1 << 40   // 单文件 1 TiB
+	MaxManifestFiles              = 10000     // 清单文件数
+	MaxKVBytesPerToken      int64 = 64 << 20  // 64 MiB/token
+	MaxRuntimeOverheadBytes int64 = 256 << 30 // 256 GiB/卡
+	MaxModelLenLimit              = 1 << 24   // 16,777,216 tokens
+	MaxTP                         = 64
+)
+
 // 量化方式白名单。新增量化方式需同步核对可行性判定口径, 不接受自由文本。
 var validQuant = map[string]bool{
 	"bf16": true, "fp16": true, "fp8": true, "int8": true,
@@ -59,7 +72,7 @@ func ParseValidTP(s string) ([]int, error) {
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		n, err := strconv.Atoi(p)
-		if err != nil || n < 1 || n > 64 {
+		if err != nil || n < 1 || n > MaxTP {
 			return nil, fmt.Errorf("valid_tp 须为 1–64 的整数列表, 如 1,2,4,8")
 		}
 		if seen[n] {
@@ -145,8 +158,11 @@ func normalizeEntry(e *ModelEntry) error {
 	if err != nil {
 		return err
 	}
-	if e.WeightsBytes <= 0 || e.WeightsBytes > manifestTotal {
-		return fmt.Errorf("weights_bytes 须为正数且不超过清单文件总大小 %d", manifestTotal)
+	if e.WeightsBytes <= 0 || e.WeightsBytes > MaxWeightsBytes {
+		return fmt.Errorf("weights_bytes 须在 1–%d(4 TiB)之间", MaxWeightsBytes)
+	}
+	if e.WeightsBytes > manifestTotal {
+		return fmt.Errorf("weights_bytes 不得超过清单文件总大小 %d", manifestTotal)
 	}
 	if !validQuant[e.Quant] {
 		return fmt.Errorf("quant 须为 bf16/fp16/fp8/int8/int4_awq/int4_gptq/mxfp4/nvfp4 之一")
@@ -163,11 +179,11 @@ func normalizeEntry(e *ModelEntry) error {
 	if len(e.ValidTP) > 32 {
 		return fmt.Errorf("valid_tp 过长")
 	}
-	if e.KVBytesPerToken <= 0 {
-		return fmt.Errorf("kv_bytes_per_token 须为正数")
+	if e.KVBytesPerToken <= 0 || e.KVBytesPerToken > MaxKVBytesPerToken {
+		return fmt.Errorf("kv_bytes_per_token 须在 1–%d(64 MiB)之间", MaxKVBytesPerToken)
 	}
-	if e.RuntimeOverheadBytes <= 0 {
-		return fmt.Errorf("runtime_overhead_bytes 须为正数(取真机实测值)")
+	if e.RuntimeOverheadBytes <= 0 || e.RuntimeOverheadBytes > MaxRuntimeOverheadBytes {
+		return fmt.Errorf("runtime_overhead_bytes 须在 1–%d(256 GiB)之间, 取真机实测值", MaxRuntimeOverheadBytes)
 	}
 	if e.MinContextTokens == 0 {
 		e.MinContextTokens = 8192
@@ -176,8 +192,8 @@ func normalizeEntry(e *ModelEntry) error {
 	if e.MinContextTokens < 1024 || e.MinContextTokens%1024 != 0 {
 		return fmt.Errorf("min_context_tokens 须为 1024 的正整数倍")
 	}
-	if e.MaxModelLen < e.MinContextTokens {
-		return fmt.Errorf("max_model_len 不得小于 min_context_tokens")
+	if e.MaxModelLen < e.MinContextTokens || e.MaxModelLen > MaxModelLenLimit {
+		return fmt.Errorf("max_model_len 须在 min_context_tokens–%d 之间", MaxModelLenLimit)
 	}
 	if e.Engine == "" {
 		e.Engine = "vllm"
@@ -225,6 +241,9 @@ func validateManifest(raw json.RawMessage) (int64, error) {
 	if len(raw) == 0 || dec.Decode(&files) != nil || len(files) == 0 {
 		return 0, fmt.Errorf("manifest 须为非空数组 [{path,size,sha256}]")
 	}
+	if len(files) > MaxManifestFiles {
+		return 0, fmt.Errorf("manifest 文件数不得超过 %d", MaxManifestFiles)
+	}
 	seen := map[string]bool{}
 	var total int64
 	for _, f := range files {
@@ -235,13 +254,16 @@ func validateManifest(raw json.RawMessage) (int64, error) {
 			return 0, fmt.Errorf("manifest 路径重复: %s", f.Path)
 		}
 		seen[f.Path] = true
-		if f.Size <= 0 {
-			return 0, fmt.Errorf("manifest 文件 %s 的 size 须为正数", f.Path)
+		if f.Size <= 0 || f.Size > MaxManifestFileBytes {
+			return 0, fmt.Errorf("manifest 文件 %s 的 size 须在 1–%d(1 TiB)之间", f.Path, MaxManifestFileBytes)
 		}
 		if !sha256Pattern.MatchString(f.SHA256) {
 			return 0, fmt.Errorf("manifest 文件 %s 的 sha256 须为 64 位小写十六进制", f.Path)
 		}
-		total += f.Size
+		var okSum bool
+		if total, okSum = addInt64(total, f.Size); !okSum {
+			return 0, fmt.Errorf("manifest 文件总大小溢出")
+		}
 	}
 	return total, nil
 }

@@ -101,6 +101,61 @@ func TestNormalizeEntryRejects(t *testing.T) {
 	}
 }
 
+// manifestOf n 个文件, 每个 size 字节。
+func manifestOf(n int, size int64) json.RawMessage {
+	var b strings.Builder
+	b.WriteString("[")
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"path":"model-` + strconv.Itoa(i) + `.safetensors","size":` + itoa(size) + `,"sha256":"` + testSHA + `"}`)
+	}
+	b.WriteString("]")
+	return json.RawMessage(b.String())
+}
+
+// 数值上限(防止可行性判定溢出): 恰在上限通过, 超出 1 即 40001。
+func TestNormalizeEntryNumericBounds(t *testing.T) {
+	const tib = int64(1) << 40
+	cases := []struct {
+		name string
+		mut  func(e *ModelEntry)
+		ok   bool
+	}{
+		{"weights=4TiB(上限)", func(e *ModelEntry) { e.Manifest, e.WeightsBytes = manifestOf(4, tib), MaxWeightsBytes }, true},
+		{"weights=4TiB+1", func(e *ModelEntry) { e.Manifest, e.WeightsBytes = manifestOf(5, tib), MaxWeightsBytes+1 }, false},
+		{"weights≈1.8e17", func(e *ModelEntry) { e.Manifest, e.WeightsBytes = manifestOf(5, tib), 184467440737095516 }, false},
+		{"weights 为负", func(e *ModelEntry) { e.WeightsBytes = -1 }, false},
+		{"清单单文件=1TiB(上限)", func(e *ModelEntry) { e.Manifest = manifestOf(1, tib) }, true},
+		{"清单单文件=1TiB+1", func(e *ModelEntry) { e.Manifest = manifestOf(1, tib+1) }, false},
+		{"清单单文件=MaxInt64", func(e *ModelEntry) {
+			e.Manifest = json.RawMessage(`[{"path":"a","size":9223372036854775807,"sha256":"` + testSHA + `"}]`)
+		}, false},
+		{"清单文件数=上限", func(e *ModelEntry) { e.Manifest = manifestOf(MaxManifestFiles, 1<<30) }, true},
+		{"清单文件数超上限", func(e *ModelEntry) { e.Manifest = manifestOf(MaxManifestFiles+1, 1<<30) }, false},
+		{"kv=64MiB(上限)", func(e *ModelEntry) { e.KVBytesPerToken = MaxKVBytesPerToken }, true},
+		{"kv=64MiB+1", func(e *ModelEntry) { e.KVBytesPerToken = MaxKVBytesPerToken + 1 }, false},
+		{"kv=2^62", func(e *ModelEntry) { e.KVBytesPerToken = 1 << 62 }, false},
+		{"overhead=256GiB(上限)", func(e *ModelEntry) { e.RuntimeOverheadBytes = MaxRuntimeOverheadBytes }, true},
+		{"overhead=256GiB+1", func(e *ModelEntry) { e.RuntimeOverheadBytes = MaxRuntimeOverheadBytes + 1 }, false},
+		{"overhead 为负", func(e *ModelEntry) { e.RuntimeOverheadBytes = -1 }, false},
+		{"max_model_len=上限", func(e *ModelEntry) { e.MaxModelLen = MaxModelLenLimit }, true},
+		{"max_model_len 超上限", func(e *ModelEntry) { e.MaxModelLen = MaxModelLenLimit + 1 }, false},
+		{"valid_tp 超 64", func(e *ModelEntry) { e.ValidTP = "1,128" }, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := validEntry()
+			c.mut(e)
+			err := normalizeEntry(e)
+			if (err == nil) != c.ok {
+				t.Fatalf("ok=%v 期望 %v: %v", err == nil, c.ok, err)
+			}
+		})
+	}
+}
+
 func TestValidateVerification(t *testing.T) {
 	entry := validEntry()
 	if err := normalizeEntry(entry); err != nil {

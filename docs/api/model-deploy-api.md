@@ -81,15 +81,15 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
 | source | 缺省 `modelscope`，目前只支持 `modelscope` |
 | repo | `组织/模型` |
 | revision | **完整**提交号：40 或 64 位小写十六进制；不接受分支名、标签、短哈希 |
-| manifest | 非空数组 `[{path,size,sha256}]`，不允许其他字段；path 为相对路径，不得以 `/` 开头、不得含 `..`/`\`/空段，不重复；size>0；sha256 为 64 位小写十六进制 |
-| weights_bytes | >0 且 ≤ manifest 文件总大小 |
+| manifest | 非空数组 `[{path,size,sha256}]`，≤10000 个文件，不允许其他字段；path 为相对路径，不得以 `/` 开头、不得含 `..`/`\`/空段，不重复；单文件 size 1 – 1 TiB（2^40）；sha256 为 64 位小写十六进制；总大小按溢出检测累加 |
+| weights_bytes | 1 – 4 TiB（2^42），且 ≤ manifest 文件总大小 |
 | quant | `bf16`/`fp16`/`fp8`/`int8`/`int4_awq`/`int4_gptq`/`mxfp4`/`nvfp4` |
 | min_compute_capability | `主.次`，如 `8.0`/`8.9`/`9.0` |
 | valid_tp | 1–64 的整数列表，不重复；存储时规范为升序（`"8,1,2,4"` → `"1,2,4,8"`） |
-| kv_bytes_per_token | >0 |
-| runtime_overhead_bytes | >0，取真机实测值 |
+| kv_bytes_per_token | 1 – 64 MiB（2^26） |
+| runtime_overhead_bytes | 1 – 256 GiB（2^38），取真机实测值 |
 | min_context_tokens | 缺省 8192；须为 1024 的正整数倍 |
-| max_model_len | ≥ min_context_tokens |
+| max_model_len | min_context_tokens – 16777216（2^24） |
 | engine | 缺省 `vllm`，目前只支持 `vllm` |
 | engine_image | 须以 `@sha256:<64hex>` 结尾（按 digest 固定，禁止 `:latest`） |
 | min_driver_version | 点分数字，最多 3 段 |
@@ -216,7 +216,10 @@ dp = floor(k/tp)；建议上下文 = min(max_model_len, floor(T/1024)×1024)
 context_tight：建议上下文 < 2×min_context_tokens
 ```
 
-全部用 int64 整数精确计算（不经浮点），同一输入任何机器结果一致。**推荐**：用卡最多者；同等用卡下上下文不紧张者优先；再取 tp 最小者。
+全部用 int64 整数精确计算（不经浮点），同一输入任何机器结果一致；每一步乘减都做溢出检测，任何输入都不会 panic。
+目录参数超出上述校验范围（库中可能存有校验收紧前写入的旧行）时不做显存计算，`feasible=false`、`plans=[]`、`memory=[]`，
+M1 为 `error`：“目录条目 … 参数超出合理范围(…), 无法判定”。租约侧单卡显存 ≤0 或 >1 TiB 时 M1 同样判“无法判定”；
+显存占用为负或超过总量的卡 F3 不通过；缓存容量为负或数值溢出时 F4 判“无法判定”。**推荐**：用卡最多者；同等用卡下上下文不紧张者优先；再取 tp 最小者。
 
 **检查项**
 
