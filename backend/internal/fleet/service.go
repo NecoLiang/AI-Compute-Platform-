@@ -239,6 +239,10 @@ func (s *Service) RegisterManagedNode(supplierID int64, req scheduler.ManagedNod
 	if p.DeliveryMode == "container" && req.DiskPerCardGB == 0 {
 		return nil, errcode.New(errcode.ParamInvalid, "分卡容器交付须填写每卡数据盘 disk_per_card_gb(GB)")
 	}
+	expected, err := parseExpectedFingerprint(req.ExpectedHostFingerprint)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.requireCredKey(); err != nil {
 		return nil, err
 	}
@@ -261,7 +265,21 @@ func (s *Service) RegisterManagedNode(supplierID int64, req scheduler.ManagedNod
 		if err != nil {
 			return wrapKeyErr(err)
 		}
-		return s.repo.setNodeKey(tx, id, pub, enc)
+		if err := s.repo.setNodeKey(tx, id, pub, enc); err != nil {
+			return err
+		}
+		if expected == "" {
+			return nil
+		}
+		// 预置指纹: 首次连接(引导或探活)即按它校验, 不一致在握手阶段中止, 不发送任何凭证。
+		if ok, err := s.repo.preconfirmHostKey(tx, id, expected); err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("节点 %d 预置主机指纹未写入", id)
+			}
+			return err
+		}
+		return s.repo.audit(tx, supplierID, "node.host_key_preconfirmed", "supplier_node", id,
+			nil, map[string]any{"fingerprint": expected, "source": "node_create"}, "")
 	})
 	if err != nil {
 		return nil, err

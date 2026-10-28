@@ -44,7 +44,8 @@
 curl -X POST http://localhost:8080/api/v1/supplier/nodes \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"product_id":12,"node_name":"bj-h100-01","total_cards":8,"mgmt_mode":"ssh",
-       "disk_per_card_gb":200,"lease_port_start":40000,"lease_port_end":40099}'
+       "disk_per_card_gb":200,"lease_port_start":40000,"lease_port_end":40099,
+       "expected_host_fingerprint":"SHA256:Hq3w5kQe0Q8m1c2vFq9yZ7x5pW1n8uT4rL6sK2jD0aE"}'
 ```
 
 | 字段 | 必填 | 说明 |
@@ -55,6 +56,9 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 | `mgmt_mode` | 是 | `"ssh"`；缺省/`"push"` 走原心跳节点逻辑（托管商品拒绝 push 节点 40001） |
 | `disk_per_card_gb` | 分卡容器商品必填 | 每卡数据盘 GB，探活 P8 核对 |
 | `lease_port_start/end` | 否 | 默认 40000–40099；须在 1024–65535、跨度 ≤ 1000、端口数 ≥ 卡数+1（含探活自检端口） |
+| `expected_host_fingerprint` | 否（**推荐**） | 在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 输出的第二列，格式 `SHA256:` + 43 位 base64（无 `=`），首尾空白忽略，其余格式 40001。提交即钉死为已确认指纹（审计 `node.host_key_preconfirmed`）：平台首次连接（含一次性密码引导）就在握手阶段比对，不一致即中止、**不发送任何凭证**；一致则首次探活无需再确认指纹 |
+
+> **推荐上架方式**：手动把 `authorized_keys_line` 加入管理账户 + 提交 `expected_host_fingerprint`。平台全程不接触密码，首次连接即校验主机身份。不提供预期指纹时为 TOFU：平台先连接、记录观测指纹，再由供给方确认；此时若使用 `bootstrap_password`，密码会在指纹确认**之前**发给首次握手到的主机。
 
 **响应**：`{"code":0,"data":{"node":{Node}}}`。平台为该节点生成专属 ed25519 管理密钥（私钥 AES-256-GCM 加密入库），不返回 `node_key`。
 **错误**：40001 参数 / 商品非托管；40400 商品不存在或非本人；40900 同名；50000 `security.credential_key` 未配置。
@@ -91,15 +95,17 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 
 ```
 curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"host":"203.0.113.10","port":22,"user":"root","bootstrap_password":"<仅本次使用>"}'
+  -d '{"host":"203.0.113.10","port":22,"user":"root",
+       "expected_host_fingerprint":"SHA256:Hq3w5kQe0Q8m1c2vFq9yZ7x5pW1n8uT4rL6sK2jD0aE"}'
 ```
 
-- 保存后节点回到 `unverified`，作废排队中与进行中的探活任务（进行中的探活结论按节点代次作废，不会改动节点状态）；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。`verified` 节点修改后立即退出可售。
+- 保存后节点回到 `unverified`，作废排队中与进行中的探活任务（进行中的探活结论按节点代次作废，不会改动节点状态）；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。**首次**填写连接信息（此前无 host）不算变化，建节点时提交的 `expected_host_fingerprint` 保留。`verified` 节点修改后立即退出可售。
 - `host`：节点的**公网** IP 或域名。平台按目标地址拒绝名单校验（回环、RFC1918、CGNAT `100.64.0.0/10`（含云元数据 `100.100.100.200`）、链路本地（含 `169.254.169.254`）、ULA `fc00::/7`、组播、保留/文档段，以及运营配置的 `fleet.deny_cidrs`）：IP 直接判断，域名在提交时解析，任一解析结果命中即拒绝 → 40001「host 不允许: 须为节点的公网地址…」；域名无法解析 → 40001「host 无法解析…」；`localhost` 40001。拒绝提示不回显解析出的地址。之后每次连接还会在拨号时按实际地址再校验一次（防 DNS rebinding）。`user`：小写字母数字下划线短横线，≤32 位。
-- `bootstrap_password`（可选）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。若该主机已有钉死指纹且不一致，返回 40900 并转 `key_mismatch`。
+- `expected_host_fingerprint`（可选，**推荐**）：格式同 POST /supplier/nodes，非法 40001（连接信息不保存）。提交即覆盖当前指纹并钉死为已确认（审计 `node.host_key_preconfirmed`，旧值记入 `before`）。
+- `bootstrap_password`（可选；建议与 `expected_host_fingerprint` 同时提供，或改用手动加公钥）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。存在钉死指纹（已确认或本次/建节点时提交的预期指纹）时，引导在 SSH 握手的主机密钥校验阶段比对，不一致即中止——**密码不会发出**——返回 40900「主机指纹 <实际> 与已确认/预期指纹 <钉死> 不一致: 握手阶段已中止, 一次性密码未发送…」，节点转 `key_mismatch` 并记录实际观测指纹（可经 host-key/confirm 确认，或改正连接信息/预期指纹后重试）。
 - `suspended` 节点 40900。
 
-**响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。引导成功时 `host_key.fingerprint` 为本次观测到的指纹（未确认）。
+**响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。无钉死指纹时引导成功后 `host_key.fingerprint` 为本次观测到的指纹（未确认）；有预期/已确认指纹时为该指纹且 `confirmed:true`。
 
 ## POST /supplier/nodes/:id/verify · 发起完整探活 ✅
 
@@ -107,7 +113,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 完整探活若因平台侧原因无法完成（平台配置缺失、重试耗尽等），节点 `verifying → failed` 并收到站内信「节点探活未能完成」，可再次发起。
 **错误**：40001 未填 SSH 信息；40900 `suspended` / `key_mismatch`（先确认新指纹）/ `needs_reimage`（先重装确认）。
 
-首次连接（指纹未确认）时探活只执行 P1–P3：记录观测指纹，写一份 `fail` 报告（P2 详情给出指纹与核对命令），节点回 `unverified`，站内信「请确认节点主机指纹」；**不执行任何 nvidia-smi / docker 命令**。
+首次连接（指纹未确认，即未提交 `expected_host_fingerprint` 也未经 host-key/confirm）时探活只执行 P1–P3：记录观测指纹，写一份 `fail` 报告（P2 详情给出指纹与核对命令），节点回 `unverified`，站内信「请确认节点主机指纹」；**不执行任何 nvidia-smi / docker 命令**。
 
 ## POST /supplier/nodes/:id/host-key/confirm · 确认主机指纹 ✅
 

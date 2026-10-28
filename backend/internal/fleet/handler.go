@@ -83,13 +83,16 @@ func (h *Handler) UpdateSSH(c *gin.Context) {
 		Port              int    `json:"port" binding:"required"`
 		User              string `json:"user" binding:"required"`
 		BootstrapPassword string `json:"bootstrap_password"`
+		// 推荐填写: 机器上 ssh-keygen -lf 得到的指纹, 首次连接即校验(不一致不发送密码)。
+		ExpectedHostFingerprint string `json:"expected_host_fingerprint"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, "host / port / user 必填")
 		return
 	}
 	res, err := h.svc.UpdateSSH(c.Request.Context(), c.GetInt64("user_id"), id,
-		SSHInput{Host: req.Host, Port: req.Port, User: req.User, BootstrapPassword: req.BootstrapPassword}, c.ClientIP())
+		SSHInput{Host: req.Host, Port: req.Port, User: req.User, BootstrapPassword: req.BootstrapPassword,
+			ExpectedHostFingerprint: req.ExpectedHostFingerprint}, c.ClientIP())
 	req.BootstrapPassword = ""
 	if err != nil {
 		fail(c, err)

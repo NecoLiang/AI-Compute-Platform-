@@ -112,6 +112,15 @@ func (r *Repository) recordObservedFingerprint(q sqlx.Execer, id int64, gen int,
 	return err
 }
 
+// preconfirmHostKey 供给方提交的预期指纹(expected_host_fingerprint)直接钉死: 之后的首次连接按它校验, 不走 TOFU。
+// 调用方须在同一事务内已锁住/刚写入节点行, 并已把代次 +1(改连接信息)或节点尚未有任何探活(新建)。
+func (r *Repository) preconfirmHostKey(tx *sqlx.Tx, id int64, fp string) (bool, error) {
+	const where = `id=? AND mgmt_mode='ssh' AND verify_status<>'suspended'`
+	res, err := tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=?, host_key_confirmed_at=NOW(), host_fp_claim=NULL
+		WHERE `+where, fp, id)
+	return affectedOrMatched(tx, res, err, where+` AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL`, id, fp)
+}
+
 // confirmHostKey 钉死指纹并把代次 +1: 指纹确认前已在跑的(TOFU)探活结论作废, 由随后入队的完整探活接手。
 func (r *Repository) confirmHostKey(tx *sqlx.Tx, id int64, fp string) (bool, error) {
 	return affected(tx.Exec(`UPDATE supplier_nodes SET host_key_confirmed_at=NOW(), generation=generation+1

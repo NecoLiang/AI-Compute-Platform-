@@ -22,7 +22,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 
 **响应**：`{"code":0,"data":{"node":{...},"node_key":"nk-a1b2...","notice":"node_key 仅本次展示..."}}`
 
-- 请求体可带 `mgmt_mode`：缺省或 `"push"` 为上面的心跳节点；`"ssh"` 为托管节点（额外字段 `disk_per_card_gb`、`lease_port_start`、`lease_port_end`），响应只有 `{"node":{...}}`、不含 `node_key`，详见 [managed-rental-api.md](managed-rental-api.md#post-suppliernodes--添加托管节点-)。
+- 请求体可带 `mgmt_mode`：缺省或 `"push"` 为上面的心跳节点；`"ssh"` 为托管节点（额外字段 `disk_per_card_gb`、`lease_port_start`、`lease_port_end`、`expected_host_fingerprint`），响应只有 `{"node":{...}}`、不含 `node_key`，详见 [managed-rental-api.md](managed-rental-api.md#post-suppliernodes--添加托管节点-)。
 - 托管商品（`fulfillment_mode=managed`）只能添加 ssh 节点，传 push 返回 40001；`fleet.enabled=false` 时传 `"ssh"` 返回 40001「托管履约未启用」。
 
 ## GET /supplier/nodes · 我的节点列表 ✅

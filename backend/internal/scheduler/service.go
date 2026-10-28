@@ -57,6 +57,9 @@ type ManagedNodeReq struct {
 	DiskPerCardGB  int
 	LeasePortStart int
 	LeasePortEnd   int
+	// ExpectedHostFingerprint 供给方在机器上执行 ssh-keygen -lf 得到的 SHA256 指纹(可选): 填写即预先钉死,
+	// 首次连接(含一次性密码引导)在握手阶段比对, 不一致则中止且不发送任何凭证。
+	ExpectedHostFingerprint string
 }
 
 // ManagedNodes 托管节点的生命周期由 fleet 负责, main 在 fleet.enabled=true 时注入。

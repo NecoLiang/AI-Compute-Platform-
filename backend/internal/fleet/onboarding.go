@@ -130,6 +130,8 @@ func firewallScripts(gwIPs []string, start, end int) (map[string]string, error) 
 }
 
 var (
+	// hostFPRe ssh-keygen -lf / ssh.FingerprintSHA256 的输出格式: SHA256: + 32 字节摘要的无填充 base64(43 位)。
+	hostFPRe  = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
 	sshUserRe = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	hostRe    = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$`)
 )
@@ -163,12 +165,27 @@ func validateSSHTarget(ctx context.Context, d *Dialer, host string, port int, us
 	return nil
 }
 
+// parseExpectedFingerprint 校验供给方填写的预期主机指纹; 空串表示未填写。
+func parseExpectedFingerprint(fp string) (string, error) {
+	fp = strings.TrimSpace(fp)
+	if fp == "" {
+		return "", nil
+	}
+	if !hostFPRe.MatchString(fp) {
+		return "", errcode.New(errcode.ParamInvalid,
+			"expected_host_fingerprint 格式错误: 须为 SHA256:xxxx(43 位), 即在机器上执行 "+fingerprintCheckCommand+" 输出的第二列")
+	}
+	return fp, nil
+}
+
 // SSHInput PUT /supplier/nodes/:id/ssh。BootstrapPassword 只在本次请求内存中使用一次。
+// ExpectedHostFingerprint 可选: 填写即把它钉死为已确认指纹, 引导/探活在握手阶段按它校验(推荐, 见 docs/25 §25.4.2)。
 type SSHInput struct {
-	Host              string
-	Port              int
-	User              string
-	BootstrapPassword string
+	Host                    string
+	Port                    int
+	User                    string
+	BootstrapPassword       string
+	ExpectedHostFingerprint string
 }
 
 // SSHUpdateResult PUT /ssh 返回。
@@ -178,15 +195,21 @@ type SSHUpdateResult struct {
 	HostKey   HostKeyState `json:"host_key"`
 }
 
-// UpdateSSH ⑤ 保存连接信息, 节点回到 unverified; host/port 变化时清除指纹钉死。
+// UpdateSSH ⑤ 保存连接信息, 节点回到 unverified; host/port 变化时清除指纹钉死(首次填写连接信息时保留创建节点时预置的指纹)。
+// 带 expected_host_fingerprint 时把它钉死为已确认指纹。
 // 带 bootstrap_password 时在保存后用它登录一次写入管理公钥, 然后丢弃; 登录失败直接返回错误, 不重试。
+// 存在已确认指纹时引导在握手阶段校验, 不一致即中止, 密码不会发出。
 func (s *Service) UpdateSSH(ctx context.Context, supplierID, nodeID int64, in SSHInput, ip string) (*SSHUpdateResult, error) {
 	in.Host, in.User = strings.TrimSpace(in.Host), strings.TrimSpace(in.User)
 	if err := validateSSHTarget(ctx, s.dialer, in.Host, in.Port, in.User); err != nil {
 		return nil, err
 	}
+	expected, err := parseExpectedFingerprint(in.ExpectedHostFingerprint)
+	if err != nil {
+		return nil, err
+	}
 	var pinned string
-	err := s.inTx(func(tx *sqlx.Tx) error {
+	err = s.inTx(func(tx *sqlx.Tx) error {
 		n, err := s.ownedNode(tx, supplierID, nodeID)
 		if err != nil {
 			return err
@@ -195,7 +218,8 @@ func (s *Service) UpdateSSH(ctx context.Context, supplierID, nodeID int64, in SS
 			return errcode.New(errcode.Conflict, "节点已被运营停用, 不能修改连接信息")
 		}
 		old := guardOf(n)
-		resetFP := old.Host != in.Host || old.Port != in.Port
+		// 首次填写连接信息(此前从未有 host)不算"换机器": 保留创建节点时预置的指纹。
+		resetFP := old.Host != "" && (old.Host != in.Host || old.Port != in.Port)
 		ok, err := s.repo.updateSSH(tx, nodeID, in.Host, in.Port, in.User, resetFP)
 		if err != nil {
 			return err
@@ -219,7 +243,25 @@ func (s *Service) UpdateSSH(ctx context.Context, supplierID, nodeID int64, in SS
 				return err
 			}
 		}
-		if !resetFP && n.hostKeyConfirmed() {
+		switch {
+		case expected != "":
+			ok, err := s.repo.preconfirmHostKey(tx, nodeID, expected)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errcode.New(errcode.Conflict, "节点状态已变化, 请刷新后重试")
+			}
+			var before map[string]any
+			if !resetFP && n.HostKeyFingerprint != nil {
+				before = map[string]any{"fingerprint": *n.HostKeyFingerprint, "confirmed": n.hostKeyConfirmed()}
+			}
+			if err := s.repo.audit(tx, supplierID, "node.host_key_preconfirmed", "supplier_node", nodeID,
+				before, map[string]any{"fingerprint": expected, "source": "ssh_update"}, ip); err != nil {
+				return err
+			}
+			pinned = expected
+		case !resetFP && n.hostKeyConfirmed():
 			pinned = *n.HostKeyFingerprint
 		}
 		if n.VerifyStatus == VerifyVerified {
@@ -302,7 +344,8 @@ func (s *Service) bootstrap(ctx context.Context, supplierID, nodeID int64, in SS
 	client, info, err := d.Connect(conn, in.User, auth, pinned)
 	if errors.Is(err, ErrHostKeyMismatch) {
 		s.handleKeyMismatch(nodeID, n.Generation, pinned, info.Fingerprint)
-		return errcode.New(errcode.Conflict, "主机指纹与已确认指纹不一致, 已停止调度; 若机器重装过系统, 请核对新指纹后确认")
+		return errcode.New(errcode.Conflict, fmt.Sprintf("主机指纹 %s 与已确认/预期指纹 %s 不一致: 握手阶段已中止, 一次性密码未发送。"+
+			"请在机器上执行 %s 核对; 若确为本机, 在节点页确认新指纹", info.Fingerprint, pinned, fingerprintCheckCommand))
 	}
 	if err != nil {
 		slog.Warn("一次性密码引导: SSH 握手/登录失败", "node_id", nodeID, "error", err)
