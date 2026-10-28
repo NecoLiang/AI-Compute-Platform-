@@ -64,11 +64,15 @@ type Product struct {
 	PriceNegotiable bool           `db:"price_negotiable" json:"price_negotiable"`
 	AvailableHours  string         `db:"available_hours" json:"available_hours"`
 	Stock           int            `db:"stock" json:"stock"`
-	MinOrder        int            `db:"min_order" json:"min_order"`
-	MinDuration     int            `db:"min_duration" json:"min_duration"`
-	Region          string         `db:"region" json:"region"`
-	Status          string         `db:"status" json:"status"`
-	RejectedReason  string         `db:"rejected_reason" json:"rejected_reason"`
+	// CardSplitOptionsRaw 托管分卡可选卡数, 库内格式 "1,2,4,8"; 读取请用 SplitOptions()(NULL 时取默认集合)。
+	CardSplitOptionsRaw *string `db:"card_split_options" json:"-"`
+	// MaxFreePerNode 托管商品派生值: 单机最多可一次租用的空闲卡数(fleet 重算库存时回写); 人工商品为 NULL。
+	MaxFreePerNode *int   `db:"max_free_per_node" json:"max_free_per_node"`
+	MinOrder       int    `db:"min_order" json:"min_order"`
+	MinDuration    int    `db:"min_duration" json:"min_duration"`
+	Region         string `db:"region" json:"region"`
+	Status         string `db:"status" json:"status"`
+	RejectedReason string `db:"rejected_reason" json:"rejected_reason"`
 	// Health 节点探活聚合的健康度(unknown/healthy/degraded/offline), 由 scheduler 模块维护。
 	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
 	Health       string `db:"health" json:"health"`
@@ -173,7 +177,7 @@ const productColumns = `id, supplier_id, product_type,
 	COALESCE(delivery_mode,'') AS delivery_mode, fulfillment_mode, availability, night_start_min, night_end_min,
 	pricing_mode, unit_price,
 	COALESCE(price_negotiable,0) AS price_negotiable, COALESCE(available_hours,'') AS available_hours,
-	stock, COALESCE(min_order,1) AS min_order, COALESCE(min_duration,1) AS min_duration,
+	stock, card_split_options, max_free_per_node, COALESCE(min_order,1) AS min_order, COALESCE(min_duration,1) AS min_duration,
 	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, rejected_reason, created_at, updated_at`
 
@@ -492,13 +496,13 @@ func (r *Repository) CreateProduct(p *Product, version string) (int64, error) {
 		`INSERT INTO products (supplier_id, product_type, gpu_model, card_count, machine_count, total_pflops_approx,
 		power_capacity_kw, rack_count, cpu_spec, memory_spec, storage_spec, bandwidth_spec,
 		delivery_mode, fulfillment_mode, availability, night_start_min, night_end_min,
-		pricing_mode, unit_price, price_negotiable, available_hours, stock, min_order, min_duration,
+		pricing_mode, unit_price, price_negotiable, available_hours, stock, card_split_options, min_order, min_duration,
 		region, status, compliance_agreed)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.SupplierID, p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
 		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
 		nullString(p.DeliveryMode), fulfillmentOrManual(p.FulfillmentMode), p.Availability, p.NightStartMin, p.NightEndMin,
-		p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock,
+		p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock, p.CardSplitOptionsRaw,
 		p.MinOrder, p.MinDuration, p.Region, initialProductStatus(p.FulfillmentMode), p.ComplianceAgreed,
 	)
 	if err != nil {
@@ -564,14 +568,14 @@ func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error
 		machine_count=?, total_pflops_approx=?, power_capacity_kw=?, rack_count=?, cpu_spec=?,
 		memory_spec=?, storage_spec=?, bandwidth_spec=?, delivery_mode=?, fulfillment_mode=?, availability=?,
 		night_start_min=?, night_end_min=?, pricing_mode=?, unit_price=?,
-		price_negotiable=?, available_hours=?, stock=?, min_order=?, min_duration=?, region=?,
+		price_negotiable=?, available_hours=?, stock=?, card_split_options=?, min_order=?, min_duration=?, region=?,
 		compliance_agreed=?, status='pending', rejected_reason=''
 		WHERE id=? AND supplier_id=? AND status IN ('draft','offline')`,
 		p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
 		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
 		nullString(p.DeliveryMode), p.FulfillmentMode, p.Availability, p.NightStartMin, p.NightEndMin,
 		p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours,
-		p.Stock, p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed, id, p.SupplierID)
+		p.Stock, p.CardSplitOptionsRaw, p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed, id, p.SupplierID)
 	if err != nil {
 		return err
 	}

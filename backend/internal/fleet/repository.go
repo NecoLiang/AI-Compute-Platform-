@@ -387,13 +387,43 @@ func (r *Repository) deleteIdleSlots(tx *sqlx.Tx, nodeID int64) error {
 	return err
 }
 
-// freeSlotCount 托管商品派生库存(docs/26 §26.5.4): verified+可调度+在线节点上的空闲卡。
-func (r *Repository) freeSlotCount(q sqlx.Queryer, productID int64) (int, error) {
-	var n int
-	err := sqlx.Get(q, &n, `SELECT COUNT(*) FROM gpu_slots s JOIN supplier_nodes n ON n.id=s.node_id
+// freeSlotStats 托管商品派生库存(docs/26 §26.5.4): verified+可调度+在线的 ssh 节点上的空闲卡合计,
+// 以及单机最多可一次租用的卡数 max_free_per_node。后者与 allocCandidates 的候选规则同口径:
+// 分卡容器且节点支持磁盘配额 → 该节点空闲数; 不支持配额的节点或整机交付 → 仅整机全空闲时为总卡数, 否则 0。
+func (r *Repository) freeSlotStats(q sqlx.Queryer, productID int64) (free, maxNode int, err error) {
+	var rows []struct {
+		Free         int    `db:"free_cards"`
+		TotalCards   int    `db:"total_cards"`
+		Quota        bool   `db:"quota"`
+		DeliveryMode string `db:"delivery_mode"`
+	}
+	err = sqlx.Select(q, &rows, `SELECT COUNT(s.id) AS free_cards, n.total_cards, COALESCE(n.disk_quota_supported,0)=1 AS quota,
+		COALESCE(p.delivery_mode,'') AS delivery_mode
+		FROM gpu_slots s JOIN supplier_nodes n ON n.id=s.node_id JOIN products p ON p.id=n.product_id
 		WHERE n.product_id=? AND n.mgmt_mode='ssh' AND n.verify_status='verified' AND n.schedulable=1
-		  AND n.status='online' AND s.state='free'`, productID)
-	return n, err
+		  AND n.status='online' AND s.state='free'
+		GROUP BY n.id, n.total_cards, n.disk_quota_supported, p.delivery_mode`, productID)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, x := range rows {
+		free += x.Free
+		if m := rentableOnNode(x.Free, x.TotalCards, x.Quota, x.DeliveryMode == "bare_metal"); m > maxNode {
+			maxNode = m
+		}
+	}
+	return free, maxNode, nil
+}
+
+// rentableOnNode 单节点一次最多可租卡数(与 allocCandidates 同口径)。
+func rentableOnNode(free, total int, quota, wholeMachine bool) int {
+	if !wholeMachine && quota {
+		return free
+	}
+	if free == total {
+		return total
+	}
+	return 0
 }
 
 func (r *Repository) freeSlotUUIDs(q sqlx.Queryer, nodeID int64) (map[int]string, error) {

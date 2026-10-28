@@ -31,6 +31,9 @@ type LeaseHooks struct {
 	ReleaseTx func(tx *sqlx.Tx, order *Order, to string) error
 	// RenewTx 托管续租衔接(T-088)。nil 时托管订单不可续租(50000 明确提示)。
 	RenewTx func(tx *sqlx.Tx, parent, renewal *Order) error
+	// Feasible 只读可行性(GET /products/:id/availability): 是否存在一个节点能按 docs/26 §26.5.2 的候选规则
+	// 容纳 cards 张同机空闲卡。不加锁、不写库; 结论是快照, 成交以 ReserveTx 为准。
+	Feasible func(product *Product, cards int) (bool, error)
 }
 
 // SetLeaseHooks 注入租约钩子(fleet.enabled=true 时由 main 调用)。

@@ -23,7 +23,21 @@ const (
 
 // LeaseHooks 供 main 注入 compute.SetLeaseHooks。RenewTx 留空: 托管续租属 T-088。
 func (s *Service) LeaseHooks() compute.LeaseHooks {
-	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx}
+	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx,
+		Feasible: s.leaseFeasible}
+}
+
+// leaseFeasible 只读可行性(GET /products/:id/availability): 与 reserveSlotsTx 相同的候选规则
+// (allocCandidates), 但不加锁不写库。整机交付(bare_metal)未接入, 由 compute 侧先行拦截。
+func (s *Service) leaseFeasible(p *compute.Product, cards int) (bool, error) {
+	if p == nil || cards <= 0 {
+		return false, nil
+	}
+	cands, err := s.repo.allocCandidates(s.repo.db, p.ID, cards, p.DeliveryMode == "bare_metal", 0)
+	if err != nil {
+		return false, err
+	}
+	return len(cands) > 0, nil
 }
 
 // reserveLeaseTx 下单: 租约 reserved + 同机 k 卡预留 + 派生库存重算。卡数 = 订单 quantity。

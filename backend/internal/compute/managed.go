@@ -85,17 +85,20 @@ func (s *Service) LockManagedProductTx(tx *sqlx.Tx, productID int64) error {
 	return err
 }
 
-// SetManagedStockTx 由 fleet 在自己的事务内回写托管商品派生库存:
-// stock = 可售空闲卡数; 只在 active↔sold_out 间切换, 不触碰草稿/待审/下架/冻结状态。
-// 只作用于 fulfillment_mode='managed' 的行, 人工商品不受影响。
-func (s *Service) SetManagedStockTx(tx *sqlx.Tx, productID int64, stock int) error {
+// SetManagedStockTx 由 fleet 在自己的事务内回写托管商品派生库存(docs/26 §26.5.4):
+// stock = 可售空闲卡数, max_free_per_node = 单机最多可一次租用的卡数; 只在 active↔sold_out 间切换,
+// 不触碰草稿/待审/下架/冻结状态。只作用于 fulfillment_mode='managed' 的行, 人工商品不受影响。
+func (s *Service) SetManagedStockTx(tx *sqlx.Tx, productID int64, stock, maxFreePerNode int) error {
 	if stock < 0 {
 		stock = 0
 	}
-	if _, err := tx.Exec(`UPDATE products SET stock=?,
+	if maxFreePerNode < 0 {
+		maxFreePerNode = 0
+	}
+	if _, err := tx.Exec(`UPDATE products SET stock=?, max_free_per_node=?,
 		status = CASE WHEN status='active' AND ?<=0 THEN 'sold_out'
 		              WHEN status='sold_out' AND ?>0 THEN 'active' ELSE status END
-		WHERE id=? AND fulfillment_mode='managed'`, stock, stock, stock, productID); err != nil {
+		WHERE id=? AND fulfillment_mode='managed'`, stock, maxFreePerNode, stock, stock, productID); err != nil {
 		return err
 	}
 	return nil

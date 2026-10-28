@@ -23,7 +23,7 @@ import (
 type ProductStore interface {
 	ManagedProduct(productID int64) (*compute.Product, error)
 	LockManagedProductTx(tx *sqlx.Tx, productID int64) error
-	SetManagedStockTx(tx *sqlx.Tx, productID int64, stock int) error
+	SetManagedStockTx(tx *sqlx.Tx, productID int64, stock, maxFreePerNode int) error
 	// 订单侧(托管开通/失败善后), 全部在 fleet 的事务内调用。
 	LockManagedOrderTx(tx *sqlx.Tx, orderID int64) (*compute.Order, error)
 	FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error)
@@ -161,11 +161,11 @@ func (s *Service) recomputeStockTx(tx *sqlx.Tx, productID int64) error {
 	if err := s.products.LockManagedProductTx(tx, productID); err != nil {
 		return err
 	}
-	n, err := s.repo.freeSlotCount(tx, productID)
+	free, maxNode, err := s.repo.freeSlotStats(tx, productID)
 	if err != nil {
 		return err
 	}
-	return s.products.SetManagedStockTx(tx, productID, n)
+	return s.products.SetManagedStockTx(tx, productID, free, maxNode)
 }
 
 func (s *Service) refreshHealth(n *Node) {

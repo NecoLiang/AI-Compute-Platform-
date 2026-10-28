@@ -115,6 +115,8 @@ func main() {
 	notificationRepo := notification.NewRepository(sqlDB)
 	notificationSvc := notification.NewService(notificationRepo)
 	computeSvc.SetNotifier(notificationSvc)
+	// GET /products/:id/availability 每用户每分钟 30 次(docs/26 §26.9)。
+	computeSvc.SetRateLimiter(rdb)
 	invoiceSvc.SetNotifier(notificationSvc)
 	ticketSvc.SetNotifier(notificationSvc)
 	// 算力评估 agent (工作台首页智能入口): LLM 做算力推定与机器方案建议, 商品匹配由平台代码确定性完成。

@@ -138,3 +138,22 @@ func TestPickLeasePort(t *testing.T) {
 	all := map[int]bool{30000: true, 30001: true}
 	assert.Equal(t, 0, pickLeasePort(30000, 30001, all, nil))
 }
+
+// T-092: max_free_per_node 的单节点可租卡数与 allocCandidates 同口径。
+func TestRentableOnNode(t *testing.T) {
+	cases := []struct {
+		free, total         int
+		quota, wholeMachine bool
+		want                int
+	}{
+		{5, 8, true, false, 5},  // 容器 + 磁盘配额: 任意剩余卡数可租
+		{0, 8, true, false, 0},  // 无空闲
+		{5, 8, false, false, 0}, // 无磁盘配额: 只能整机租
+		{8, 8, false, false, 8}, // 无磁盘配额 + 全空闲: 整机
+		{7, 8, true, true, 0},   // 整机交付: 必须全空闲
+		{8, 8, true, true, 8},
+	}
+	for _, c := range cases {
+		assert.Equal(t, c.want, rentableOnNode(c.free, c.total, c.quota, c.wholeMachine), "%+v", c)
+	}
+}

@@ -2,7 +2,6 @@ package compute
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/redis/go-redis/v9"
 )
 
 // ===== 商品类型 / 计费模式常量 (C-01, C-04) =====
@@ -182,6 +182,8 @@ type Service struct {
 	managedGate ManagedGate
 	// leaseHooks 托管租约钩子(fleet 注入, managed_lease.go)。零值 = 未接入, 托管商品不可下单。
 	leaseHooks LeaseHooks
+	// rdb availability 限流(每用户每分钟 30 次)。nil = 未装配, availability 返回 50000。
+	rdb *redis.Client
 }
 
 // Notifier 消息中心写接口, 由 notification 包实现。
@@ -585,6 +587,9 @@ type CreateProductReq struct {
 	NightStartMin   *int         `json:"night_start_min"`
 	NightEndMin     *int         `json:"night_end_min"`
 	Prices          []PriceInput `json:"prices"`
+	// CardSplitOptions 托管分卡容器商品的可选卡数(docs/26 §26.5.1), 须为平台集合 {1,2,4,6,8} 的子集且不超过 card_count;
+	// 省略取默认集合(平台集合中 ≤ card_count 的全部值)。其他商品不得提交。
+	CardSplitOptions []int `json:"card_split_options"`
 }
 
 // NormalizeProductReq 填补可省略字段的默认值。纯函数, 便于测试。
@@ -638,6 +643,13 @@ func NormalizeProductReq(req CreateProductReq) CreateProductReq {
 	if req.Availability == "" {
 		req.Availability = AvailabilityFulltime
 	}
+	if isSplitProduct(req.ProductType, req.FulfillmentMode, req.DeliveryMode) {
+		if len(req.CardSplitOptions) == 0 {
+			req.CardSplitOptions = defaultSplitOptions(req.CardCount)
+		} else {
+			req.CardSplitOptions = normalizeSplitOptions(req.CardSplitOptions)
+		}
+	}
 	return req
 }
 
@@ -660,6 +672,9 @@ func ValidateProductReq(req CreateProductReq) error {
 		return fmt.Errorf("库存超出上限(不得超过 %d)", MaxOrderQuantity)
 	}
 	if err := validateFulfillmentAndAvailability(req); err != nil {
+		return err
+	}
+	if err := validateSplitOptions(req); err != nil {
 		return err
 	}
 	// 零租: 多价格组合约束先于顶层展示主价校验(传 prices 时顶层字段由归一化同步, 不作为输入)。
@@ -840,6 +855,10 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 		p.Prices = priceRowsOf(req.Prices)
 		if req.Availability == AvailabilityNightWindow {
 			p.NightStartMin, p.NightEndMin = req.NightStartMin, req.NightEndMin
+		}
+		if len(req.CardSplitOptions) > 0 {
+			v := FormatCardSplitOptions(req.CardSplitOptions)
+			p.CardSplitOptionsRaw = &v
 		}
 	}
 	// 可空字段: 只在有意义时写入, 否则留 NULL, 避免 0/"" 被当成真实值展示。
@@ -1101,18 +1120,26 @@ func validateOrderParams(p *Product, price PriceQuote, quantity, duration int, c
 		return 0, 0, fmt.Errorf("该商品未设置有效单价，暂不支持在线下单")
 	}
 
-	minOrder := p.MinOrder
-	if minOrder < 1 {
-		minOrder = 1
-	}
-	if quantity < minOrder {
-		return 0, 0, fmt.Errorf("购买数量不能少于起订量 %d", minOrder)
-	}
-	if quantity > MaxOrderQuantity {
-		return 0, 0, fmt.Errorf("购买数量超出上限 %d", MaxOrderQuantity)
-	}
-	if p.Stock > 0 && checkStock && quantity > p.Stock {
-		return 0, 0, fmt.Errorf("insufficient stock")
+	if opts := p.SplitOptions(); opts != nil {
+		// 托管分卡商品: 可选卡数集合代替起订量(docs/26 §26.5.1/§26.7); 能否成交以同机卡槽预留为准,
+		// 不按派生库存 stock 预判(stock 是全商品空闲卡合计, 不代表单机余量)。
+		if !containsInt(opts, quantity) {
+			return 0, 0, fmt.Errorf("所选卡数 %d 不在该商品可选卡数 %s 内", quantity, FormatCardSplitOptions(opts))
+		}
+	} else {
+		minOrder := p.MinOrder
+		if minOrder < 1 {
+			minOrder = 1
+		}
+		if quantity < minOrder {
+			return 0, 0, fmt.Errorf("购买数量不能少于起订量 %d", minOrder)
+		}
+		if quantity > MaxOrderQuantity {
+			return 0, 0, fmt.Errorf("购买数量超出上限 %d", MaxOrderQuantity)
+		}
+		if p.Stock > 0 && checkStock && quantity > p.Stock {
+			return 0, 0, errInsufficientStock
+		}
 	}
 
 	// 买断/永久使用权: 时长概念不存在, 强制归一为 1, 忽略客户端传值。
@@ -1211,20 +1238,8 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		}
 	}
 
-	price, err := PriceFor(p, req.PricingMode)
-	if errors.Is(err, ErrPricingModeDisabled) {
-		return nil, fmt.Errorf("该商品未开放%s计费", orDefault(pricingModeLabels[req.PricingMode], req.PricingMode))
-	}
-	if err != nil {
-		return nil, err
-	}
-	// 托管订单走上方 S2 租约钩子; 包夜(夜间预订防重/每晚开停机, T-094/T-095)尚未接入: 明确 50000,
-	// 不落成按小时或全天交付的订单。
-	if price.PricingMode == PricingNightly {
-		return nil, errNightlyNotWired
-	}
-	qty, dur, err := ValidateOrderParamsFor(p, price, req.Quantity, req.Duration)
-	if err != nil {
+	// 参数与价格的预校验(事务外, 失败不占用交易配置锁); 事务内以锁定的费率按同一纯函数重算。
+	if _, err := QuoteOrder(p, req.PricingMode, req.Quantity, req.Duration, 0); err != nil {
 		return nil, err
 	}
 	tx, err := s.beginManagedAware(managed)
@@ -1239,10 +1254,12 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if !policy.TradingEnabled {
 		return nil, trading.ErrDisabled
 	}
-	totalFen, feeFen, err := CalcOrderAmount(price.UnitPrice, qty, dur, int64(policy.FeeRate))
+	quote, err := QuoteOrder(p, req.PricingMode, req.Quantity, req.Duration, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
+	price, qty, dur := quote.Price, quote.Quantity, quote.Duration
+	totalFen, feeFen := quote.TotalAmount, quote.PlatformFee
 
 	expires := time.Now().Add(15 * time.Minute)
 	orderNo := "ORD" + time.Now().Format("20060102150405") + uuid.New().String()[:6]
@@ -1266,11 +1283,8 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if managed {
 		zero := 0
 		o.StockReserved, o.FulfillmentMode = &zero, FulfillmentManaged
-		if price.PricingMode == PricingPerpetual {
-			return nil, fmt.Errorf("托管商品不支持买断计费")
-		}
 	} else if err := s.repo.DecrProductStock(tx, p.ID, qty); err != nil {
-		return nil, fmt.Errorf("insufficient stock")
+		return nil, errInsufficientStock
 	}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err
