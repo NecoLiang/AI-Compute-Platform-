@@ -106,8 +106,11 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if err := attachPrices(tx, []*Product{&product}); err != nil {
 		return nil, err
 	}
-	// 续租按原订单的计费方式快照报价(v1.2 前订单无快照, 回退商品当前展示方式); 不随商品展示主价漂移。
-	mode := OrderPricingMode(parent, product.PricingMode)
+	// 续租按原订单的计费方式快照报价, 不随商品展示主价漂移; 快照缺失返回 50000, 不回退商品当前方式(CR M1)。
+	mode, err := OrderPricingMode(parent)
+	if err != nil {
+		return nil, err
+	}
 	if product.Health == "offline" || mode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
 		return nil, ErrRenewalConflict
 	}

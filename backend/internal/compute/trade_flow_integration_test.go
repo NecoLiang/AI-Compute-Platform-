@@ -26,6 +26,13 @@ import (
 // a fresh database and the real migrations, without changing application data.
 func setupTradeDB(t *testing.T) *sqlx.DB {
 	t.Helper()
+	return setupTradeDBBefore(t, "")
+}
+
+// setupTradeDBBefore 只执行文件名排在 before 之前的迁移(before 为空则全部执行),
+// 用于在旧 schema 上写入存量数据后再执行真实的后续迁移文件。
+func setupTradeDBBefore(t *testing.T, before string) *sqlx.DB {
+	t.Helper()
 	dsn := os.Getenv("TEST_MYSQL_DSN")
 	if dsn == "" {
 		t.Skip("TEST_MYSQL_DSN is required for trade flow integration tests")
@@ -64,15 +71,23 @@ func setupTradeDB(t *testing.T) *sqlx.DB {
 		t.Fatalf("migrations: %v", err)
 	}
 	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
+		if before != "" && filepath.Base(path) >= before {
+			continue
 		}
-		if _, err := db.Exec(string(data)); err != nil {
-			t.Fatalf("%s: %v", path, err)
-		}
+		applyMigrationFile(t, db, path)
 	}
 	return db
+}
+
+func applyMigrationFile(t *testing.T, db *sqlx.DB, path string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(data)); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
 }
 
 func tradeRouter(db *sqlx.DB, id int64) *gin.Engine {

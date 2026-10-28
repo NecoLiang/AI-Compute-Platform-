@@ -142,7 +142,7 @@ curl -X POST http://localhost:8080/api/v1/orders \
 {"code":40900,"message":"insufficient stock"}
 ```
 
-金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。托管商品（`fulfillment_mode=managed`）与包夜（`nightly`）在托管履约模块接入前下单返回 `50000`「托管履约模块未启用」，不会静默按人工交付建单。
+金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。v1.2 前的存量订单由迁移 028 按迁移时的计费方式回填快照（续租子订单取其续租快照，其余取当时商品方式），与新订单同样只认快照；快照缺失属数据异常，交付、签收、续租报价返回 `50000`「订单缺少计费方式快照…」，不回退商品当前展示方式。托管商品（`fulfillment_mode=managed`）与包夜（`nightly`）在托管履约模块接入前下单返回 `50000`「托管履约模块未启用」，不会静默按人工交付建单。
 
 ---
 
@@ -178,7 +178,7 @@ curl "http://localhost:8080/api/v1/orders?status=active&order_no=20260711&page=1
 },"request_id":"req_xxx"}
 ```
 
-`pricing_mode` 为订单的计费方式快照；v1.2（028）前的存量订单无快照，回退为商品当前展示方式。供给方订单列表同理。
+`pricing_mode` 为订单的计费方式快照（v1.2 前存量订单由 028 回填），不回退商品当前展示方式；快照缺失（数据异常）时为空串。供给方订单列表、可开票订单列表同理。
 
 `supplier_name`：自营商品固定返回“平台自营”；非自营仅返回已认证企业名称，没有可用资料时为空串。
 
@@ -213,7 +213,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 },"request_id":"req_xxx"}
 ```
 
-`product.pricing_mode` 与 `product.min_duration` 取**订单**的计费方式快照及该方式当前的最短租期（存量订单回退商品展示方式），用于续租表单；其余 `product` 字段为商品当前资料。`delivery` 和 `supplier.credit` 没有记录时为 `null`。详情不返回 `buyer_id`、`supplier_id`、密文、`access_key` 或凭证明文；凭证仍通过独立的 access-credential 接口查看。当前数据库没有订单事件表和商品快照，因此此接口不伪造区块链时间线，`product` / `supplier` 是当前关联资料。
+`product.pricing_mode` 与 `product.min_duration` 取**订单**的计费方式快照及该方式当前的最短租期（快照缺失时 `pricing_mode` 为空串、`can_renew=false`，不回退商品展示方式），用于续租表单；其余 `product` 字段为商品当前资料。`delivery` 和 `supplier.credit` 没有记录时为 `null`。详情不返回 `buyer_id`、`supplier_id`、密文、`access_key` 或凭证明文；凭证仍通过独立的 access-credential 接口查看。当前数据库没有订单事件表和商品快照，因此此接口不伪造区块链时间线，`product` / `supplier` 是当前关联资料。
 
 ## POST /dev/fixtures/buyer-orders · 为当前用户生成本地订单（仅 debug）
 
@@ -241,6 +241,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 - 非订单本人：`code=40300`
 - 状态不允许、尚未生成凭证或重复签收：`code=40900`
 - 订单不存在：`code=40400`
+- 订单缺少计费方式快照（数据异常，须平台核对）：`code=50000`，不按商品当前方式换算租期
 
 ## GET /orders/:id/renewal-quote · 续租报价 ✅ buyer
 
@@ -250,7 +251,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 {"parent_order_no":"ORD20260908000000abcdef","mode":"extend","quantity":2,"duration":2,"pricing_mode":"hourly","min_duration":1,"max_duration":87600,"unit_price":3000,"total_amount":12000,"platform_fee":780,"fee_rate":650,"lease_end_at":"2026-09-08T12:00:00+08:00","renewed_until":"2026-09-08T14:00:00+08:00"}
 ```
 
-金额均为分，按**原订单的计费方式快照**（存量订单无快照时回退商品当前展示方式）取该方式当前的价格行与平台费率报价，原订单金额不变；`min_duration/max_duration` 也取该方式。供给方已停用该计费方式时返回 `40900`「该计费方式已停用，请重新下单」，不会换算成其他方式；此时详情 `can_renew=false`。托管商品或包夜订单在托管履约模块接入前返回 `50000`。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
+金额均为分，按**原订单的计费方式快照**（存量订单由 028 回填；快照缺失返回 `50000`，不回退商品当前展示方式）取该方式当前的价格行与平台费率报价，原订单金额不变；`min_duration/max_duration` 也取该方式。供给方已停用该计费方式时返回 `40900`「该计费方式已停用，请重新下单」，不会换算成其他方式；此时详情 `can_renew=false`。托管商品或包夜订单在托管履约模块接入前返回 `50000`。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
 
 ## POST /orders/:id/renew · 创建续租订单 ✅ buyer
 
@@ -285,7 +286,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 ```json
 {"ip_address":"10.0.1.128","ssh_port":22,"username":"root","credential_note":"密码已私信"}
 ```
-交付信息与访问凭证均使用 AES-256-GCM 加密存储；未配置 `security.credential_key` 时明确失败，不降级为明文。
+交付信息与访问凭证均使用 AES-256-GCM 加密存储；未配置 `security.credential_key` 时明确失败，不降级为明文。凭证到期时间按订单计费方式快照与购买周期换算；快照缺失时返回 `50000`，不交付。
 
 ---
 

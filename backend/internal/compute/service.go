@@ -1370,12 +1370,14 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 	}
 
 	order := buyerOrder.Order
-	// 订单计费方式: 快照优先(BuyerOrder.PricingMode 已 COALESCE 订单快照与商品展示方式),
-	// 最短租期取该方式的价格行, 续租探测与展示都按它, 不按商品当前展示主价。
-	orderMode := orDefault(buyerOrder.PricingMode, product.PricingMode)
+	// 订单计费方式只认快照(CR M1), 不回退商品当前展示方式; 最短租期取该方式的价格行,
+	// 续租探测与展示都按它。快照缺失属数据异常: 展示为空, 续租报价返回 50000, can_renew=false。
+	orderMode := buyerOrder.PricingMode
 	orderMinDuration := max(1, product.MinDuration)
-	if price, err := PriceFor(product, orderMode); err == nil {
-		orderMinDuration = price.MinDuration
+	if orderMode != "" {
+		if price, err := PriceFor(product, orderMode); err == nil {
+			orderMinDuration = price.MinDuration
+		}
 	}
 	detail := &BuyerOrderDetail{
 		Order: BuyerOrderDetailOrder{
@@ -1677,7 +1679,11 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 
 	// 永久使用权无到期时间; 其余按租期换算, 到期后由 RevokeExpiredAccess 吊销。
 	// duration 是计费周期数, 必须走 LeaseEndAt 换算, 否则 monthly 订单的凭证会在几小时后就失效。
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, OrderPricingMode(o, p.PricingMode))
+	orderMode, err := OrderPricingMode(o)
+	if err != nil {
+		return nil, err
+	}
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, orderMode)
 	if err != nil {
 		return nil, err
 	}
@@ -1770,7 +1776,11 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		return fmt.Errorf("product not found")
 	}
 
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, OrderPricingMode(o, p.PricingMode))
+	orderMode, err := OrderPricingMode(o)
+	if err != nil {
+		return err
+	}
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, orderMode)
 	if err != nil {
 		return err
 	}

@@ -225,6 +225,35 @@ func TestMigration028BackfillGuardAndDownRefuses(t *testing.T) {
 			t.Fatalf("backfill mismatch: %v", got)
 		}
 	})
+	// CR M1: 存量订单按迁移时可证明的方式冻结快照——续租子订单取 order_renewals 快照, 其余取商品当前方式。
+	t.Run("orders frozen to the mode in effect at migration time", func(t *testing.T) {
+		other := rebuild(t)
+		other.MustExec(`INSERT INTO users (id,phone,password_hash) VALUES (1,'18800000001','')`)
+		other.MustExec(`INSERT INTO products (id,supplier_id,product_type,gpu_model,pricing_mode,unit_price,stock,region) VALUES
+			(1,1,'card_rental','H100','daily',2000,1,'北京'),(2,1,'center','H100','monthly',30000,1,'北京'),
+			(3,1,'outright','H100','perpetual',30000,1,'北京'),(4,1,'card_rental','H100','weekly',9000,1,'北京')`)
+		other.MustExec(`INSERT INTO orders (id,order_no,buyer_id,product_id,quantity,duration,unit_price,total_amount,platform_fee,status) VALUES
+			(1,'O1',1,1,1,3,2000,6000,0,'paid'),(2,'O2',1,2,1,1,30000,30000,0,'active'),(3,'O3',1,3,1,1,30000,30000,0,'completed'),
+			(4,'O4',1,4,1,1,9000,9000,0,'active'),(5,'REN5',1,4,1,2,2000,4000,0,'pending_payment')`)
+		// 续租时商品还是日租, 之后改成了周租: 子订单应保留续租时的 daily 快照。
+		other.MustExec(`INSERT INTO order_renewals (order_id,parent_order_id,request_id,mode,pricing_mode,lease_end_at)
+			VALUES (5,4,'00000000-0000-4000-8000-000000000005','extend','daily',NOW())`)
+		if _, err := other.Exec(string(up)); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		if err := other.Select(&got, "SELECT COALESCE(pricing_mode,'NULL') FROM orders ORDER BY id"); err != nil {
+			t.Fatal(err)
+		}
+		if fmt.Sprint(got) != "[daily monthly perpetual weekly daily]" {
+			t.Fatalf("order snapshot backfill mismatch: %v", got)
+		}
+		var products []string
+		other.Select(&products, "SELECT pricing_mode FROM products ORDER BY id")
+		if fmt.Sprint(products) != "[daily monthly perpetual weekly]" {
+			t.Fatalf("028 must not change products: %v", products)
+		}
+	})
 	t.Run("down refuses", func(t *testing.T) {
 		_, err := db.Exec(string(down))
 		if err == nil || !strings.Contains(err.Error(), "45000") {

@@ -291,3 +291,19 @@ func TestManagedFulfillmentDisabledIs50000(t *testing.T) {
 	assert.Equal(t, errcode.InternalError, ErrToCode(ErrManagedFulfillmentDisabled))
 	assert.Equal(t, errcode.InternalError, ErrToCode(errors.Join(ErrManagedFulfillmentDisabled)))
 }
+
+// CR M1: 订单计费方式只认快照; 缺失时 50000, 不回退商品当前展示方式。
+func TestOrderPricingModeRequiresSnapshot(t *testing.T) {
+	daily, empty := "daily", ""
+	mode, err := OrderPricingMode(&Order{OrderNo: "ORD1", PricingMode: &daily})
+	require.NoError(t, err)
+	assert.Equal(t, "daily", mode)
+	for _, o := range []*Order{{OrderNo: "ORD2"}, {OrderNo: "ORD3", PricingMode: &empty}} {
+		_, err := OrderPricingMode(o)
+		assert.ErrorIs(t, err, ErrOrderPricingModeMissing)
+		assert.Contains(t, err.Error(), o.OrderNo)
+		assert.Equal(t, errcode.InternalError, ErrToCode(err))
+	}
+	_, err = OrderPricingMode(nil)
+	assert.Equal(t, errcode.NotFound, ErrToCode(err))
+}

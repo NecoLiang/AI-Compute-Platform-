@@ -88,7 +88,7 @@ type Order struct {
 	StockReserved *int   `db:"stock_reserved" json:"-"`
 	Quantity      int    `db:"quantity" json:"quantity"`
 	Duration      int    `db:"duration" json:"duration"`
-	// PricingMode 下单时计费方式快照(028); NULL=v1.2 前订单, 读取时回退商品当前方式。
+	// PricingMode 下单时计费方式快照(028); 存量订单由 028 按迁移时商品方式回填, NULL 视为数据异常(OrderPricingMode 报 50000)。
 	PricingMode      *string    `db:"pricing_mode" json:"pricing_mode"`
 	NightStartDate   *time.Time `db:"night_start_date" json:"night_start_date"`
 	NightStartMin    *int       `db:"night_start_min" json:"night_start_min"`
@@ -181,7 +181,7 @@ const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.stock_r
 	o.total_amount, o.platform_fee, o.status, o.payment_expires_at, o.lease_start_at, o.lease_end_at,
 	COALESCE(o.compliance_agreed,0) AS compliance_agreed, o.created_at, o.updated_at,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
-	COALESCE(o.pricing_mode,p.pricing_mode,'') AS pricing_mode,
+	COALESCE(o.pricing_mode,'') AS pricing_mode,
 	o.night_start_date, o.night_start_min, o.night_end_min,
 	COALESCE(p.self_operated,0) AS self_operated,
 	CASE WHEN COALESCE(p.self_operated,0)=1 THEN '平台自营' ELSE COALESCE(e.name,'') END AS supplier_name`
@@ -1063,12 +1063,12 @@ func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, p
 		pageSize = 20
 	}
 	// 显式列清单: SELECT o.* 会把 026/028 新增列(fulfillment_mode 等)扫进没有对应字段的结构体而失败。
-	// pricing_mode 只输出一列: 订单快照优先, v1.2 前订单回退商品当前方式。
+	// pricing_mode 只输出订单快照; 不回退商品当前展示方式(CR M1: 商品重提后展示方式会变, 回退即错报)。
 	query := fmt.Sprintf(`SELECT o.id, o.order_no, o.buyer_id, o.product_id, o.stock_reserved, o.quantity, o.duration,
 		o.night_start_date, o.night_start_min, o.night_end_min, o.unit_price, o.total_amount, o.platform_fee, o.status,
 		o.payment_expires_at, o.lease_start_at, o.lease_end_at, COALESCE(o.compliance_agreed,0) AS compliance_agreed,
 		o.created_at, o.updated_at, COALESCE(p.gpu_model,'') AS gpu_model,
-		COALESCE(p.product_type,'') AS product_type, COALESCE(o.pricing_mode,p.pricing_mode,'') AS pricing_mode
+		COALESCE(p.product_type,'') AS product_type, COALESCE(o.pricing_mode,'') AS pricing_mode
 		FROM orders o JOIN products p ON o.product_id=p.id %s ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	list := make([]SupplierOrder, 0)
@@ -1330,6 +1330,10 @@ func ErrToCode(err error) int {
 	}
 	// 托管履约钩子未注入: 服务端能力缺失而非参数问题, 必须 50000 (docs/25 §25.4)。
 	if errors.Is(err, ErrManagedFulfillmentDisabled) {
+		return errcode.InternalError
+	}
+	// 订单缺计费方式快照: 数据异常, 服务端须核对, 不是买家/供给方参数问题 (CR M1)。
+	if errors.Is(err, ErrOrderPricingModeMissing) {
 		return errcode.InternalError
 	}
 	if err == nil {

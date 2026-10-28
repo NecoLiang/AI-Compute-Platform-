@@ -2,6 +2,7 @@ package compute_test
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -140,24 +141,134 @@ func TestPricingOrderSnapshotDrivesRenewal(t *testing.T) {
 	order("daily", 1, 2, 40001) // 新下单同样不能再选日价
 }
 
-// T-091: v1.2 前的存量包月零租订单(pricing_mode=NULL)在 028 回填后仍可续租, 续租单写入快照。
-func TestPricingLegacyMonthlyOrderRenewsAfterBackfill(t *testing.T) {
-	db := setupTradeDB(t)
+// legacyPaidOrder 在只执行到 026 的库里按 v1.2 前代码的写法写入一个零租商品和一笔已付款订单
+// (无 028 列, 库存已扣), 再执行真实的 028 迁移文件。返回库、商品 ID、订单号。
+func legacyPaidOrder(t *testing.T, mode string, unit int64, duration int) (*sqlx.DB, int64, string) {
+	t.Helper()
+	db := setupTradeDBBefore(t, "028")
 	seedTradeUsers(db)
-	input := tradeProductInput()
-	input["pricing_mode"], input["unit_price"] = "monthly", 1000000
-	id := approvedProduct(t, db, input)
-	// 模拟 028 之前的数据: 订单无快照; 价格行与 028 回填结果一致(由迁移测试单独覆盖)。
-	placed := tradeRequest(t, tradeRouter(db, 102), "POST", "/api/v1/orders", map[string]any{
-		"product_id": id, "quantity": 1, "duration": 1, "compliance_agreed": true, "compliance_version": consentVersion}, 0)
-	no := placed.Data.(map[string]any)["order_no"].(string)
+	res := db.MustExec(`INSERT INTO products (supplier_id,product_type,gpu_model,card_count,delivery_mode,pricing_mode,unit_price,
+		stock,min_order,min_duration,region,status,compliance_agreed) VALUES (101,'card_rental','H100',8,'bare_metal',?,?,7,1,1,'北京','active',1)`, mode, unit)
+	id, _ := res.LastInsertId()
+	no := "ORDLEGACY" + mode
+	db.MustExec(`INSERT INTO orders (order_no,buyer_id,product_id,quantity,duration,unit_price,total_amount,platform_fee,status,stock_reserved,compliance_agreed)
+		VALUES (?,102,?,1,?,?,?,0,'paid',1,1)`, no, id, duration, unit, unit*int64(duration))
+	applyMigrationFile(t, db, "../../migrations/028_flexible_pricing.up.sql")
+	return db, id, no
+}
+
+func deliverAndConfirm(t *testing.T, db *sqlx.DB, no string) (time.Time, time.Time) {
+	t.Helper()
+	service := compute.NewService(compute.NewRepository(db), db, strings.Repeat("12", 32))
+	if _, err := service.DeliverWithAccess(101, no, compute.DeliverInfo{IpAddress: "192.0.2.10"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ConfirmDelivery(102, no); err != nil {
+		t.Fatal(err)
+	}
+	var lease struct {
+		Start time.Time `db:"lease_start_at"`
+		End   time.Time `db:"lease_end_at"`
+	}
+	if err := db.Get(&lease, "SELECT lease_start_at,lease_end_at FROM orders WHERE order_no=?", no); err != nil {
+		t.Fatal(err)
+	}
+	return lease.Start, lease.End
+}
+
+// CR M1: 日租商品有一笔已付款待交付的 3 天存量订单; 供给方下架、加上小时价重提并审核通过后
+// (展示主价变成 hourly), 交付租期仍是 3 天, 续租仍按日价报价——028 已把订单方式冻结为 daily。
+func TestPricingLegacyOrderSurvivesProductRepricing(t *testing.T) {
+	db, id, no := legacyPaidOrder(t, "daily", 60000, 3)
+	if mode, _ := orderSnapshot(t, db, no); mode.String != "daily" {
+		t.Fatalf("028 must freeze the legacy order's pricing mode: %v", mode)
+	}
+	resubmitPrices(t, db, id, []map[string]any{
+		{"pricing_mode": "hourly", "unit_price": 2000},
+		{"pricing_mode": "daily", "unit_price": 45000},
+	})
+	var display string
+	db.Get(&display, "SELECT pricing_mode FROM products WHERE id=?", id)
+	if display != "hourly" {
+		t.Fatalf("scenario precondition: display mode should now be hourly, got %q", display)
+	}
+
+	start, end := deliverAndConfirm(t, db, no)
+	if end.Sub(start) != 72*time.Hour {
+		t.Fatalf("3-day legacy order must lease 72h after repricing, got %v", end.Sub(start))
+	}
+	var expires time.Time
+	db.Get(&expires, "SELECT d.access_expires_at FROM order_deliveries d JOIN orders o ON o.id=d.order_id WHERE o.order_no=?", no)
+	if !expires.Equal(end) {
+		t.Fatalf("credential expiry must follow the lease: %v vs %v", expires, end)
+	}
+	buyer := tradeRouter(db, 102)
+	quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no+"/renewal-quote?duration=1", nil, 0).Data.(map[string]any)
+	if quote["pricing_mode"] != "daily" || quote["unit_price"] != float64(45000) || quote["renewed_until"] != end.Add(24*time.Hour).Format(time.RFC3339) {
+		t.Fatalf("renewal must be quoted at the daily price: %v", quote)
+	}
+	detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no, nil, 0).Data.(map[string]any)
+	if detail["product"].(map[string]any)["pricing_mode"] != "daily" || detail["actions"].(map[string]any)["can_renew"] != true {
+		t.Fatalf("detail must show the order's own mode: %v", detail)
+	}
+	list := tradeRequest(t, buyer, "GET", "/api/v1/orders", nil, 0).Data.(map[string]any)["list"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["pricing_mode"] != "daily" {
+		t.Fatalf("order list must expose the snapshot: %v", list)
+	}
+}
+
+// CR M1: 快照缺失(028 后不应出现)时交付、签收、续租报价一律 50000, 不回退商品当前展示方式。
+func TestPricingMissingOrderSnapshotFailsLoudly(t *testing.T) {
+	db, _, no := legacyPaidOrder(t, "daily", 60000, 3)
 	db.MustExec("UPDATE orders SET pricing_mode=NULL WHERE order_no=?", no)
+	service := compute.NewService(compute.NewRepository(db), db, strings.Repeat("12", 32))
+	_, err := service.DeliverWithAccess(101, no, compute.DeliverInfo{IpAddress: "192.0.2.10"}, false)
+	if !errors.Is(err, compute.ErrOrderPricingModeMissing) || compute.ErrToCode(err) != 50000 {
+		t.Fatalf("deliver must refuse a missing snapshot with 50000, got %v", err)
+	}
+	var status string
+	db.Get(&status, "SELECT status FROM orders WHERE order_no=?", no)
+	if status != "paid" {
+		t.Fatalf("failed delivery must not change the order: %s", status)
+	}
+
+	// 交付/签收后再抹掉快照: 签收与续租报价同样拒绝。
+	db.MustExec("UPDATE orders SET pricing_mode='daily' WHERE order_no=?", no)
+	if _, err := service.DeliverWithAccess(101, no, compute.DeliverInfo{IpAddress: "192.0.2.10"}, false); err != nil {
+		t.Fatal(err)
+	}
+	db.MustExec("UPDATE orders SET pricing_mode='' WHERE order_no=?", no)
+	if err := service.ConfirmDelivery(102, no); !errors.Is(err, compute.ErrOrderPricingModeMissing) {
+		t.Fatalf("confirm must refuse a missing snapshot, got %v", err)
+	}
+	db.MustExec("UPDATE orders SET pricing_mode='daily' WHERE order_no=?", no)
+	if err := service.ConfirmDelivery(102, no); err != nil {
+		t.Fatal(err)
+	}
+	db.MustExec("UPDATE orders SET pricing_mode=NULL WHERE order_no=?", no)
+	buyer := tradeRouter(db, 102)
+	res := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no+"/renewal-quote?duration=1", nil, 50000)
+	if !strings.Contains(res.Message, "计费方式快照") {
+		t.Fatalf("unexpected message: %s", res.Message)
+	}
+	detail := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no, nil, 0).Data.(map[string]any)
+	if detail["product"].(map[string]any)["pricing_mode"] != "" || detail["actions"].(map[string]any)["can_renew"] != false {
+		t.Fatalf("detail must not invent a pricing mode: %v", detail)
+	}
+}
+
+// T-091: v1.2 前的存量包月零租订单经 028 回填(价格行 + 订单快照)后仍可交付、续租, 续租单写入快照。
+func TestPricingLegacyMonthlyOrderRenewsAfterBackfill(t *testing.T) {
+	db, id, no := legacyPaidOrder(t, "monthly", 1000000, 1)
 	var rows int
 	db.Get(&rows, "SELECT COUNT(*) FROM product_prices WHERE product_id=? AND pricing_mode='monthly' AND enabled=1", id)
 	if rows != 1 {
 		t.Fatalf("monthly card_rental must have a price row, got %d", rows)
 	}
-	payDeliverConfirm(t, db, no, 1000000)
+	start, end := deliverAndConfirm(t, db, no)
+	if !end.Equal(start.AddDate(0, 1, 0)) {
+		t.Fatalf("monthly lease wrong: %v - %v", start, end)
+	}
 	buyer := tradeRouter(db, 102)
 	quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+no+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
 	if quote["pricing_mode"] != "monthly" || quote["total_amount"] != float64(2000000) {
@@ -170,7 +281,7 @@ func TestPricingLegacyMonthlyOrderRenewsAfterBackfill(t *testing.T) {
 	list := tradeRequest(t, buyer, "GET", "/api/v1/orders", nil, 0).Data.(map[string]any)["list"].([]any)
 	for _, item := range list {
 		if item.(map[string]any)["pricing_mode"] != "monthly" {
-			t.Fatalf("order list must expose pricing mode (legacy falls back to product): %v", item)
+			t.Fatalf("order list must expose the pricing snapshot: %v", item)
 		}
 	}
 }

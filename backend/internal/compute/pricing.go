@@ -33,6 +33,9 @@ var (
 	ErrPricingModeDisabled = errors.New("该计费方式已停用，请重新下单")
 	// ErrManagedFulfillmentDisabled 托管履约钩子未注入时出现托管订单(docs/25 §25.4), 返回 50000, 不静默按人工处理。
 	ErrManagedFulfillmentDisabled = errors.New("托管履约模块未启用")
+	// ErrOrderPricingModeMissing 订单缺计费方式快照(orders.pricing_mode 为空)。028 回填后不应出现,
+	// 出现即数据异常, 返回 50000 由平台核对, 不猜测按商品当前方式计算租期或报价。
+	ErrOrderPricingModeMissing = errors.New("订单缺少计费方式快照, 无法计算租期或续租报价, 请联系平台核对")
 )
 
 // ProductPrice 零租商品的一种计费方式及其价格(product_prices 一行)。unit_price 为 分/卡/周期。
@@ -230,12 +233,18 @@ func OrderNightWindow(o *Order) *NightWindow {
 	return &NightWindow{StartMin: *o.NightStartMin, EndMin: *o.NightEndMin}
 }
 
-// OrderPricingMode 订单计费方式: 优先订单快照; v1.2 前订单(NULL)回退商品当前方式。
-func OrderPricingMode(o *Order, fallback string) string {
-	if o != nil && o.PricingMode != nil && *o.PricingMode != "" {
-		return *o.PricingMode
+// OrderPricingMode 订单计费方式, 只认订单快照(CR M1)。
+// 028 已把存量订单回填为迁移时商品的计费方式, 此后每笔订单下单即写快照, 所以 NULL/空串是数据异常:
+// 返回 ErrOrderPricingModeMissing(50000), 绝不回退商品当前展示方式——商品重提后展示主价会变成
+// 最短周期, 回退会让 3 天的订单按 3 小时交付、按小时价续租。
+func OrderPricingMode(o *Order) (string, error) {
+	if o == nil {
+		return "", fmt.Errorf("order not found")
 	}
-	return fallback
+	if o.PricingMode == nil || *o.PricingMode == "" {
+		return "", fmt.Errorf("%w: 订单 %s", ErrOrderPricingModeMissing, o.OrderNo)
+	}
+	return *o.PricingMode, nil
 }
 
 // ===== 商品发布: 多价格归一化与组合校验 (§26.3.2) =====

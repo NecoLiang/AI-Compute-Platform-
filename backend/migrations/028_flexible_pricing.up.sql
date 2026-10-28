@@ -41,9 +41,19 @@ SELECT id, pricing_mode, unit_price, GREATEST(COALESCE(min_duration,1),1), 1
 FROM products
 WHERE product_type='card_rental' AND pricing_mode IN ('hourly','daily','weekly','monthly');
 
--- 订单计费方式快照; 存量订单保持 NULL, 读取时回退商品当前方式(不回填无法证明的历史值)。
+-- 订单计费方式快照。
 ALTER TABLE orders
-    ADD COLUMN pricing_mode VARCHAR(20) NULL COMMENT '下单时计费方式快照; NULL=v1.2前订单' AFTER duration,
+    ADD COLUMN pricing_mode VARCHAR(20) NULL COMMENT '下单时计费方式快照; 存量订单由 028 按迁移时商品方式回填' AFTER duration,
     ADD COLUMN night_start_date DATE NULL AFTER pricing_mode,
     ADD COLUMN night_start_min SMALLINT NULL AFTER night_start_date,
     ADD COLUMN night_end_min SMALLINT NULL AFTER night_start_min;
+
+-- 存量订单回填快照 (docs/26 §26.7 "S3 实现口径 (CR M1)")。v1.2 前代码对订单的交付租期、续租报价、
+-- 发票展示一律读商品当前 pricing_mode, 而 v1.2 前商品只有一种计费方式且 028 本身不改 products 行,
+-- 所以此刻商品的 pricing_mode 就是这些订单在 v1.2 前实际生效的方式, 是可证明的值。
+-- 若留 NULL 改为日后读取时回退商品, 读到的是"那时"的展示主价: 商品重提加上小时价后展示主价变成 hourly,
+-- 一笔已付款待交付的 3 天订单会按 3 小时交付、按小时价续租。所以必须在迁移时冻结, 而不是事后再读。
+-- 续租子订单(REN)另有 021 的 order_renewals.pricing_mode 快照, v1.2 前重新交付就按它换算, 先用它;
+-- 其余订单用迁移时商品的方式。回填后代码不再回退商品: 快照为 NULL 视为数据异常, 返回 50000。
+UPDATE orders o JOIN order_renewals r ON r.order_id=o.id SET o.pricing_mode=r.pricing_mode WHERE o.pricing_mode IS NULL;
+UPDATE orders o JOIN products p ON p.id=o.product_id SET o.pricing_mode=p.pricing_mode WHERE o.pricing_mode IS NULL;
