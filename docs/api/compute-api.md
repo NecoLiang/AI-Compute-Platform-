@@ -160,7 +160,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 | prices | array | — | 仅零租。多计费方式：`[{"pricing_mode":"hourly","unit_price":3500,"min_duration":1,"enabled":true}, ...]`；`min_duration` 省略为 1，`enabled` 省略为 true |
 | fulfillment_mode | string | — | manual（默认）/ managed；managed 仅零租 |
 | availability | string | — | fulltime（默认）/ night_window；night_window 仅零租 |
-| card_split_options | int[] | — | T-092/T-093，仅托管容器零租（`card_rental` + `managed` + `container`）。每个值须属于平台集合 `{1,2,4,6,8}` 且 ≤ `card_count`；去重升序保存；省略取平台集合中 ≤ `card_count` 的全部值（`card_count<1` 时为空，返回 40001「托管分卡商品至少需要一个可选卡数」）。其他商品传入返回 40001「可选卡数仅适用于平台托管的分卡容器(container)零租商品」 |
+| card_split_options | int[] | — | T-092/T-093，仅托管容器零租（`card_rental` + `managed` + `container`）。每个值须属于平台集合 `{1,2,4,6,8}` 且 ≤ `card_count`；去重升序保存；省略取平台集合中 ≤ `card_count` 的全部值。其他商品传入返回 40001「可选卡数仅适用于平台托管的分卡容器(container)零租商品」 |
 | night_start_min / night_end_min | int | — | 仅 night_window；默认 1320/480（22:00-08:00）；30 分钟对齐，窗口长 4-14 小时；`available_hours` 由服务端按窗口生成 |
 | stock | int | ✅ | 可售余量 |
 | region | string | ✅ | 地域 |
