@@ -6,6 +6,7 @@ import (
 	"tokenfactory/pkg/errcode"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestManagedFulfillmentValidation(t *testing.T) {
@@ -58,4 +59,12 @@ func TestManagedGateDisabled(t *testing.T) {
 	assert.ErrorIs(t, err, ErrManagedDisabled)
 	assert.Equal(t, errcode.ParamInvalid, errcode.CodeOf(err, 0))
 	assert.Equal(t, errcode.InternalError, errcode.CodeOf(errManagedLeaseNotWired, 0))
+}
+
+// 托管订单误入人工库存归还路径必须报错, 不得把人工增量叠加到派生库存上(在任何写库之前拦截)。
+func TestReturnReservedStockRejectsManagedOrder(t *testing.T) {
+	zero := 0
+	err := (&Service{}).returnReservedStockTx(nil, &Order{OrderNo: "ORD-M", FulfillmentMode: FulfillmentManaged, StockReserved: &zero})
+	require.Error(t, err)
+	assert.Equal(t, errcode.InternalError, errcode.CodeOf(err, 0))
 }

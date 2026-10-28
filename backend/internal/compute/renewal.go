@@ -10,6 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"tokenfactory/internal/legal"
 	"tokenfactory/internal/trading"
+	"tokenfactory/pkg/errcode"
 )
 
 var ErrRenewalConflict = errors.New("续租条件已变化或已有待支付续租订单，请刷新订单")
@@ -397,7 +398,12 @@ func (s *Service) currentLeaseOrder(db sqlx.Queryer, parent *Order, fallbackPric
 	return &Order{ID: lease.ID, OrderNo: lease.OrderNo, Duration: lease.Duration}, lease.PricingMode, nil
 }
 
+// returnReservedStockTx 人工订单归还 stock_reserved。托管订单的占用是卡槽, 必须经 releaseHoldTx → fleet 释放并重算
+// 派生库存; 误入此路径会把人工增量叠加到派生库存上, 因此直接报错而不是静默跳过。
 func (s *Service) returnReservedStockTx(tx *sqlx.Tx, order *Order) error {
+	if order.FulfillmentMode == FulfillmentManaged {
+		return errcode.New(errcode.InternalError, fmt.Sprintf("托管订单 %s 的占用须由租约释放, 不走人工库存归还", order.OrderNo))
+	}
 	if order.StockReserved == nil {
 		return fmt.Errorf("order %s requires stock reservation reconciliation", order.OrderNo)
 	}

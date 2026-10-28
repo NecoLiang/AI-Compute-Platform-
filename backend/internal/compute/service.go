@@ -2405,8 +2405,13 @@ func (s *Service) AdminUpdateOrderStatus(operatorID int64, orderNo, status, ip s
 			return err
 		}
 	} else {
-		if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "cancelled"); err != nil {
+		// 守卫式流转(与 releaseStock 同一判定): 订单行已锁, 但仍以条件 UPDATE 确保只从读到的状态关闭一次。
+		moved, err := s.repo.TransitionOrderStatusTx(tx, orderNo, []string{order.Status}, "cancelled")
+		if err != nil {
 			return err
+		}
+		if !moved {
+			return fmt.Errorf("order not active")
 		}
 		if err := s.releaseHoldTx(tx, order, "cancelled"); err != nil {
 			return err
