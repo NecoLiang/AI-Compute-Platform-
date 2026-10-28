@@ -15,6 +15,7 @@ import (
 	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
+	"tokenfactory/internal/fleet"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
 	"tokenfactory/internal/notification"
@@ -49,6 +50,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	agentSearchH := agentsearch.NewHandler(nil)
 	schedulerH := scheduler.NewHandler(nil)
 	catalogH := catalog.NewHandler(nil)
+	fleetH := fleet.NewHandler(nil) // fleet.enabled=true 时注册
 	authH := auth.NewHandler(nil, nil)
 
 	r := gin.New()
@@ -81,6 +83,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	computeH.RegisterSupplierRoutes(supplier)
 	paymentH.RegisterSupplierRoutes(supplier)
 	schedulerH.RegisterSupplierRoutes(supplier)
+	fleetH.RegisterSupplierRoutes(supplier)
 
 	vendor := r.Group("/api/v1")
 	intermediaryH.RegisterVendorRoutes(vendor)
@@ -97,6 +100,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	adminH.RegisterRoutes(adminRoute)
 	blockchainH.RegisterAdminRoutes(adminRoute)
 	schedulerH.RegisterAdminRoutes(adminRoute)
+	fleetH.RegisterAdminRoutes(adminRoute)
 	catalogH.RegisterAdminRoutes(adminRoute)
 
 	paymentH.RegisterCallbackRoutes(r.Group("/api/v1"))
@@ -123,6 +127,12 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	}
 	if seen["POST /api/v1/user/roles"] {
 		t.Error("用户不应绕过审核直接申请业务角色")
+	}
+	for _, k := range []string{"PUT /api/v1/supplier/nodes/:id/ssh", "POST /api/v1/supplier/nodes/:id/host-key/confirm",
+		"POST /api/v1/admin/nodes/:id/suspend", "GET /api/v1/admin/node-tasks"} {
+		if !seen[k] {
+			t.Errorf("缺少托管节点路由 %s", k)
+		}
 	}
 	sort.Strings(lines)
 	t.Logf("共注册 %d 条路由:", len(lines))

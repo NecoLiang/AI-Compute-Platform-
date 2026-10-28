@@ -15,6 +15,7 @@ import (
 	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
+	"tokenfactory/internal/fleet"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
 	"tokenfactory/internal/notification"
@@ -24,6 +25,7 @@ import (
 	"tokenfactory/internal/ticket"
 	"tokenfactory/internal/user"
 	"tokenfactory/pkg/config"
+	tfcrypto "tokenfactory/pkg/crypto"
 	"tokenfactory/pkg/db"
 	mw "tokenfactory/pkg/middleware"
 	"tokenfactory/pkg/redis"
@@ -128,6 +130,23 @@ func main() {
 	schedulerSvc := scheduler.NewService(schedulerRepo)
 	schedulerSvc.SetNotifier(notificationSvc)
 
+	// 托管零租 S1 节点接入与探活 (docs/25 §25.4)。fleet.enabled=false(默认)时不装配,
+	// 现有行为不变: 添加 ssh 托管节点返回明确错误, 托管商品提交审核被拒。
+	var fleetSvc *fleet.Service
+	if cfg.Fleet.Enabled {
+		credKey, kerr := tfcrypto.ParseKeyHex(cfg.Security.CredentialKey)
+		if kerr != nil {
+			slog.Error("fleet.enabled=true 但 security.credential_key 不可用: 节点管理密钥相关操作将返回 50000", "error", kerr)
+			credKey = nil
+		}
+		fleetSvc = fleet.NewService(fleet.NewRepository(sqlDB),
+			fleet.Deps{Products: computeSvc, Health: schedulerSvc, Notifier: notificationSvc},
+			cfg.Fleet, cfg.AccessGW, credKey)
+		computeSvc.SetManagedGate(fleetSvc)
+		schedulerSvc.SetManagedNodes(fleetSvc)
+		slog.Warn("fleet 已启用; 访问网关(S2)未接入前探活 P11 判为不通过, 托管节点无法进入 verified")
+	}
+
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
 
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
@@ -223,6 +242,9 @@ func main() {
 	compute.NewHandler(computeSvc).RegisterSupplierRoutes(supplier)
 	payment.NewHandler(paymentSvc).RegisterSupplierRoutes(supplier)
 	scheduler.NewHandler(schedulerSvc).RegisterSupplierRoutes(supplier)
+	if fleetSvc != nil {
+		fleet.NewHandler(fleetSvc).RegisterSupplierRoutes(supplier)
+	}
 
 	// Vendor API
 	// 平台实际只有三种业务角色(供应方 supplier / 采购方 buyer / 运营方 operator|admin)。
@@ -246,6 +268,9 @@ func main() {
 	admin.NewHandler(adminSvc).RegisterRoutes(adminRoute)
 	blockchain.NewHandler(blockchainSvc).RegisterAdminRoutes(adminRoute)
 	scheduler.NewHandler(schedulerSvc).RegisterAdminRoutes(adminRoute)
+	if fleetSvc != nil {
+		fleet.NewHandler(fleetSvc).RegisterAdminRoutes(adminRoute)
+	}
 	catalog.NewHandler(catalogSvc).RegisterAdminRoutes(adminRoute)
 
 	// Payment callback (no auth, signature verification)
@@ -307,6 +332,10 @@ func main() {
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	go blockchainSvc.RunWorker(workerCtx)
 	go schedulerSvc.RunLivenessSweep(workerCtx)
+	if fleetSvc != nil {
+		fleetSvc.RunWorkers(workerCtx)
+		go fleetSvc.RunPeriodic(workerCtx)
+	}
 
 	go func() {
 		slog.Info("server starting", "port", cfg.Server.Port)

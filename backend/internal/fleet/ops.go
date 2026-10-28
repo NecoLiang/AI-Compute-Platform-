@@ -1,0 +1,314 @@
+package fleet
+
+import (
+	"fmt"
+
+	"tokenfactory/pkg/errcode"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// ===== 供给方节点操作(docs/25 §25.10) =====
+
+// Verify ⑥ 入队完整探活, 返回 task_id; 进行中重复提交返回同一任务。
+func (s *Service) Verify(supplierID, nodeID int64) (int64, error) {
+	var taskID int64
+	err := s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.ownedNode(tx, supplierID, nodeID)
+		if err != nil {
+			return err
+		}
+		switch n.VerifyStatus {
+		case VerifySuspended:
+			return errcode.New(errcode.Conflict, "节点已被运营停用")
+		case VerifyNeedsReimage:
+			return errcode.New(errcode.Conflict, "节点待重装确认, 请先调用重装确认")
+		case VerifyKeyMismatch:
+			return errcode.New(errcode.Conflict, "节点主机指纹已变化, 请先核对并确认新指纹")
+		}
+		if !n.sshReady() {
+			return errcode.New(errcode.ParamInvalid, "请先填写 SSH 连接信息(host/port/user)")
+		}
+		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "supplier", 5)
+		return err
+	})
+	return taskID, err
+}
+
+// ReimageConfirm 整机租约结束后供给方确认已重装: 重置指纹钉死并入队完整探活(新系统须重新确认指纹)。
+func (s *Service) ReimageConfirm(supplierID, nodeID int64, ip string) (int64, error) {
+	var taskID int64
+	err := s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.ownedNode(tx, supplierID, nodeID)
+		if err != nil {
+			return err
+		}
+		if n.VerifyStatus != VerifyNeedsReimage {
+			return errcode.New(errcode.Conflict, "仅待重装(needs_reimage)的节点可确认重装")
+		}
+		ok, err := affected(tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=NULL, host_key_confirmed_at=NULL, host_fp_claim=NULL
+			WHERE id=? AND mgmt_mode='ssh' AND verify_status='needs_reimage'`, nodeID))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errcode.New(errcode.Conflict, "节点状态已变化, 请刷新后重试")
+		}
+		if err := s.repo.audit(tx, supplierID, "node.reimage_confirmed", "supplier_node", nodeID,
+			map[string]any{"fingerprint": n.HostKeyFingerprint}, nil, ip); err != nil {
+			return err
+		}
+		if !n.sshReady() {
+			return nil
+		}
+		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "reimage_confirm", 5)
+		return err
+	})
+	return taskID, err
+}
+
+// ProbeReports 探活报告(不含凭证), limit 默认 10、最大 50。
+func (s *Service) ProbeReports(supplierID, nodeID int64, limit int) ([]ProbeReport, error) {
+	if _, err := s.getOwned(supplierID, nodeID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	list, err := s.repo.listReports(nodeID, limit)
+	if list == nil {
+		list = []ProbeReport{}
+	}
+	return list, err
+}
+
+// Slots 卡槽列表(含所属租约 id, 不含买家身份)。
+func (s *Service) Slots(supplierID, nodeID int64) ([]Slot, error) {
+	if _, err := s.getOwned(supplierID, nodeID); err != nil {
+		return nil, err
+	}
+	list, err := s.repo.listSlots(s.repo.db, nodeID)
+	if list == nil {
+		list = []Slot{}
+	}
+	return list, err
+}
+
+// SetSlotState 供给方停用/启用单卡: 仅 free↔withheld; 在租等其他状态 40900。
+func (s *Service) SetSlotState(supplierID, nodeID int64, gpuIndex int, state, ip string) error {
+	var from string
+	switch state {
+	case SlotWithheld:
+		from = SlotFree
+	case SlotFree:
+		from = SlotWithheld
+	default:
+		return errcode.New(errcode.ParamInvalid, `state 仅支持 "withheld" 或 "free"`)
+	}
+	var node *Node
+	err := s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.ownedNode(tx, supplierID, nodeID)
+		if err != nil {
+			return err
+		}
+		node = n
+		var cur string
+		err = tx.Get(&cur, `SELECT state FROM gpu_slots WHERE node_id=? AND gpu_index=? FOR UPDATE`, nodeID, gpuIndex)
+		if err != nil {
+			return errcode.New(errcode.NotFound, "卡槽不存在(节点通过探活后才会生成卡槽)")
+		}
+		if cur == state {
+			return nil
+		}
+		if cur != from {
+			return errcode.Newf(errcode.Conflict, "卡槽当前为 %s, 仅空闲(free)与停用(withheld)之间可切换", cur)
+		}
+		ok, err := s.repo.setSlotState(tx, nodeID, gpuIndex, from, state)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errcode.New(errcode.Conflict, "卡槽状态已变化, 请刷新后重试")
+		}
+		if err := s.repo.audit(tx, supplierID, "node.slot_"+state, "supplier_node", nodeID,
+			map[string]any{"gpu_index": gpuIndex, "state": from}, map[string]any{"gpu_index": gpuIndex, "state": state}, ip); err != nil {
+			return err
+		}
+		return s.recomputeStockTx(tx, n.ProductID)
+	})
+	if err == nil && node != nil {
+		s.refreshHealth(node)
+	}
+	return err
+}
+
+// SetSchedulable drain/undrain: 排空后不再接受新分配, 存量租约照常运行至到期。
+func (s *Service) SetSchedulable(supplierID, nodeID int64, v bool, ip string) error {
+	var node *Node
+	err := s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.ownedNode(tx, supplierID, nodeID)
+		if err != nil {
+			return err
+		}
+		node = n
+		if n.Schedulable == v {
+			return nil
+		}
+		ok, err := affected(tx.Exec(`UPDATE supplier_nodes SET schedulable=? WHERE id=? AND mgmt_mode='ssh' AND schedulable=?`, v, nodeID, !v))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errcode.New(errcode.Conflict, "节点状态已变化, 请刷新后重试")
+		}
+		action := "node.drained"
+		if v {
+			action = "node.undrained"
+		}
+		if err := s.repo.audit(tx, supplierID, action, "supplier_node", nodeID,
+			map[string]any{"schedulable": !v}, map[string]any{"schedulable": v}, ip); err != nil {
+			return err
+		}
+		return s.recomputeStockTx(tx, n.ProductID)
+	})
+	if err == nil && node != nil {
+		s.refreshHealth(node)
+	}
+	return err
+}
+
+// ===== 运营(docs/25 §25.10) =====
+
+// Suspend 运营停用节点: 停止新分配、释放空闲卡 UUID 与指纹占用、作废未执行任务; 不影响存量租约。
+func (s *Service) Suspend(operatorID, nodeID int64, reason, ip string) error {
+	var node *Node
+	err := s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.repo.lockNode(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			return errcode.New(errcode.NotFound, "托管节点不存在")
+		}
+		node = n
+		ok, err := s.repo.suspend(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errcode.New(errcode.Conflict, "节点已处于停用状态")
+		}
+		if err := s.repo.deleteIdleSlots(tx, nodeID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE node_tasks SET state='failed', last_error='节点已被运营停用', locked_until=NULL
+			WHERE node_id=? AND state='pending'`, nodeID); err != nil {
+			return err
+		}
+		if err := s.repo.audit(tx, operatorID, "node.suspended", "supplier_node", nodeID,
+			map[string]any{"verify_status": n.VerifyStatus}, map[string]any{"verify_status": VerifySuspended, "reason": reason}, ip); err != nil {
+			return err
+		}
+		return s.recomputeStockTx(tx, n.ProductID)
+	})
+	if err != nil {
+		return err
+	}
+	s.refreshHealth(node)
+	msg := fmt.Sprintf("节点「%s」已被平台运营停用, 停止接受新租约(存量租约不受影响)。", node.NodeName)
+	if reason != "" {
+		msg += "原因: " + reason
+	}
+	s.notify(node.SupplierID, "节点已被停用", msg, nodeID)
+	return nil
+}
+
+// Resume 运营恢复: suspended → unverified 并自动入队完整探活, 通过后才回到 verified(停用期间卡槽已释放, 须重新核验)。
+func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
+	var node *Node
+	var taskID int64
+	err := s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.repo.lockNode(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			return errcode.New(errcode.NotFound, "托管节点不存在")
+		}
+		node = n
+		ok, err := s.repo.resume(tx, nodeID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errcode.New(errcode.Conflict, "节点不在停用状态")
+		}
+		if err := s.repo.audit(tx, operatorID, "node.resumed", "supplier_node", nodeID,
+			map[string]any{"verify_status": VerifySuspended}, map[string]any{"verify_status": VerifyUnverified}, ip); err != nil {
+			return err
+		}
+		if !n.sshReady() {
+			return nil
+		}
+		n.VerifyStatus = VerifyUnverified
+		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "resume", 3)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	s.notify(node.SupplierID, "节点已恢复", fmt.Sprintf("节点「%s」已被平台运营恢复, 正在重新探活, 通过后恢复接单。", node.NodeName), nodeID)
+	return taskID, nil
+}
+
+// Tasks 运营任务列表(默认死信)。
+func (s *Service) Tasks(state string, nodeID int64, page, pageSize int) ([]Task, int64, error) {
+	switch state {
+	case "":
+		state = TaskDead
+	case TaskPending, TaskRunning, TaskSucceeded, TaskFailed, TaskDead:
+	default:
+		return nil, 0, errcode.New(errcode.ParamInvalid, "state 仅支持 pending/running/succeeded/failed/dead")
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	list, total, err := s.repo.listTasks(state, nodeID, page, pageSize)
+	if list == nil {
+		list = []Task{}
+	}
+	return list, total, err
+}
+
+// RetryTask 运营重试死信任务: dead → pending(次数清零), 写审计。
+func (s *Service) RetryTask(operatorID, taskID int64, ip string) error {
+	t, err := s.repo.getTask(s.repo.db, taskID)
+	if err != nil {
+		return err
+	}
+	if t == nil {
+		return errcode.New(errcode.NotFound, "任务不存在")
+	}
+	if t.State != TaskDead {
+		return errcode.Newf(errcode.Conflict, "仅死信(dead)任务可重试, 当前为 %s", t.State)
+	}
+	return s.inTx(func(tx *sqlx.Tx) error {
+		ok, err := affected(tx.Exec(`UPDATE node_tasks SET state='pending', attempts=0, run_after=NOW(), locked_until=NULL
+			WHERE id=? AND state='dead'`, taskID))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errcode.New(errcode.Conflict, "任务状态已变化, 请刷新后重试")
+		}
+		return s.repo.audit(tx, operatorID, "node_task.retry", "node_task", taskID,
+			map[string]any{"state": TaskDead, "attempts": t.Attempts, "last_error": t.LastError},
+			map[string]any{"state": TaskPending}, ip)
+	})
+}
