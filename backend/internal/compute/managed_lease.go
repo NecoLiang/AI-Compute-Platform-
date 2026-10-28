@@ -144,15 +144,20 @@ func (s *Service) ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt 
 	if o == nil || o.FulfillmentMode != FulfillmentManaged || o.Status != "provisioning" {
 		return nil, nil
 	}
-	var pricingMode string
-	if err := tx.Get(&pricingMode, "SELECT pricing_mode FROM products WHERE id=?", o.ProductID); err != nil {
+	// 租期按订单计费方式快照换算(S3 T-091, CR M1), 不读商品当前展示主价: 商品重提后展示方式可能已变。
+	// 快照缺失 → ErrOrderPricingModeMissing(50000), 开通失败进入重试/善后, 不猜测。
+	pricingMode, err := OrderPricingMode(o)
+	if err != nil {
 		return nil, err
 	}
 	if pricingMode == PricingPerpetual {
 		return nil, fmt.Errorf("托管订单不支持买断计费")
 	}
 	start := selftestAt.Truncate(time.Second)
-	end := LeaseEndAt(start, pricingMode, o.Duration)
+	end, err := LeaseEndAt(start, pricingMode, o.Duration, OrderNightWindow(o))
+	if err != nil {
+		return nil, err
+	}
 
 	info, err := json.Marshal(DeliverInfo{IpAddress: acc.GatewayHost, SshPort: acc.GatewayPort, Username: acc.Login,
 		CredentialNote: "平台托管租约: 经访问网关登录; 密码即本订单访问凭证 access_value, 推荐在账户中添加 SSH 公钥登录"})

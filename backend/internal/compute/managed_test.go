@@ -20,7 +20,7 @@ func TestManagedFulfillmentValidation(t *testing.T) {
 		{"托管-非零租", func(r *CreateProductReq) {
 			r.FulfillmentMode, r.DeliveryMode = FulfillmentManaged, "container"
 			r.ProductType = ProductTypeOutright
-		}, "仅支持零租"},
+		}, "仅适用于零租"},
 		{"托管-交付方式不支持", func(r *CreateProductReq) { r.FulfillmentMode, r.DeliveryMode = FulfillmentManaged, "vm" }, "container"},
 		{"非法模式", func(r *CreateProductReq) { r.FulfillmentMode = "auto" }, "履约模式非法"},
 	}

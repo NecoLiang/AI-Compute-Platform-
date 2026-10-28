@@ -10,7 +10,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 
 	"tokenfactory/pkg/errcode"
@@ -55,24 +54,6 @@ func initialProductStatus(mode string) string {
 		return "draft"
 	}
 	return "pending"
-}
-
-// validateFulfillment 托管只适用于零租的容器/整机交付; 库存由卡槽派生, 不接受人工填写。
-func validateFulfillment(req CreateProductReq) error {
-	switch req.FulfillmentMode {
-	case "", FulfillmentManual:
-		return nil
-	case FulfillmentManaged:
-	default:
-		return fmt.Errorf("履约模式非法: 仅支持 manual(人工交付)/managed(平台托管)")
-	}
-	if req.ProductType != ProductTypeCardRental {
-		return fmt.Errorf("平台托管仅支持零租商品")
-	}
-	if req.DeliveryMode != "container" && req.DeliveryMode != "bare_metal" {
-		return fmt.Errorf("平台托管仅支持 container(分卡容器)或 bare_metal(整机)交付")
-	}
-	return nil
 }
 
 // checkManagedSubmit 托管商品提交审核/重新提交时的闸门。

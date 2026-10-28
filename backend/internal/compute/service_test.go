@@ -89,11 +89,12 @@ func TestValidateProductReq_TypeAndPricingMatrix(t *testing.T) {
 		{"类型为空", func(r *CreateProductReq) { r.ProductType = "" }, "商品类型非法"},
 		{"类型未知", func(r *CreateProductReq) { r.ProductType = "gpu_lease" }, "商品类型非法"},
 
-		// --- 零租 card_rental: 计费仅 h/d/w ---
+		// --- 零租 card_rental: 全天商品 h/d/w/m (v1.2), 包夜另见 TestValidateCardRentalPricing ---
 		{"零租-按小时", func(r *CreateProductReq) { r.PricingMode = PricingHourly }, ""},
 		{"零租-按天", func(r *CreateProductReq) { r.PricingMode = PricingDaily }, ""},
 		{"零租-按周", func(r *CreateProductReq) { r.PricingMode = PricingWeekly }, ""},
-		{"零租-按月非法", func(r *CreateProductReq) { r.PricingMode = PricingMonthly }, "不适用于该商品类型"},
+		{"零租-按月(v1.2 起允许)", func(r *CreateProductReq) { r.PricingMode = PricingMonthly }, ""},
+		{"零租-包夜须夜间窗口", func(r *CreateProductReq) { r.PricingMode = PricingNightly }, "night_window"},
 		{"零租-永久非法", func(r *CreateProductReq) { r.PricingMode = PricingPerpetual }, "不适用于该商品类型"},
 		{"零租-缺GPU型号", func(r *CreateProductReq) { r.GpuModel = "" }, "必须填写 GPU 型号"},
 		{"零租-GPU型号纯空格", func(r *CreateProductReq) { r.GpuModel = "   " }, "必须填写 GPU 型号"},
@@ -590,19 +591,23 @@ func TestLeaseEndAt(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, LeaseEndAt(start, tc.mode, tc.dur))
+			got, err := LeaseEndAt(start, tc.mode, tc.dur, nil)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 
 	t.Run("买断无到期时间", func(t *testing.T) {
-		assert.True(t, LeaseEndAt(start, PricingPerpetual, 1).IsZero(),
+		end, err := LeaseEndAt(start, PricingPerpetual, 1, nil)
+		assert.NoError(t, err)
+		assert.True(t, end.IsZero(),
 			"永久使用权必须返回零值，由调用方置 lease_end_at = NULL")
 	})
 
 	t.Run("同样的 duration 在不同模式下租期长度不同", func(t *testing.T) {
 		// 这正是修复的核心：duration=30 在 hourly 下是 30 小时，在 daily 下是 30 天。
-		hourly := LeaseEndAt(start, PricingHourly, 30)
-		daily := LeaseEndAt(start, PricingDaily, 30)
+		hourly, _ := LeaseEndAt(start, PricingHourly, 30, nil)
+		daily, _ := LeaseEndAt(start, PricingDaily, 30, nil)
 		assert.True(t, daily.After(hourly),
 			"daily 的 30 个周期必须远长于 hourly 的 30 个周期，否则就是把周期数当成了小时数")
 		assert.Equal(t, 30*24, int(daily.Sub(start).Hours()))

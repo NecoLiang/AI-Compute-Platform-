@@ -18,7 +18,7 @@ curl "http://localhost:8080/api/v1/products?gpu_model=H100&region=北京&pricing
 |------|------|:--:|------|
 | gpu_model | string | — | NVIDIA H100 / 华为昇腾910B 等 |
 | region | string | — | 北京/上海/深圳等 |
-| pricing_mode | string | — | hourly / weekly / monthly |
+| pricing_mode | string | — | hourly / daily / weekly / monthly / nightly / perpetual；当前按商品展示主价方式筛选（按任一已启用价格筛选随 T-093 上线） |
 | price_min | int | — | 最低单价(分) |
 | price_max | int | — | 最高单价(分) |
 | sort | string | — | price_asc / price_desc / created_at_desc |
@@ -33,12 +33,23 @@ curl "http://localhost:8080/api/v1/products?gpu_model=H100&region=北京&pricing
     "cpu_spec":"2× Intel Xeon 8480+","memory_spec":"2TB DDR5","storage_spec":"30TB NVMe",
     "bandwidth_spec":"10Gbps","delivery_mode":"bare_metal","pricing_mode":"hourly",
     "unit_price":3500,"available_hours":"全天 24h","stock":32,"min_order":1,"min_duration":1,
-    "region":"北京","status":"active","self_operated":false
+    "region":"北京","status":"active","self_operated":false,
+    "fulfillment_mode":"manual","availability":"fulltime","night_start_min":null,"night_end_min":null,
+    "prices":[
+      {"pricing_mode":"hourly","unit_price":3500,"min_duration":1,"enabled":true},
+      {"pricing_mode":"daily","unit_price":72000,"min_duration":1,"enabled":true}
+    ]
   }],
   "total":47,"page":1,"page_size":20
 }}
 ```
 > `unit_price = 3500` 表示 ¥35.00 / 卡·时。前端展示时除以 100。
+
+**v1.2 灵活计费字段（028）**
+
+- `prices`：零租（`card_rental`）商品的全部计费方式，按周期从短到长排序；公开市场与详情只返回 `enabled=true` 的行，供给方 `/supplier/products` 与运营 `/admin/products` 返回含已停用在内的全部行。非零租商品恒为 `[]`，以顶层 `pricing_mode/unit_price/min_duration` 为准。`unit_price` 单位为 分/卡/周期。
+- 顶层 `pricing_mode/unit_price/min_duration` 是**展示主价**：已启用价格中周期最短的一项，供旧前端与排序使用；下单金额以所选方式的价格行为准。
+- `fulfillment_mode`：`manual`（供给方人工交付）/ `managed`（平台托管开通）；`availability`：`fulltime` / `night_window`；夜间窗口商品的 `night_start_min/night_end_min` 为 Asia/Shanghai 当日分钟数（0-1439，`end<=start` 表示次日结束），其余为 `null`。
 
 ---
 
@@ -76,12 +87,27 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 | gpu_model | string | ✅ | GPU 型号 |
 | card_count | int | ✅ | 可售总卡数 |
 | delivery_mode | string | ✅ | bare_metal / container / vm / rack |
-| pricing_mode | string | ✅ | hourly / weekly / monthly |
-| unit_price | int | ✅ | 单价(分)/卡·时，如 3500=¥35.00 |
+| pricing_mode | string | ✅¹ | 零租：hourly / daily / weekly / monthly / nightly；智算中心：monthly；买断：perpetual |
+| unit_price | int | ✅¹ | 单价(分)/卡/周期，如 3500=¥35.00 |
+| min_duration | int | — | 最短租期（周期数），默认 1 |
+| prices | array | — | 仅零租。多计费方式：`[{"pricing_mode":"hourly","unit_price":3500,"min_duration":1,"enabled":true}, ...]`；`min_duration` 省略为 1，`enabled` 省略为 true |
+| fulfillment_mode | string | — | manual（默认）/ managed；managed 仅零租 |
+| availability | string | — | fulltime（默认）/ night_window；night_window 仅零租 |
+| night_start_min / night_end_min | int | — | 仅 night_window；默认 1320/480（22:00-08:00）；30 分钟对齐，窗口长 4-14 小时；`available_hours` 由服务端按窗口生成 |
 | stock | int | ✅ | 可售余量 |
 | region | string | ✅ | 地域 |
 | compliance_agreed | bool | ✅ | 合规承诺（必须为 true） |
 | compliance_version | string | ✅ | 当前规范版本：`2026-09-06.1`；发布为上架规范，下单为使用规范 |
+
+¹ 零租传 `prices` 时顶层 `pricing_mode/unit_price/min_duration` 被忽略，并由服务端同步为展示主价；未传 `prices` 时（旧前端）按顶层字段生成一行价格。
+
+**零租计费组合约束**（违反返回 `40001`）：每种方式最多一行、单价 > 0、`1 ≤ min_duration ≤` 该方式单笔上限（小时 87600 / 天 3650 / 周 520 / 月 120 / 晚 31）、至少启用一种、`单价 × max(stock, card_count) × 单笔上限 ≤ 100 亿元`；`nightly`（包夜）只能单独开放，且要求 `availability=night_window` + `fulfillment_mode=managed`；`night_window` 商品只能卖包夜；`fulltime` 商品不能传夜间时段。非零租商品不能传 `prices`、`managed` 或夜间窗口。
+
+**成功响应**（`PUT /supplier/products/:id` 重提同样返回）：
+```json
+{"code":0,"data":{"id":12,"warnings":[{"code":"daily_above_24_hourly","message":"日价高于 24 小时价"}]}}
+```
+`warnings` 为价格倒挂提醒，只提醒不阻断，无提醒时为 `[]`。只比较已启用价格：`daily_above_24_hourly`（日价 > 24×时价）、`weekly_above_7_daily`（周价 > 7×日价）、`monthly_above_30_daily`（月价 > 30×日价）、`monthly_above_4_weekly`（未设日价时，月价 > 4×周价）。重提时未再提交的计费方式保留为 `enabled=false`（不删除），存量订单续租据此返回 `40900`。
 
 ---
 
@@ -98,7 +124,8 @@ curl -X POST http://localhost:8080/api/v1/orders \
 |------|------|:--:|------|
 | product_id | int | ✅ | 商品 ID |
 | quantity | int | ✅ | 卡数 |
-| duration | int | ✅ | 租期(小时) |
+| duration | int | ✅ | 租期，单位为所选计费方式的周期（小时/天/周/月/晚）；买断忽略并按 1 |
+| pricing_mode | string | — | 所选计费方式；省略取商品展示主价方式（兼容旧前端）。必须是该商品已启用的价格行，否则 `40001`「该商品未开放xx计费」 |
 | compliance_agreed | bool | ✅ | 合规承诺 |
 | compliance_version | string | ✅ | 当前规范版本：`2026-09-06.1`；发布为上架规范，下单为使用规范 |
 
@@ -114,6 +141,8 @@ curl -X POST http://localhost:8080/api/v1/orders \
 ```json
 {"code":40900,"message":"insufficient stock"}
 ```
+
+金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。v1.2 前的存量订单由迁移 028 按迁移时的计费方式回填快照（续租子订单取其续租快照，其余取当时商品方式），与新订单同样只认快照；快照缺失属数据异常，交付、签收、续租报价返回 `50000`「订单缺少计费方式快照…」，不回退商品当前展示方式。托管商品（`fulfillment_mode=managed`）与包夜（`nightly`）在托管履约模块接入前下单返回 `50000`「托管履约模块未启用」，不会静默按人工交付建单。
 
 ---
 
@@ -149,6 +178,8 @@ curl "http://localhost:8080/api/v1/orders?status=active&order_no=20260711&page=1
 },"request_id":"req_xxx"}
 ```
 
+`pricing_mode` 为订单的计费方式快照（v1.2 前存量订单由 028 回填），不回退商品当前展示方式；快照缺失（数据异常）时为空串。供给方订单列表、可开票订单列表同理。
+
 `supplier_name`：自营商品固定返回“平台自营”；非自营仅返回已认证企业名称，没有可用资料时为空串。
 
 ---
@@ -182,7 +213,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 },"request_id":"req_xxx"}
 ```
 
-`delivery` 和 `supplier.credit` 没有记录时为 `null`。详情不返回 `buyer_id`、`supplier_id`、密文、`access_key` 或凭证明文；凭证仍通过独立的 access-credential 接口查看。当前数据库没有订单事件表和商品快照，因此此接口不伪造区块链时间线，`product` / `supplier` 是当前关联资料。
+`product.pricing_mode` 与 `product.min_duration` 取**订单**的计费方式快照及该方式当前的最短租期（快照缺失时 `pricing_mode` 为空串、`can_renew=false`，不回退商品展示方式），用于续租表单；其余 `product` 字段为商品当前资料。`delivery` 和 `supplier.credit` 没有记录时为 `null`。详情不返回 `buyer_id`、`supplier_id`、密文、`access_key` 或凭证明文；凭证仍通过独立的 access-credential 接口查看。当前数据库没有订单事件表和商品快照，因此此接口不伪造区块链时间线，`product` / `supplier` 是当前关联资料。
 
 ## POST /dev/fixtures/buyer-orders · 为当前用户生成本地订单（仅 debug）
 
@@ -210,6 +241,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 - 非订单本人：`code=40300`
 - 状态不允许、尚未生成凭证或重复签收：`code=40900`
 - 订单不存在：`code=40400`
+- 订单缺少计费方式快照（数据异常，须平台核对）：`code=50000`，不按商品当前方式换算租期
 
 ## GET /orders/:id/renewal-quote · 续租报价 ✅ buyer
 
@@ -219,7 +251,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 {"parent_order_no":"ORD20260908000000abcdef","mode":"extend","quantity":2,"duration":2,"pricing_mode":"hourly","min_duration":1,"max_duration":87600,"unit_price":3000,"total_amount":12000,"platform_fee":780,"fee_rate":650,"lease_end_at":"2026-09-08T12:00:00+08:00","renewed_until":"2026-09-08T14:00:00+08:00"}
 ```
 
-金额均为分，采用当前商品价格和平台费率，原订单金额不变。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
+金额均为分，按**原订单的计费方式快照**（存量订单由 028 回填；快照缺失返回 `50000`，不回退商品当前展示方式）取该方式当前的价格行与平台费率报价，原订单金额不变；`min_duration/max_duration` 也取该方式。供给方已停用该计费方式时返回 `40900`「该计费方式已停用，请重新下单」，不会换算成其他方式；此时详情 `can_renew=false`。托管商品或包夜订单在托管履约模块接入前返回 `50000`。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
 
 ## POST /orders/:id/renew · 创建续租订单 ✅ buyer
 
@@ -233,6 +265,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 - 创建不延长租期。到期前续租不重复扣库存，支付期限为 15 分钟与原租期结束时间的较早者。到期后续租只预留尚未持有的卡；取消、超时只释放这笔实际占用。
 - 验签成功且金额、支付记录、订单状态与时限匹配后，在同一事务记录支付、分账金额及履约变更。重复回调不重复延长/划转库存，运营不能通过改子订单状态绕过支付。
 - 到期前支付更新原订单结束时间与凭证有效期；到期后支付将预留库存划归原订单、原订单转为 `paid` 并吊销旧凭证，供给方在原订单重新交付，买家重新签收。子订单 `completed` 表示续租款项已应用，实际资源交付仍看原订单。
+- 续租子订单（`REN`）同样写入计费方式快照。
 - 原订单价格/数量/原购买周期不改写。重新交付使用子订单的周期与计费方式快照；原交付存证保留，新交付关联本次续租订单。
 
 原订单详情及供给方订单列表新增可空 `current_lease`（`order_no,duration,pricing_mode`），指向最近一次已付款且未退款的到期后续租。重新交付按此周期快照执行；原订单的金额和购买周期保持历史值。此时退款须从本次续租子订单申请，原订单 `can_refund=false`，服务端也拒绝绕过。
@@ -253,7 +286,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 ```json
 {"ip_address":"10.0.1.128","ssh_port":22,"username":"root","credential_note":"密码已私信"}
 ```
-交付信息与访问凭证均使用 AES-256-GCM 加密存储；未配置 `security.credential_key` 时明确失败，不降级为明文。
+交付信息与访问凭证均使用 AES-256-GCM 加密存储；未配置 `security.credential_key` 时明确失败，不降级为明文。凭证到期时间按订单计费方式快照与购买周期换算；快照缺失时返回 `50000`，不交付。
 
 ---
 

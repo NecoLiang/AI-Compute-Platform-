@@ -70,9 +70,10 @@ const invoiceColumns = `id, invoice_no, buyer_id, company_name, tax_no, bank_nam
 	amount_fen, invoice_type, status, tax_invoice_no, pdf_filename, reject_reason,
 	applied_at, issued_at, created_at, updated_at`
 
+// pricing_mode 只取订单快照(028 已回填存量订单), 不回退商品当前展示方式: 商品重提后展示方式会变 (CR M1)。
 const billableOrderColumns = `o.id, o.order_no, o.status, o.quantity, o.total_amount,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
-	COALESCE(p.pricing_mode,'') AS pricing_mode, o.created_at`
+	COALESCE(o.pricing_mode,'') AS pricing_mode, o.created_at`
 
 // ===== Repository =====
 

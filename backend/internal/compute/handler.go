@@ -195,12 +195,12 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	id, err := h.svc.CreateProduct(c.GetInt64("user_id"), req)
+	id, warnings, err := h.svc.CreateProduct(c.GetInt64("user_id"), req)
 	if err != nil {
 		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
-	response.Success(c, gin.H{"id": id})
+	response.Success(c, gin.H{"id": id, "warnings": warnings})
 }
 
 func (h *Handler) GetMyProducts(c *gin.Context) {
@@ -694,11 +694,12 @@ func (h *Handler) ResubmitProduct(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	if err := h.svc.ResubmitProduct(c.GetInt64("user_id"), id, req); err != nil {
+	warnings, err := h.svc.ResubmitProduct(c.GetInt64("user_id"), id, req)
+	if err != nil {
 		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
-	response.Success(c, gin.H{"id": id})
+	response.Success(c, gin.H{"id": id, "warnings": warnings})
 }
 
 // SupplierOfflineProduct 供给方主动下架自己的商品; 下架后可修改并重提(重新审核)。
@@ -794,7 +795,18 @@ func productToJSON(p *Product) gin.H {
 		"available_hours": p.AvailableHours,
 		"stock":           p.Stock, "min_order": p.MinOrder, "min_duration": p.MinDuration,
 		"region": p.Region, "status": p.Status, "self_operated": p.SelfOperated, "health": p.Health,
+		"fulfillment_mode": p.FulfillmentMode, "availability": p.Availability,
+		"night_start_min": p.NightStartMin, "night_end_min": p.NightEndMin,
+		"prices": productPricesJSON(p),
 	}
+}
+
+// productPricesJSON 价格列表永不为 nil; 非零租商品为空数组(以顶层 pricing_mode/unit_price 为准)。
+func productPricesJSON(p *Product) []ProductPrice {
+	if p.Prices == nil {
+		return []ProductPrice{}
+	}
+	return p.Prices
 }
 
 var _ = middleware.RBAC

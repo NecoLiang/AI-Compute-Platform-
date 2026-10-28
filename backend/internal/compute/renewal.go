@@ -106,23 +106,41 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if err := tx.Get(&product, "SELECT "+productColumns+" FROM products WHERE id=? FOR UPDATE", parent.ProductID); err != nil {
 		return nil, err
 	}
-	if product.Health == "offline" || product.PricingMode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
+	if err := attachPrices(tx, []*Product{&product}); err != nil {
+		return nil, err
+	}
+	// 续租按原订单的计费方式快照报价, 不随商品展示主价漂移; 快照缺失返回 50000, 不回退商品当前方式(CR M1)。
+	mode, err := OrderPricingMode(parent)
+	if err != nil {
+		return nil, err
+	}
+	if product.Health == "offline" || mode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
 		return nil, ErrRenewalConflict
 	}
 	if err := requireUnexpiredQualifications(tx, product.SupplierID); err != nil {
 		return nil, err
 	}
-	quantity, duration, err := ValidateRenewParams(&product, parent.Quantity, duration)
+	// 供给方已停用该计费方式 → ErrPricingModeDisabled(40900, 提示重新下单), 不换算成其他方式。
+	price, err := PriceFor(&product, mode)
 	if err != nil {
 		return nil, err
 	}
-	total, fee, err := CalcOrderAmount(product.UnitPrice, quantity, duration, int64(policy.FeeRate))
+	// 托管订单已在入口由 requireManagedRenewable 拦截(RenewTx 未接入前 50000, T-088); 接入后同样按上面的快照报价。
+	// 包夜续租依赖夜间预订(T-094), 未接入前 50000。
+	if mode == PricingNightly {
+		return nil, errNightlyNotWired
+	}
+	quantity, duration, err := ValidateRenewParamsFor(&product, price, parent.Quantity, duration)
+	if err != nil {
+		return nil, err
+	}
+	total, fee, err := CalcOrderAmount(price.UnitPrice, quantity, duration, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
 	q := &RenewalQuote{ParentOrderNo: parent.OrderNo, Mode: "extend", Quantity: quantity, Duration: duration,
-		PricingMode: product.PricingMode, MinDuration: max(1, product.MinDuration), MaxDuration: MaxDurationFor(product.PricingMode),
-		UnitPrice: product.UnitPrice, TotalAmount: total, PlatformFee: fee, FeeRate: policy.FeeRate, LeaseEndAt: *parent.LeaseEnd}
+		PricingMode: mode, MinDuration: price.MinDuration, MaxDuration: MaxDurationFor(mode),
+		UnitPrice: price.UnitPrice, TotalAmount: total, PlatformFee: fee, FeeRate: policy.FeeRate, LeaseEndAt: *parent.LeaseEnd}
 	if parent.LeaseEnd.After(time.Now()) {
 		if parent.Status != "active" || *parent.StockReserved != parent.Quantity {
 			return nil, ErrRenewalConflict
@@ -130,7 +148,10 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 		if err := requireRenewableAccess(tx, parent.ID); err != nil {
 			return nil, err
 		}
-		end := LeaseEndAt(*parent.LeaseEnd, product.PricingMode, duration)
+		end, err := LeaseEndAt(*parent.LeaseEnd, mode, duration, OrderNightWindow(parent))
+		if err != nil {
+			return nil, err
+		}
 		q.RenewedUntil = &end
 	} else {
 		q.Mode = "restart"
@@ -228,6 +249,7 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 	}
 	o := &Order{OrderNo: "REN" + time.Now().Format("20060102150405") + uuid.New().String()[:6], BuyerID: buyerID,
 		ProductID: parent.ProductID, StockReserved: &reserved, Quantity: q.Quantity, Duration: q.Duration, UnitPrice: q.UnitPrice,
+		PricingMode: &q.PricingMode, NightStartMin: parent.NightStartMin, NightEndMin: parent.NightEndMin,
 		TotalAmount: q.TotalAmount, PlatformFee: q.PlatformFee, Status: "pending_payment", PaymentExpires: &expires, ComplianceAgreed: true}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err

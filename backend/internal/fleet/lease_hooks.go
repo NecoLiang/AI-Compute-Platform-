@@ -142,14 +142,12 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 		}
 	case LeaseActive, LeaseParked, LeaseSuspended:
 		if to == "completed" {
-			p, err := s.products.ManagedProduct(l.ProductID)
+			// 宽限期按订单计费方式快照(S3 T-091)取档, 不读商品当前展示主价; 快照缺失报 50000。
+			mode, err := compute.OrderPricingMode(o)
 			if err != nil {
 				return err
 			}
-			if p == nil {
-				return fmt.Errorf("租约 %s 的商品不存在", l.LeaseNo)
-			}
-			until := time.Now().Add(s.graceFor(p.PricingMode))
+			until := time.Now().Add(s.graceFor(mode))
 			if err := s.mustTransition(tx, l, LeaseGrace, ", grace_until=?", until); err != nil {
 				return err
 			}
