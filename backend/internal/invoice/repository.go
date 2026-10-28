@@ -72,7 +72,7 @@ const invoiceColumns = `id, invoice_no, buyer_id, company_name, tax_no, bank_nam
 
 const billableOrderColumns = `o.id, o.order_no, o.status, o.quantity, o.total_amount,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
-	COALESCE(p.pricing_mode,'') AS pricing_mode, o.created_at`
+	COALESCE(o.pricing_mode,p.pricing_mode,'') AS pricing_mode, o.created_at`
 
 // ===== Repository =====
 

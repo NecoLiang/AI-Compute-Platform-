@@ -103,23 +103,36 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if err := tx.Get(&product, "SELECT "+productColumns+" FROM products WHERE id=? FOR UPDATE", parent.ProductID); err != nil {
 		return nil, err
 	}
-	if product.Health == "offline" || product.PricingMode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
+	if err := attachPrices(tx, []*Product{&product}); err != nil {
+		return nil, err
+	}
+	// 续租按原订单的计费方式快照报价(v1.2 前订单无快照, 回退商品当前展示方式); 不随商品展示主价漂移。
+	mode := OrderPricingMode(parent, product.PricingMode)
+	if product.Health == "offline" || mode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
 		return nil, ErrRenewalConflict
 	}
 	if err := requireUnexpiredQualifications(tx, product.SupplierID); err != nil {
 		return nil, err
 	}
-	quantity, duration, err := ValidateRenewParams(&product, parent.Quantity, duration)
+	// 供给方已停用该计费方式 → ErrPricingModeDisabled(40900, 提示重新下单), 不换算成其他方式。
+	price, err := PriceFor(&product, mode)
 	if err != nil {
 		return nil, err
 	}
-	total, fee, err := CalcOrderAmount(product.UnitPrice, quantity, duration, int64(policy.FeeRate))
+	if product.FulfillmentMode == FulfillmentManaged || mode == PricingNightly {
+		return nil, ErrManagedFulfillmentDisabled
+	}
+	quantity, duration, err := ValidateRenewParamsFor(&product, price, parent.Quantity, duration)
+	if err != nil {
+		return nil, err
+	}
+	total, fee, err := CalcOrderAmount(price.UnitPrice, quantity, duration, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
 	q := &RenewalQuote{ParentOrderNo: parent.OrderNo, Mode: "extend", Quantity: quantity, Duration: duration,
-		PricingMode: product.PricingMode, MinDuration: max(1, product.MinDuration), MaxDuration: MaxDurationFor(product.PricingMode),
-		UnitPrice: product.UnitPrice, TotalAmount: total, PlatformFee: fee, FeeRate: policy.FeeRate, LeaseEndAt: *parent.LeaseEnd}
+		PricingMode: mode, MinDuration: price.MinDuration, MaxDuration: MaxDurationFor(mode),
+		UnitPrice: price.UnitPrice, TotalAmount: total, PlatformFee: fee, FeeRate: policy.FeeRate, LeaseEndAt: *parent.LeaseEnd}
 	if parent.LeaseEnd.After(time.Now()) {
 		if parent.Status != "active" || *parent.StockReserved != parent.Quantity {
 			return nil, ErrRenewalConflict
@@ -127,7 +140,7 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 		if err := requireRenewableAccess(tx, parent.ID); err != nil {
 			return nil, err
 		}
-		end, err := LeaseEndAt(*parent.LeaseEnd, product.PricingMode, duration, OrderNightWindow(parent))
+		end, err := LeaseEndAt(*parent.LeaseEnd, mode, duration, OrderNightWindow(parent))
 		if err != nil {
 			return nil, err
 		}
@@ -228,6 +241,7 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 	}
 	o := &Order{OrderNo: "REN" + time.Now().Format("20060102150405") + uuid.New().String()[:6], BuyerID: buyerID,
 		ProductID: parent.ProductID, StockReserved: &reserved, Quantity: q.Quantity, Duration: q.Duration, UnitPrice: q.UnitPrice,
+		PricingMode: &q.PricingMode, NightStartMin: parent.NightStartMin, NightEndMin: parent.NightEndMin,
 		TotalAmount: q.TotalAmount, PlatformFee: q.PlatformFee, Status: "pending_payment", PaymentExpires: &expires, ComplianceAgreed: true}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err

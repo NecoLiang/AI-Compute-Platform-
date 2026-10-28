@@ -2,6 +2,7 @@ package compute
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -1009,9 +1010,11 @@ func (s *Service) SupplierOfflineProduct(supplierID, id int64) error {
 // ===== Orders (T-015, T-016) =====
 
 type PlaceOrderReq struct {
-	ProductID         int64  `json:"product_id"`
-	Quantity          int    `json:"quantity"`
-	Duration          int    `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
+	ProductID int64 `json:"product_id"`
+	Quantity  int   `json:"quantity"`
+	Duration  int   `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
+	// PricingMode v1.2: 零租多价格商品选择计费方式; 省略取商品展示主价方式(兼容旧前端)。
+	PricingMode       string `json:"pricing_mode"`
 	ComplianceAgreed  bool   `json:"compliance_agreed"`
 	ComplianceVersion string `json:"compliance_version"`
 }
@@ -1025,17 +1028,35 @@ type PlaceOrderReq struct {
 //  2. Duration = 0 -> 总价 0, 白嫖。
 //  3. 超大值 -> int64 溢出。
 func ValidateOrderParams(p *Product, quantity, duration int) (int, int, error) {
-	return validateOrderParams(p, quantity, duration, true)
+	return validateOrderParams(p, displayQuote(p), quantity, duration, true)
+}
+
+// ValidateOrderParamsFor 按指定计费方式的价格(PriceFor 结果)校验下单参数: 最短/最长租期取该方式。
+func ValidateOrderParamsFor(p *Product, price PriceQuote, quantity, duration int) (int, int, error) {
+	return validateOrderParams(p, price, quantity, duration, true)
+}
+
+// ValidateRenewParamsFor 同 ValidateRenewParams, 但按订单快照的计费方式价格校验。
+func ValidateRenewParamsFor(p *Product, price PriceQuote, quantity, duration int) (int, int, error) {
+	return validateOrderParams(p, price, quantity, duration, false)
+}
+
+// displayQuote 商品顶层展示主价, 供不区分计费方式的旧调用方使用。
+func displayQuote(p *Product) PriceQuote {
+	if p == nil {
+		return PriceQuote{}
+	}
+	return PriceQuote{PricingMode: p.PricingMode, UnitPrice: p.UnitPrice, MinDuration: p.MinDuration}
 }
 
 // ValidateRenewParams 校验续租参数。规则与下单完全一致, 但**不校验库存**:
 // 续租是在买家已持有的同一批卡上延长租期, 不再占用新库存。
 // (下单时库存已扣减, 若此处再校验, 会出现"卡已卖光 -> 老客户无法续租"的错误拒绝。)
 func ValidateRenewParams(p *Product, quantity, duration int) (int, int, error) {
-	return validateOrderParams(p, quantity, duration, false)
+	return validateOrderParams(p, displayQuote(p), quantity, duration, false)
 }
 
-func validateOrderParams(p *Product, quantity, duration int, checkStock bool) (int, int, error) {
+func validateOrderParams(p *Product, price PriceQuote, quantity, duration int, checkStock bool) (int, int, error) {
 	if p == nil {
 		return 0, 0, fmt.Errorf("product not found")
 	}
@@ -1044,7 +1065,7 @@ func validateOrderParams(p *Product, quantity, duration int, checkStock bool) (i
 	if p.PriceNegotiable || p.ProductType == ProductTypeColocation {
 		return 0, 0, fmt.Errorf("该商品为面议商品，请通过询价联系")
 	}
-	if p.UnitPrice <= 0 {
+	if price.UnitPrice <= 0 {
 		return 0, 0, fmt.Errorf("该商品未设置有效单价，暂不支持在线下单")
 	}
 
@@ -1063,19 +1084,19 @@ func validateOrderParams(p *Product, quantity, duration int, checkStock bool) (i
 	}
 
 	// 买断/永久使用权: 时长概念不存在, 强制归一为 1, 忽略客户端传值。
-	if p.PricingMode == PricingPerpetual {
+	if price.PricingMode == PricingPerpetual {
 		return quantity, 1, nil
 	}
 
-	unit := DurationUnit(p.PricingMode)
-	minDuration := p.MinDuration
+	unit := DurationUnit(price.PricingMode)
+	minDuration := price.MinDuration
 	if minDuration < 1 {
 		minDuration = 1
 	}
 	if duration < minDuration {
 		return 0, 0, fmt.Errorf("租期不能少于最短租期 %d%s", minDuration, unit)
 	}
-	maxDuration := MaxDurationFor(p.PricingMode)
+	maxDuration := MaxDurationFor(price.PricingMode)
 	if duration > maxDuration {
 		return 0, 0, fmt.Errorf("租期超出上限 %d%s", maxDuration, unit)
 	}
@@ -1147,7 +1168,18 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		return nil, fmt.Errorf("供应方算力节点已全部离线, 该商品暂不可下单")
 	}
 
-	qty, dur, err := ValidateOrderParams(p, req.Quantity, req.Duration)
+	price, err := PriceFor(p, req.PricingMode)
+	if errors.Is(err, ErrPricingModeDisabled) {
+		return nil, fmt.Errorf("该商品未开放%s计费", orDefault(pricingModeLabels[req.PricingMode], req.PricingMode))
+	}
+	if err != nil {
+		return nil, err
+	}
+	// 托管履约与包夜(依赖托管开通与夜间排期)尚未接入: 明确报 50000, 不静默按人工交付处理(docs/25)。
+	if p.FulfillmentMode == FulfillmentManaged || price.PricingMode == PricingNightly {
+		return nil, ErrManagedFulfillmentDisabled
+	}
+	qty, dur, err := ValidateOrderParamsFor(p, price, req.Quantity, req.Duration)
 	if err != nil {
 		return nil, err
 	}
@@ -1163,7 +1195,7 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if !policy.TradingEnabled {
 		return nil, trading.ErrDisabled
 	}
-	totalFen, feeFen, err := CalcOrderAmount(p.UnitPrice, qty, dur, int64(policy.FeeRate))
+	totalFen, feeFen, err := CalcOrderAmount(price.UnitPrice, qty, dur, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
@@ -1178,7 +1210,8 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		Quantity:         qty,
 		StockReserved:    &qty,
 		Duration:         dur,
-		UnitPrice:        p.UnitPrice,
+		PricingMode:      &price.PricingMode, // 计费方式快照: 续租/租期换算只认它, 不随商品改价漂移
+		UnitPrice:        price.UnitPrice,
 		TotalAmount:      totalFen,
 		PlatformFee:      feeFen,
 		Status:           "pending_payment",
@@ -1337,6 +1370,13 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 	}
 
 	order := buyerOrder.Order
+	// 订单计费方式: 快照优先(BuyerOrder.PricingMode 已 COALESCE 订单快照与商品展示方式),
+	// 最短租期取该方式的价格行, 续租探测与展示都按它, 不按商品当前展示主价。
+	orderMode := orDefault(buyerOrder.PricingMode, product.PricingMode)
+	orderMinDuration := max(1, product.MinDuration)
+	if price, err := PriceFor(product, orderMode); err == nil {
+		orderMinDuration = price.MinDuration
+	}
 	detail := &BuyerOrderDetail{
 		Order: BuyerOrderDetailOrder{
 			OrderNo: order.OrderNo, Status: order.Status, Quantity: order.Quantity, Duration: order.Duration,
@@ -1345,11 +1385,11 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			ComplianceAgreed: order.ComplianceAgreed, CreatedAt: order.CreatedAt, UpdatedAt: order.UpdatedAt,
 		},
 		Product: BuyerOrderDetailProduct{
-			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel, MinDuration: max(1, product.MinDuration),
+			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel, MinDuration: orderMinDuration,
 			CardCount: product.CardCount, MachineCount: product.MachineCount, TotalPflopsApprox: product.TotalPflopsApprox,
 			PowerCapacityKW: product.PowerCapacityKw, RackCount: product.RackCount, CPUSpec: product.CpuSpec,
 			MemorySpec: product.MemorySpec, StorageSpec: product.StorageSpec, BandwidthSpec: product.BandwidthSpec,
-			DeliveryMode: product.DeliveryMode, PricingMode: product.PricingMode, Region: product.Region,
+			DeliveryMode: product.DeliveryMode, PricingMode: orderMode, Region: product.Region,
 			SelfOperated: product.SelfOperated,
 		},
 		Supplier: BuyerOrderDetailSupplier{
@@ -1385,7 +1425,7 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 		}
 		detail.Actions.CanRefund = order.Status == "completed" && unusedRenewal(parent, renewal)
 	} else {
-		lease, pricingMode, err := s.currentLeaseOrder(s.db, &order, product.PricingMode)
+		lease, pricingMode, err := s.currentLeaseOrder(s.db, &order, orderMode)
 		if err != nil {
 			return nil, err
 		}
@@ -1401,7 +1441,7 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			detail.PendingRenewalOrderNo = pending[0]
 		}
 		if len(pending) == 0 {
-			_, err := s.GetRenewalQuote(buyerID, orderNo, max(1, product.MinDuration))
+			_, err := s.GetRenewalQuote(buyerID, orderNo, orderMinDuration)
 			detail.Actions.CanRenew = err == nil
 		}
 	}
@@ -1471,14 +1511,14 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 		total := product.UnitPrice * int64(duration)
 		platformFee := total * int64(policy.FeeRate) / 10000
 		_, err := tx.Exec(`INSERT INTO orders
-			(order_no,buyer_id,product_id,quantity,duration,unit_price,total_amount,platform_fee,status,
+			(order_no,buyer_id,product_id,quantity,duration,pricing_mode,unit_price,total_amount,platform_fee,status,
 			 payment_expires_at,lease_start_at,lease_end_at,compliance_agreed,created_at,updated_at,stock_reserved)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,0)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,0)
 			ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id),product_id=VALUES(product_id),quantity=VALUES(quantity),
-			duration=VALUES(duration),unit_price=VALUES(unit_price),total_amount=VALUES(total_amount),
+			duration=VALUES(duration),pricing_mode=VALUES(pricing_mode),unit_price=VALUES(unit_price),total_amount=VALUES(total_amount),
 			platform_fee=VALUES(platform_fee),status=VALUES(status),payment_expires_at=VALUES(payment_expires_at),
 			lease_start_at=VALUES(lease_start_at),lease_end_at=VALUES(lease_end_at),compliance_agreed=1,updated_at=VALUES(updated_at)`,
-			orderNo, buyerID, product.ID, 1, duration, product.UnitPrice, total, platformFee, status,
+			orderNo, buyerID, product.ID, 1, duration, product.PricingMode, product.UnitPrice, total, platformFee, status,
 			paymentExpiresAt, leaseStartAt, leaseEndAt, createdAt, now)
 		if err != nil {
 			return nil, err
@@ -1637,7 +1677,7 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 
 	// 永久使用权无到期时间; 其余按租期换算, 到期后由 RevokeExpiredAccess 吊销。
 	// duration 是计费周期数, 必须走 LeaseEndAt 换算, 否则 monthly 订单的凭证会在几小时后就失效。
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, OrderPricingMode(o, p.PricingMode))
 	if err != nil {
 		return nil, err
 	}
@@ -1730,7 +1770,7 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		return fmt.Errorf("product not found")
 	}
 
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, OrderPricingMode(o, p.PricingMode))
 	if err != nil {
 		return err
 	}

@@ -317,7 +317,8 @@ func TestRenewalRequiresCurrentQuoteAndConsentAndCannotBeFulfilledByAdminStatus(
 	input["compliance_agreed"] = false
 	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", input, 40001)
 	input["compliance_agreed"] = true
-	db.MustExec("UPDATE products SET unit_price=3000 WHERE id=?", productID)
+	// v1.2: 零租价格以 product_prices 为准, 改价需同时改价格行(与重提商品的效果一致)。
+	db.MustExec("UPDATE products p JOIN product_prices pp ON pp.product_id=p.id SET p.unit_price=3000, pp.unit_price=3000 WHERE p.id=?", productID)
 	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", input, 40900)
 	quote = tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
 	created := tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", renewalInput(quote, "a9a2234b-f1e5-44a8-9725-b6f25866de35"), 0).Data.(map[string]any)
@@ -393,7 +394,8 @@ func TestExpiredRenewalRejectsChangedPricingModeEvenWhenAmountsMatch(t *testing.
 	buyer := tradeRouter(db, 102)
 	quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
 	input := renewalInput(quote, "642b6836-50a5-4319-aa69-3bf1d6d5578b")
-	db.MustExec("UPDATE products SET pricing_mode='daily' WHERE id=?", productID)
+	// 供给方把小时价换成同价的日价: 订单快照(hourly)已不再开放, 续租必须 40900 而不是按日价换算。
+	db.MustExec("UPDATE products p JOIN product_prices pp ON pp.product_id=p.id SET p.pricing_mode='daily', pp.pricing_mode='daily' WHERE p.id=?", productID)
 	tradeRequest(t, buyer, "POST", "/api/v1/orders/"+parentNo+"/renew", input, 40900)
 }
 
@@ -437,7 +439,8 @@ func TestRenewalCreatesOneLinkedOrderWithoutExtendingOrReservingTwice(t *testing
 	_, _, parentNo, productID := activeRenewalOrder(t, db)
 	buyer := tradeRouter(db, 102)
 	before := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo, nil, 0).Data.(map[string]any)
-	db.MustExec("UPDATE products SET unit_price=3000 WHERE id=?", productID)
+	// v1.2: 零租价格以 product_prices 为准, 改价需同时改价格行(与重提商品的效果一致)。
+	db.MustExec("UPDATE products p JOIN product_prices pp ON pp.product_id=p.id SET p.unit_price=3000, pp.unit_price=3000 WHERE p.id=?", productID)
 	db.MustExec("UPDATE system_config SET config_value='650' WHERE config_key='fee_rate'")
 	quote := tradeRequest(t, buyer, "GET", "/api/v1/orders/"+parentNo+"/renewal-quote?duration=2", nil, 0).Data.(map[string]any)
 	if quote["mode"] != "extend" || quote["total_amount"] != float64(12000) || quote["platform_fee"] != float64(780) {
