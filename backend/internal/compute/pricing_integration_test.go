@@ -3,7 +3,6 @@ package compute_test
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,30 +154,11 @@ func TestPricingLegacyInputAndCombinationRules(t *testing.T) {
 func TestMigration028BackfillGuardAndDownRefuses(t *testing.T) {
 	db := setupTradeDB(t) // 已执行到 028
 	// setupTradeDB 跑完全链; 另起一个只执行 028 之前迁移的库验证核对与回填。
+	// 只执行 028 之前迁移的独立库: 复用 setupTradeDBBefore, 保证 multiStatements、
+	// parseTime 与 +08:00 会话时区和全链测试库一致(裸 TEST_MYSQL_DSN 未必带 multiStatements)。
 	rebuild := func(t *testing.T) *sqlx.DB {
 		t.Helper()
-		var name string
-		db.Get(&name, "SELECT DATABASE()")
-		fresh := name + "_m028"
-		db.MustExec("CREATE DATABASE " + fresh)
-		t.Cleanup(func() { db.Exec("DROP DATABASE " + fresh) })
-		dsn := strings.Replace(os.Getenv("TEST_MYSQL_DSN"), "/?", "/"+fresh+"?", 1)
-		other, err := sqlx.Connect("mysql", dsn)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { other.Close() })
-		paths, _ := filepath.Glob("../../migrations/*.up.sql")
-		for _, p := range paths {
-			if filepath.Base(p) >= "028" {
-				continue
-			}
-			data, _ := os.ReadFile(p)
-			if _, err := other.Exec(string(data)); err != nil {
-				t.Fatalf("%s: %v", p, err)
-			}
-		}
-		return other
+		return setupTradeDBBefore(t, "028")
 	}
 	up, _ := os.ReadFile("../../migrations/028_flexible_pricing.up.sql")
 	down, _ := os.ReadFile("../../migrations/028_flexible_pricing.down.sql")
