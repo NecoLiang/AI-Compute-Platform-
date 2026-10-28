@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // P4–P8: 只读检查, 不触碰在租资源。
@@ -77,13 +78,13 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P6", true, fmt.Sprintf("%d 个拓扑分组", len(groups)))
 	}
 
-	p.health(ctx, "-24h", "P7")
+	p.health(ctx, 24*time.Hour, "P7")
 	p.host(ctx)
 }
 
 // health P7: ECC 不可纠正错误、退役页/行重映射、Xid; 有问题的卡记入 inv.Faulty(不计入可售)。
 // window 为 Xid 扫描时间窗, 结论写入 checkID(P13 压测后复用为 "-10min" 复扫时不写检查项)。
-func (p *probeRun) health(ctx context.Context, window, checkID string) {
+func (p *probeRun) health(ctx context.Context, window time.Duration, checkID string) {
 	if p.inv.Faulty == nil {
 		p.inv.Faulty = map[int]string{}
 	}
@@ -105,9 +106,10 @@ func (p *probeRun) health(ctx context.Context, window, checkID string) {
 		notes = append(notes, "行重映射输出无法解析")
 		remap = map[string]RemapRow{}
 	}
-	cmd, _ := xidCommand(window)
-	xout, _ := p.run(ctx, cmd) // grep 无匹配时退出码非 0, 以解析结果为准
-	xid := ParseXid(xout)
+	since, window := xidSince(window)
+	cmd, _ := xidCommand(since)
+	xout, _ := p.run(ctx, cmd) // 以解析结果为准(错误输出带 @@err 前缀)
+	xid := ParseXid(xout, window)
 	if !xid.Known {
 		notes = append(notes, "Xid 未知: "+xid.Note)
 	}

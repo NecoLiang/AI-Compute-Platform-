@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,9 +33,12 @@ type FleetConfig struct {
 	// DenyCIDRs 追加到内置拒绝名单(pkg/netguard.DefaultDenyCIDRs)的目标地址段, 典型为平台自身 VPC/内网网段、
 	// 主服务与网关所在公网段。只能追加, 不能放行内置段。元素为 CIDR 或单个 IP。
 	DenyCIDRs []string
-	Grace     FleetGrace
-	Outage    FleetOutage
-	Probe     FleetProbe
+	// ModelCacheDir 节点上的模型权重缓存目录(docs/27 §27.4.3), 完整探活读取其所在文件系统容量作为
+	// 一键部署可行性 F4 的输入。只允许 /[A-Za-z0-9._/-]、不含 ".."(会直接进入节点命令)。默认 /data/omnis-models。
+	ModelCacheDir string
+	Grace         FleetGrace
+	Outage        FleetOutage
+	Probe         FleetProbe
 }
 
 type BaseImage struct {
@@ -87,6 +91,7 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 		HostReserveMemGB:    v.GetInt("fleet.host_reserve_mem_gb"),
 		SelftestKeyFile:     strings.TrimSpace(v.GetString("fleet.selftest_key_file")),
 		DenyCIDRs:           cleanList(v.GetStringSlice("fleet.deny_cidrs")),
+		ModelCacheDir:       strings.TrimSpace(v.GetString("fleet.model_cache_dir")),
 		Grace: FleetGrace{
 			Short:   v.GetDuration("fleet.grace.short"),
 			Long:    v.GetDuration("fleet.grace.long"),
@@ -158,6 +163,9 @@ func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
 	}
 	if f.Probe.MinPerfRatio <= 0 {
 		f.Probe.MinPerfRatio = 0.7
+	}
+	if f.ModelCacheDir == "" {
+		f.ModelCacheDir = "/data/omnis-models"
 	}
 	if gw.PublicPort <= 0 {
 		gw.PublicPort = 2222
@@ -238,6 +246,9 @@ func validateFleet(cfg *Config) error {
 	if f.Probe.MinPerfRatio > 1 {
 		invalid = append(invalid, "fleet.probe.min_perf_ratio 须在 (0,1]")
 	}
+	if !modelCacheDirRe.MatchString(f.ModelCacheDir) || strings.Contains(f.ModelCacheDir, "..") {
+		invalid = append(invalid, "fleet.model_cache_dir 须为绝对路径, 仅含字母数字与 ._/-, 不含 ..")
+	}
 	if len(missing) == 0 && len(invalid) == 0 {
 		return nil
 	}
@@ -250,6 +261,9 @@ func validateFleet(cfg *Config) error {
 	}
 	return fmt.Errorf("%s", msg)
 }
+
+// modelCacheDirRe 与 fleet 包内节点命令的路径白名单(safePathRe)一致。
+var modelCacheDirRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]{0,200}$`)
 
 // IsDigestRef 镜像引用必须以 @sha256:<64 hex> 结尾, 防止标签被覆盖后换了镜像内容。
 func IsDigestRef(ref string) bool {

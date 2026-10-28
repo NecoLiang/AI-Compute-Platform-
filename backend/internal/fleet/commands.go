@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -22,6 +23,14 @@ const (
 	// cmdLight 周期轻量探活: 利用率/温度/ECC; 与 docker 守护进程存活一并检查。
 	cmdLight       = "nvidia-smi --query-gpu=index,uuid,utilization.gpu,utilization.memory,temperature.gpu,ecc.errors.uncorrected.volatile.total --format=csv,noheader,nounits"
 	cmdDockerAlive = "docker ps -q --filter label=omnis.lease"
+	// cmdTelemetry 轻探活附带的逐卡遥测(docs/27 §27.3 F3 输入, 落 gpu_slots 遥测列): 显存已用/总量、温度、功耗、
+	// 降频原因位图、ECC 不可纠正/可纠正计数。与 cmdLight 分开执行: 遥测失败只让数据变旧(上层按"未知"处理),
+	// 不改变探活成败口径。
+	cmdTelemetry = "nvidia-smi --query-gpu=uuid,memory.used,memory.total,temperature.gpu,power.draw,clocks_throttle_reasons.active," +
+		"ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total --format=csv,noheader,nounits"
+	// cmdTelemetryEvent 新驱动把 clocks_throttle_reasons 更名为 clocks_event_reasons; 前者报 "is not a valid field" 时改用此式。
+	cmdTelemetryEvent = "nvidia-smi --query-gpu=uuid,memory.used,memory.total,temperature.gpu,power.draw,clocks_event_reasons.active," +
+		"ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.volatile.total --format=csv,noheader,nounits"
 )
 
 var (
@@ -31,13 +40,58 @@ var (
 	sinceRe     = regexp.MustCompile(`^-[0-9]{1,3}(h|min)$`)
 )
 
-// xidCommand 读取内核日志中的 Xid。首行输出管理账户身份, 供 ParseXid 判断是否有权限;
-// 花括号把 "journalctl: not found" 这类 shell 报错也送进管道。
+// xidCommand 读取内核日志中最近 since 时间窗的 Xid(docs/25 §25.4.4、docs/27 §27.3 F6)。输出:
+//
+//	@@id uid=<n> groups=<g …>   管理账户身份, 供 ParseXid 判断是否有权限读内核日志
+//	@@now <unix 秒>             节点时钟, 用于把事件时间换算到平台时钟
+//	@@src journal|dmesg         数据来源: 有 journalctl 用 journalctl -k, 否则退回 dmesg
+//	@@first <ISO 时间>          当前可读到的最早一条内核消息(journalctl -k 只含本次启动, dmesg 环形缓冲会被覆盖),
+//	                            用于判断时间窗是否被完整覆盖
+//	@@err <stderr 行>           命令的错误输出(权限不足、选项不支持等), 有则本次扫描记"未知"
+//	<NVRM: Xid 行>              最多 xidLineCap+1 行, 超过 xidLineCap 视为截断
+//
+// stderr 通过 fd3 交换单独加 @@err 前缀, 避免内核消息正文里的 "not found" 等字样被误判为命令错误。
+// dmesg 没有按时间过滤的参数, 时间窗由 ParseXid 按事件时间在平台侧过滤。
 func xidCommand(since string) (string, error) {
 	if !sinceRe.MatchString(since) {
 		return "", fmt.Errorf("非法时间窗: %q", since)
 	}
-	return fmt.Sprintf(`echo "@@id uid=$(id -u) groups=$(id -Gn)"; { journalctl -k --since '%s' --no-pager; } 2>&1 | grep -E 'NVRM: Xid|not seeing messages|No journal files|ermission denied|not found' | tail -n 500`, since), nil
+	return fmt.Sprintf(`echo "@@id uid=$(id -u) groups=$(id -Gn)"; echo "@@now $(date +%%s)"; `+
+		`if command -v journalctl >/dev/null 2>&1; then echo "@@src journal"; `+
+		`echo "@@first $(journalctl -k -q --no-pager -o short-iso 2>/dev/null | head -n 1 | cut -d' ' -f1)"; `+
+		`{ journalctl -k --since '%s' --no-pager -o short-iso 2>&1 1>&3 3>&- | sed 's/^/@@err /'; } 3>&1 | grep -E '^@@err|NVRM: Xid' | tail -n %d; `+
+		`else echo "@@src dmesg"; `+
+		`echo "@@first $(dmesg --time-format iso 2>/dev/null | head -n 1 | cut -d' ' -f1)"; `+
+		`{ dmesg --time-format iso 2>&1 1>&3 3>&- | sed 's/^/@@err /'; } 3>&1 | grep -E '^@@err|NVRM: Xid' | tail -n %d; fi`,
+		since, xidLineCap+1, xidLineCap+1), nil
+}
+
+// xidLineCap 单次扫描最多保留的 Xid 行数; 超出时只保留最新的 xidLineCap 行, 覆盖起点相应后移(见 ParseXid)。
+const xidLineCap = 500
+
+// xidSince 把时间窗换算为 journalctl --since 参数(满足 sinceRe): 分钟向上取整, 至少 2 分钟, 最多 24 小时。
+func xidSince(window time.Duration) (string, time.Duration) {
+	m := int((window + time.Minute - 1) / time.Minute)
+	if m < 2 {
+		m = 2
+	}
+	if m > 999 {
+		h := (m + 59) / 60
+		if h > 24 {
+			h = 24
+		}
+		return fmt.Sprintf("-%dh", h), time.Duration(h) * time.Hour
+	}
+	return fmt.Sprintf("-%dmin", m), time.Duration(m) * time.Minute
+}
+
+// cacheDFCommand 模型缓存目录所在文件系统的可用/总字节数(docs/27 §27.4.3 F4 输入)。
+// 目录不存在时输出 @@missing, 不建目录(建目录属模型部署流程)。
+func cacheDFCommand(dir string) (string, error) {
+	if !safePathRe.MatchString(dir) || strings.Contains(dir, "..") {
+		return "", fmt.Errorf("模型缓存目录路径非法: %q", truncate(dir, 80))
+	}
+	return "if [ -d '" + dir + "' ]; then df -B1 --output=avail,size '" + dir + "'; else echo @@missing; fi", nil
 }
 
 // hostInfoCommand P8; dockerRoot 来自宿主机 docker info, 必须过路径白名单。

@@ -191,7 +191,7 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	}
 	cmd, _ := xidCommand("-2min")
 	xout, _ := p.runFor(ctx, cmd, 15*time.Second)
-	xid := ParseXid(xout)
+	xid := ParseXid(xout, 2*time.Minute)
 
 	slots, err := s.repo.listSlots(s.repo.db, n.ID)
 	if err != nil {
