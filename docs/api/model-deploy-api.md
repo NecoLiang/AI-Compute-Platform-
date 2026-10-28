@@ -5,6 +5,7 @@
 | 状态 | 范围 |
 |---|---|
 | ✅ 已实现（T-096） | 模型目录 CRUD、真机验证记录、上线/退役（运营） |
+| ✅ 已实现（T-097） | `GET /models`；`GET /orders/:id/deploy-plans` 判定函数与接口（**托管租约数据源未接入前固定返回 50000**） |
 | ⏳ 未实现（T-098/T-099） | `POST/GET /orders/:id/deployments*`、`GET /admin/deployments`（依赖 S2 托管租约与节点任务） |
 
 统一信封 `{code,message,data,request_id}`；错误码只用 40001/40100/40101/40300/40400/40900/42900/50000。
@@ -139,6 +140,120 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
 | 40400 | 条目不存在 |
 | 40900 | model_key 重复；编辑非 draft；已退役条目上线或录入验证；并发下状态已变化 |
 | 50000 | 数据库异常（已记日志，不外泄细节） |
+
+---
+
+## 模型列表（买家，登录即可）
+
+### GET /models ✅
+
+市场路由组（需登录，不进 Public 组）。只返回 `active` 条目，按 id 倒序。不含清单、引擎镜像、引擎参数、指标映射等运维字段。
+
+```json
+{"code":0,"data":{"list":[{
+  "id":3, "model_key":"qwen3-32b-bf16", "display_name":"Qwen3 32B",
+  "source":"modelscope", "repo":"Qwen/Qwen3-32B", "revision":"<固定提交号>",
+  "quant":"bf16", "weights_bytes":69793218560, "min_compute_capability":"8.0",
+  "valid_tp":[1,2,4,8], "max_model_len":131072, "min_context_tokens":8192,
+  "license":"Apache-2.0", "commercial_use":"allowed",
+  "verified_gpu_models":["H100-80G"]      // 有 result=pass 真机验证记录的卡型(型号库 model_name); 无则 []
+}],"total":1}}
+```
+
+---
+
+## 部署方案判定（买家，订单本人）
+
+### GET /orders/:id/deploy-plans?model_id=&gpu_mem_util= ✅（数据源待 S2 接入）
+
+`:id` 为订单号（`ORD…`/`REN…`）。只读，不写库；提交部署（T-098）时服务端会**重新判定**，不信任本结果。
+
+| 参数 | 必填 | 说明 |
+|---|:--:|---|
+| model_id | 是 | `GET /models` 返回的 id；非 active 条目 40400 |
+| gpu_mem_util | 否 | 显存利用率上限 `u`，小数最多两位，`0.80`–`0.95`，缺省 `0.90` |
+
+> **当前状态**：托管租约与实时卡数据由 S2 `internal/fleet` 提供（实现 `modeldeploy.LeaseSource` 并注入）。接入前，参数合法的请求一律返回
+> `{"code":50000,"message":"托管租约能力尚未上线(S2 未接入), 暂无法计算部署方案"}`，不使用任何假数据。
+
+**响应**
+
+```json
+{"code":0,"data":{
+  "feasible":true,
+  "plans":[
+    {"tp":1,"dp":2,"cards_used":2,"max_model_len":12288,"kv_budget_bytes_per_card":3221225472,
+     "kv_capacity_tokens":12288,"context_tight":true,"recommended":false},
+    {"tp":2,"dp":1,"cards_used":2,"max_model_len":131072,"kv_budget_bytes_per_card":38117834752,
+     "kv_capacity_tokens":290816,"context_tight":false,"recommended":true}
+  ],
+  "checks":[
+    {"id":"M1","ok":true,"level":"info","message":"共 2 个可行组合"},
+    {"id":"M2","ok":true,"level":"info","message":"推荐组合可用上下文 131072 tokens"},
+    {"id":"F1","ok":true,"level":"info","message":"GPU 架构 9.0 满足要求 ≥ 8.0"},
+    "… F2–F7 …",
+    {"id":"F8","ok":false,"level":"confirm","message":"该模型未在 H800-80G 上实测, 显存估算可能有偏差","ack":"untested_ack"}
+  ],
+  "memory":[{"tp":1,"feasible":true,"kv_budget_bytes_per_card":3221225472,"kv_capacity_tokens":12288},
+            {"tp":4,"feasible":false,"kv_budget_bytes_per_card":0,"kv_capacity_tokens":0,"reason":"需要 4 张卡, 租约只有 2 张"}],
+  "basis":{"model_id":3,"model_key":"qwen3-32b-bf16","gpu_model":"H800-80G","cards":2,"vram_bytes_per_card":85899345920,
+           "gpu_mem_util_pct":90,"compute_capability":"9.0","driver_version":"550.54.15", "…":"…"}
+}}
+```
+
+- `feasible=false` 时 `plans` 为 `[]`；原因看 `checks` 中 `ok=false && level=error` 的项与 `memory[].reason`。
+- `level`：`info` 通过；`error` 阻断；`warning` 仅提示；`confirm` 可行但提交部署时须带对应 `ack` 字段为 `true`（`license_ack` / `untested_ack`），否则 40001。
+- `basis` 是判定输入摘要，T-098 提交时连同结果写入部署记录 `feasibility` 字段。
+
+**显存与上下文（§27.3.1）**：对 `valid_tp` 中每个 `tp ≤ 卡数 k`，`V` 取租约内最小单卡显存：
+
+```
+B = V×u − W/tp − O              （每卡 KV 预算）
+T = B×tp/K                      （KV 按 TP 切分）
+T = B/K                         （kv_replicated_across_tp=true）
+可行：B > 0 且 T ≥ min_context_tokens
+dp = floor(k/tp)；建议上下文 = min(max_model_len, floor(T/1024)×1024)
+context_tight：建议上下文 < 2×min_context_tokens
+```
+
+全部用 int64 整数精确计算（不经浮点），同一输入任何机器结果一致。**推荐**：用卡最多者；同等用卡下上下文不紧张者优先；再取 tp 最小者。
+
+**检查项**
+
+| id | 检查 | 不满足时 |
+|---|---|---|
+| M1 | 至少一个 (tp,dp) 满足显存与最低上下文 | error |
+| M2 | 推荐组合上下文是否紧张 | warning |
+| F1 | 型号库 `compute_capability` ≥ 条目 `min_compute_capability`；型号未登记即"无法判定" | error，并列出目录中可在该卡型运行的其他 active 条目 |
+| F2 | 节点实测驱动 ≥ `min_driver_version`；驱动未知即"无法判定" | error |
+| F3 | 各卡当前显存占用 ≤ 2% | error |
+| F4 | 节点已缓存该模型，或缓存区剩余 + 可按 LRU 清理 ≥ 权重×1.1 | error |
+| F5 | 存在 tp>1 的可行组合且卡间无 NVLink | warning |
+| F6 | 无故障卡、近 1 小时无致命 Xid | error |
+| F7 | `commercial_use` 非 `allowed`（`restricted` 与 `unknown`） | confirm，`ack=license_ack` |
+| F8 | 租约卡型（型号库 `model_name` 精确匹配）在该条目下无 `result=pass` 验证记录 | confirm，`ack=untested_ack` |
+
+**错误码**
+
+| 码 | 场景 |
+|---|---|
+| 40001 | 订单号格式无效；model_id 缺失/非法；gpu_mem_util 格式或范围错误；订单不是托管租用 |
+| 40400 | 订单不存在或不属于当前用户；模型不存在或未上线 |
+| 40900 | 托管租约未处于 active |
+| 50000 | 托管租约数据源未接入（见上）；内部错误 |
+
+### 数据源接口（供 S2 实现）
+
+`backend/internal/modeldeploy/lease_source.go`：
+
+```go
+type LeaseSource interface {
+    ManagedLeaseSnapshot(ctx context.Context, buyerID int64, orderNo string, modelID int64) (*LeaseSnapshot, error)
+}
+// 哨兵错误(可 %w 包装): ErrOrderNotFound→40400, ErrNotManaged→40001, ErrLeaseNotActive→40900
+```
+
+实现方负责订单归属、托管履约与租约 active 校验；卡数据取自 `gpu_slots`（lease_id 归属）与最近一次探活/采样，不得用商品声明值代替。快照字段：`GPUModel`（型号库 model_name）、`DriverVersion`、`NVLink`、`Cards[]{VRAMTotalBytes,VRAMUsedBytes,Faulty,FatalXidLastHour}`、`ModelCached`、`CacheFreeBytes`、`CacheEvictableBytes`。接入方式：`main.go` 中 `modelDeploySvc.SetLeaseSource(<fleet 实现>)`。
 
 ---
 

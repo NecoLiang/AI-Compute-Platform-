@@ -17,6 +17,7 @@ import (
 	"tokenfactory/internal/equipment"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
+	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
 	"tokenfactory/internal/scheduler"
@@ -49,6 +50,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	agentSearchH := agentsearch.NewHandler(nil)
 	schedulerH := scheduler.NewHandler(nil)
 	catalogH := catalog.NewHandler(nil)
+	modelDeployH := modeldeploy.NewHandler(nil)
 	authH := auth.NewHandler(nil, nil)
 
 	r := gin.New()
@@ -67,6 +69,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	computeH.RegisterMarketRoutes(protected)
 	equipmentH.RegisterMarketRoutes(protected)
 	catalogH.RegisterCatalogRoutes(protected)
+	modelDeployH.RegisterMarketRoutes(protected)
 
 	buyer := r.Group("/api/v1")
 	computeH.RegisterBuyerRoutes(buyer)
@@ -76,6 +79,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	notificationH.RegisterBuyerRoutes(buyer)
 	equipmentH.RegisterBuyerRoutes(buyer)
 	paymentH.RegisterBuyerRoutes(buyer)
+	modelDeployH.RegisterBuyerRoutes(buyer)
 
 	supplier := r.Group("/api/v1")
 	computeH.RegisterSupplierRoutes(supplier)
@@ -98,6 +102,7 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	blockchainH.RegisterAdminRoutes(adminRoute)
 	schedulerH.RegisterAdminRoutes(adminRoute)
 	catalogH.RegisterAdminRoutes(adminRoute)
+	modelDeployH.RegisterAdminRoutes(adminRoute)
 
 	paymentH.RegisterCallbackRoutes(r.Group("/api/v1"))
 
@@ -120,6 +125,12 @@ func TestAllRoutesRegisterWithoutConflict(t *testing.T) {
 	}
 	if !seen["POST /api/v1/supplier-applications"] || !seen["GET /api/v1/supplier-applications"] {
 		t.Error("缺少供给方入驻申请路由")
+	}
+	for _, k := range []string{"GET /api/v1/models", "GET /api/v1/orders/:id/deploy-plans",
+		"POST /api/v1/admin/model-catalog/:id/activate", "POST /api/v1/admin/model-catalog/:id/verifications"} {
+		if !seen[k] {
+			t.Errorf("缺少一键部署路由: %s", k)
+		}
 	}
 	if seen["POST /api/v1/user/roles"] {
 		t.Error("用户不应绕过审核直接申请业务角色")

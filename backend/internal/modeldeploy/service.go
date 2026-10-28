@@ -28,9 +28,10 @@ type GPUSpecLookup interface {
 }
 
 type Service struct {
-	repo *Repository
-	gpus GPUSpecLookup
-	now  func() time.Time
+	repo   *Repository
+	gpus   GPUSpecLookup
+	leases LeaseSource // nil 直到 S2 fleet 接入; 见 SetLeaseSource
+	now    func() time.Time
 }
 
 func NewService(repo *Repository, gpus GPUSpecLookup) *Service {

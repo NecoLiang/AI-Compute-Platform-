@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -26,6 +27,16 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/admin/model-catalog/:id/verifications", h.AddVerification)
 	r.POST("/admin/model-catalog/:id/activate", h.Activate)
 	r.POST("/admin/model-catalog/:id/retire", h.Retire)
+}
+
+// RegisterMarketRoutes 登录用户可见的模型目录(市场路由组, 不进 Public 组)。
+func (h *Handler) RegisterMarketRoutes(r *gin.RouterGroup) {
+	r.GET("/models", h.ListModels)
+}
+
+// RegisterBuyerRoutes 买家对自己托管租约的部署方案判定。
+func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
+	r.GET("/orders/:id/deploy-plans", h.DeployPlans)
 }
 
 // writeErr 业务错误按其错误码返回; 其余为内部错误, 记日志后统一 50000(不外泄 SQL 细节)。
@@ -209,4 +220,55 @@ func (h *Handler) Retire(c *gin.Context) {
 		return
 	}
 	response.Success(c, e)
+}
+
+// ListModels GET /models
+func (h *Handler) ListModels(c *gin.Context) {
+	list, err := h.svc.PublicModels()
+	if err != nil {
+		writeErr(c, err, "查询模型目录失败")
+		return
+	}
+	response.Success(c, gin.H{"list": list, "total": len(list)})
+}
+
+// utilPattern gpu_mem_util 以小数提交, 最多两位, 如 0.9 / 0.90 / 0.85。
+var utilPattern = regexp.MustCompile(`^0\.([0-9])([0-9])?$`)
+
+// parseGPUMemUtil 把 "0.85" 解析为 85; 空串返回 0(取默认值)。
+func parseGPUMemUtil(s string) (int, bool) {
+	if s == "" {
+		return 0, true
+	}
+	m := utilPattern.FindStringSubmatch(s)
+	if m == nil {
+		return 0, false
+	}
+	pct := int(m[1][0]-'0') * 10
+	if m[2] != "" {
+		pct += int(m[2][0] - '0')
+	}
+	return pct, true
+}
+
+// DeployPlans GET /orders/:id/deploy-plans?model_id=&gpu_mem_util=
+func (h *Handler) DeployPlans(c *gin.Context) {
+	modelID, err := strconv.ParseInt(c.Query("model_id"), 10, 64)
+	if err != nil || modelID <= 0 {
+		response.Error(c, errcode.ParamInvalid, "model_id 必填且须为正整数")
+		return
+	}
+	pct, okU := parseGPUMemUtil(c.Query("gpu_mem_util"))
+	if !okU {
+		response.Error(c, errcode.ParamInvalid, "gpu_mem_util 须为 0.80–0.95 之间的小数, 最多两位")
+		return
+	}
+	res, err := h.svc.DeployPlans(c.Request.Context(), PlanRequest{
+		BuyerID: c.GetInt64("user_id"), OrderNo: c.Param("id"), ModelID: modelID, GPUMemUtilPct: pct,
+	})
+	if err != nil {
+		writeErr(c, err, "计算部署方案失败")
+		return
+	}
+	response.Success(c, res)
 }

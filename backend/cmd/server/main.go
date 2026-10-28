@@ -132,6 +132,8 @@ func main() {
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
 	// 模型一键部署目录(docs/27, S5): 型号算力架构取自 GPU 型号库。
 	modelDeploySvc := modeldeploy.NewService(modeldeploy.NewRepository(sqlDB), catalogSvc)
+	// 托管租约数据源由 S2 internal/fleet 提供(实现 modeldeploy.LeaseSource 后调用 SetLeaseSource 注入)。
+	// 接入前不注入: deploy-plans 明确返回 50000, 不使用任何假数据。
 
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
@@ -203,6 +205,7 @@ func main() {
 	compute.NewHandler(computeSvc).RegisterMarketRoutes(protected)
 	equipment.NewHandler(equipmentSvc).RegisterMarketRoutes(protected)
 	catalog.NewHandler(catalogSvc).RegisterCatalogRoutes(protected)
+	modeldeploy.NewHandler(modelDeploySvc).RegisterMarketRoutes(protected)
 
 	// Buyer API
 	buyer := r.Group("/api/v1")
@@ -214,6 +217,7 @@ func main() {
 	notification.NewHandler(notificationSvc).RegisterBuyerRoutes(buyer)
 	equipment.NewHandler(equipmentSvc).RegisterBuyerRoutes(buyer)
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
+	modeldeploy.NewHandler(modelDeploySvc).RegisterBuyerRoutes(buyer)
 	if cfg.Server.Mode != "release" {
 		dev := r.Group("/api/v1/dev")
 		dev.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))
