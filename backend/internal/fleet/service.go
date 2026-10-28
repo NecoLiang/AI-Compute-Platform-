@@ -1,0 +1,392 @@
+package fleet
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"tokenfactory/internal/compute"
+	"tokenfactory/internal/scheduler"
+	"tokenfactory/pkg/config"
+	tfcrypto "tokenfactory/pkg/crypto"
+	"tokenfactory/pkg/errcode"
+
+	"github.com/jmoiron/sqlx"
+)
+
+// ProductStore compute 暴露给 fleet 的商品读取与派生库存回写(*compute.Service 实现)。
+type ProductStore interface {
+	ManagedProduct(productID int64) (*compute.Product, error)
+	SetManagedStockTx(tx *sqlx.Tx, productID int64, stock int) error
+}
+
+// HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
+type HealthRefresher interface {
+	RefreshProductHealth(productID, supplierID int64)
+}
+
+// Notifier 消息中心(*notification.Service 实现)。
+type Notifier interface {
+	Record(userID int64, notifType, title, content, link string) error
+}
+
+// GatewaySelfTester P11: 经访问网关对节点临时端口做一次自检登录。由访问网关模块(cmd/accessgw,
+// docs/25 S2 T-085)提供; 未接入时 P11 判为不通过并写明原因, 不伪造通过。
+type GatewaySelfTester interface {
+	SelfTestPort(ctx context.Context, nodeID int64, host string, port int) error
+}
+
+// Deps fleet 的外部依赖, 全部由 main 注入。
+type Deps struct {
+	Products ProductStore
+	Health   HealthRefresher
+	Notifier Notifier
+	Gateway  GatewaySelfTester // 可为 nil(S2 未接入)
+}
+
+type Service struct {
+	repo      *Repository
+	products  ProductStore
+	health    HealthRefresher
+	notifier  Notifier
+	gateway   GatewaySelfTester
+	cfg       config.FleetConfig
+	gwEgress  []string
+	credKey   []byte
+	dialer    *Dialer
+	benchSecs int
+	sampleN   int
+	sampleGap int
+}
+
+// NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。
+func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.AccessGWConfig, credKey []byte) *Service {
+	return &Service{
+		repo: repo, products: deps.Products, health: deps.Health, notifier: deps.Notifier, gateway: deps.Gateway,
+		cfg: cfg, gwEgress: gw.EgressIPs, credKey: credKey,
+		dialer:    &Dialer{},
+		benchSecs: 60, sampleN: 6, sampleGap: 10,
+	}
+}
+
+var (
+	errNodeNotFound   = errcode.New(errcode.NotFound, "节点不存在或不属于当前供应方")
+	errKeyUnavailable = errcode.New(errcode.InternalError, "security.credential_key 未配置或非法: 无法生成/解密节点管理密钥")
+)
+
+func (s *Service) requireCredKey() error {
+	if len(s.credKey) == 0 {
+		return errKeyUnavailable
+	}
+	return nil
+}
+
+func wrapKeyErr(err error) error {
+	if errors.Is(err, tfcrypto.ErrKeyNotConfigured) {
+		return errKeyUnavailable
+	}
+	return err
+}
+
+// ownedNode 锁定并校验节点归属; 非本人或非托管节点一律 40400(不泄露存在性)。
+func (s *Service) ownedNode(tx *sqlx.Tx, supplierID, nodeID int64) (*Node, error) {
+	n, err := s.repo.lockNode(tx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if n == nil || n.SupplierID != supplierID {
+		return nil, errNodeNotFound
+	}
+	return n, nil
+}
+
+func (s *Service) getOwned(supplierID, nodeID int64) (*Node, error) {
+	n, err := s.repo.GetNode(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if n == nil || n.SupplierID != supplierID {
+		return nil, errNodeNotFound
+	}
+	return n, nil
+}
+
+// inTx 执行事务; fn 返回错误即回滚。
+func (s *Service) inTx(fn func(tx *sqlx.Tx) error) error {
+	tx, err := s.repo.db.Beginx()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// recomputeStockTx 托管商品派生库存在卡槽/节点状态变化的同一事务内重算(docs/26 §26.5.4)。
+func (s *Service) recomputeStockTx(tx *sqlx.Tx, productID int64) error {
+	n, err := s.repo.freeSlotCount(tx, productID)
+	if err != nil {
+		return err
+	}
+	return s.products.SetManagedStockTx(tx, productID, n)
+}
+
+func (s *Service) refreshHealth(n *Node) {
+	if s.health != nil {
+		s.health.RefreshProductHealth(n.ProductID, n.SupplierID)
+	}
+}
+
+func (s *Service) notify(userID int64, title, content string, nodeID int64) {
+	if s.notifier == nil || userID == 0 {
+		return
+	}
+	link := fmt.Sprintf("/console/supplier/nodes/%d", nodeID)
+	if err := s.notifier.Record(userID, "system", title, content, link); err != nil {
+		slog.Error("发送节点通知失败", "user_id", userID, "node_id", nodeID, "error", err)
+	}
+}
+
+// ===== scheduler.ManagedNodes =====
+
+const (
+	defaultLeasePortStart = 40000
+	defaultLeasePortEnd   = 40099
+	maxCardsPerNode       = 64
+	maxLeasePortSpan      = 1000
+)
+
+// RegisterManagedNode POST /supplier/nodes {mgmt_mode:"ssh"}: 建节点并生成专属 ed25519 管理密钥。
+func (s *Service) RegisterManagedNode(supplierID int64, req scheduler.ManagedNodeReq) (any, error) {
+	name := strings.TrimSpace(req.NodeName)
+	if name == "" || utf8.RuneCountInString(name) > 64 {
+		return nil, errcode.New(errcode.ParamInvalid, "node_name 必填且不超过 64 字")
+	}
+	if req.TotalCards <= 0 || req.TotalCards > maxCardsPerNode {
+		return nil, errcode.Newf(errcode.ParamInvalid, "total_cards 须在 1-%d 之间", maxCardsPerNode)
+	}
+	p, err := s.products.ManagedProduct(req.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil || p.SupplierID != supplierID {
+		return nil, errcode.New(errcode.NotFound, "商品不存在或不属于当前供应方")
+	}
+	if p.FulfillmentMode != compute.FulfillmentManaged {
+		return nil, errcode.New(errcode.ParamInvalid, "ssh 托管节点只能挂在平台托管(fulfillment_mode=managed)商品下")
+	}
+	start, end := req.LeasePortStart, req.LeasePortEnd
+	if start == 0 && end == 0 {
+		start, end = defaultLeasePortStart, defaultLeasePortEnd
+	}
+	if start < 1024 || end > 65535 || start > end || end-start+1 > maxLeasePortSpan {
+		return nil, errcode.Newf(errcode.ParamInvalid, "租约端口段非法: 须在 1024-65535 内、起止有序且不超过 %d 个端口", maxLeasePortSpan)
+	}
+	if end-start+1 < req.TotalCards+1 {
+		return nil, errcode.New(errcode.ParamInvalid, "租约端口段过小: 至少需要 卡数+1 个端口(含探活自检端口)")
+	}
+	if req.DiskPerCardGB < 0 || req.DiskPerCardGB > 100000 {
+		return nil, errcode.New(errcode.ParamInvalid, "disk_per_card_gb 非法")
+	}
+	if p.DeliveryMode == "container" && req.DiskPerCardGB == 0 {
+		return nil, errcode.New(errcode.ParamInvalid, "分卡容器交付须填写每卡数据盘 disk_per_card_gb(GB)")
+	}
+	if err := s.requireCredKey(); err != nil {
+		return nil, err
+	}
+	n := &Node{SupplierID: supplierID, ProductID: req.ProductID, NodeName: name, TotalCards: req.TotalCards,
+		LeasePortStart: &start, LeasePortEnd: &end}
+	if req.DiskPerCardGB > 0 {
+		d := req.DiskPerCardGB
+		n.DiskPerCardGB = &d
+	}
+	var id int64
+	err = s.inTx(func(tx *sqlx.Tx) error {
+		var err error
+		if id, err = s.repo.insertNode(tx, n); err != nil {
+			if isDuplicate(err) {
+				return errcode.New(errcode.Conflict, "该商品下已存在同名节点")
+			}
+			return err
+		}
+		pub, enc, err := generateNodeKey(id, s.credKey)
+		if err != nil {
+			return wrapKeyErr(err)
+		}
+		return s.repo.setNodeKey(tx, id, pub, enc)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.GetNode(id)
+}
+
+// DeleteManagedNode 存在非 free/withheld 卡槽 → 40900; 否则同一事务删卡槽、释放指纹占用、删节点、重算库存。
+func (s *Service) DeleteManagedNode(supplierID, nodeID int64) error {
+	return s.inTx(func(tx *sqlx.Tx) error {
+		n, err := s.ownedNode(tx, supplierID, nodeID)
+		if err != nil {
+			return err
+		}
+		// 空闲/停用卡槽, 以及不承载租约的故障卡槽可随节点删除; 其余(预留/在租/排空/在租故障)→ 40900。
+		var busy int
+		if err := tx.Get(&busy, `SELECT COUNT(*) FROM gpu_slots WHERE node_id=?
+			AND state NOT IN ('free','withheld') AND NOT (state='faulty' AND lease_id IS NULL)`, nodeID); err != nil {
+			return err
+		}
+		if busy > 0 {
+			return errcode.New(errcode.Conflict, "节点上有进行中的租约, 不能删除")
+		}
+		if err := s.repo.deleteIdleSlots(tx, nodeID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE node_tasks SET state='failed', last_error='节点已删除', locked_until=NULL
+			WHERE node_id=? AND state IN ('pending','running')`, nodeID); err != nil {
+			return err
+		}
+		ok, err := s.repo.deleteNode(tx, nodeID, supplierID)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errNodeNotFound
+		}
+		if err := s.repo.audit(tx, supplierID, "node.deleted", "supplier_node", nodeID,
+			map[string]any{"node_name": n.NodeName, "verify_status": n.VerifyStatus}, nil, ""); err != nil {
+			return err
+		}
+		return s.recomputeStockTx(tx, n.ProductID)
+	})
+}
+
+// ManagedExtra 运营列表对托管节点附加的信息。
+type ManagedExtra struct {
+	LastProbe *ProbeSummary  `json:"last_probe"`
+	Slots     map[string]int `json:"slots"`
+	SSHHost   *string        `json:"ssh_host"`
+	SSHPort   *int           `json:"ssh_port"`
+	HostKey   *string        `json:"host_key_fingerprint"`
+	KeyPinned bool           `json:"host_key_confirmed"`
+}
+
+// ProbeSummary 最近一次探活结论摘要。
+type ProbeSummary struct {
+	ID        int64     `json:"id"`
+	Kind      string    `json:"kind"`
+	Result    string    `json:"result"`
+	Failed    []string  `json:"failed_checks"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func summarize(p ProbeReport) *ProbeSummary {
+	sum := &ProbeSummary{ID: p.ID, Kind: p.Kind, Result: p.Result, CreatedAt: p.CreatedAt, Failed: []string{}}
+	var checks []Check
+	if err := jsonUnmarshal(p.Checks, &checks); err == nil {
+		for _, c := range checks {
+			if !c.OK && !c.Skipped && c.Required {
+				sum.Failed = append(sum.Failed, c.ID+" "+c.Name)
+			}
+		}
+	}
+	return sum
+}
+
+// ManagedNodeExtras GET /admin/nodes 附加: 最近探活结论、卡槽分布、管理连接与指纹状态。
+func (s *Service) ManagedNodeExtras(nodeIDs []int64) (map[int64]any, error) {
+	reports, err := s.repo.latestReports(nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	q, args, err := sqlx.In(`SELECT node_id, state, COUNT(*) c FROM gpu_slots WHERE node_id IN (?) GROUP BY node_id, state`, nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		NodeID int64  `db:"node_id"`
+		State  string `db:"state"`
+		C      int    `db:"c"`
+	}
+	if err := s.repo.db.Select(&rows, q, args...); err != nil {
+		return nil, err
+	}
+	q, args, err = sqlx.In(`SELECT `+nodeColumns+` FROM supplier_nodes WHERE id IN (?) AND mgmt_mode='ssh'`, nodeIDs)
+	if err != nil {
+		return nil, err
+	}
+	var nodes []Node
+	if err := s.repo.db.Select(&nodes, q, args...); err != nil {
+		return nil, err
+	}
+	out := map[int64]any{}
+	extras := map[int64]*ManagedExtra{}
+	for i := range nodes {
+		n := &nodes[i]
+		x := &ManagedExtra{Slots: map[string]int{}, SSHHost: n.SSHHost, SSHPort: n.SSHPort,
+			HostKey: n.HostKeyFingerprint, KeyPinned: n.hostKeyConfirmed()}
+		if p, ok := reports[n.ID]; ok {
+			x.LastProbe = summarize(p)
+		}
+		extras[n.ID], out[n.ID] = x, x
+	}
+	for _, r := range rows {
+		if x, ok := extras[r.NodeID]; ok {
+			x.Slots[r.State] = r.C
+		}
+	}
+	return out, nil
+}
+
+// ===== compute.ManagedGate =====
+
+// CheckManagedSubmit 托管商品提交审核: 至少一个 verified 节点, 且其实测 GPU 型号与商品一致。
+func (s *Service) CheckManagedSubmit(productID int64, gpuModel string) error {
+	var nodes []Node
+	if err := s.repo.db.Select(&nodes, `SELECT `+nodeColumns+` FROM supplier_nodes WHERE product_id=? AND mgmt_mode='ssh' ORDER BY id`, productID); err != nil {
+		return err
+	}
+	if len(nodes) == 0 {
+		return errcode.New(errcode.ParamInvalid, "托管商品提交审核前须至少接入一个 ssh 托管节点并通过探活")
+	}
+	var problems []string
+	verified := 0
+	for _, n := range nodes {
+		if n.VerifyStatus != VerifyVerified {
+			problems = append(problems, fmt.Sprintf("节点 %s: 核验状态 %s", n.NodeName, n.VerifyStatus))
+			continue
+		}
+		var inv Inventory
+		var raw []byte
+		err := s.repo.db.Get(&raw, `SELECT inventory FROM node_probe_reports WHERE node_id=? AND kind='verify' AND result='pass'
+			ORDER BY id DESC LIMIT 1`, n.ID)
+		if err != nil || jsonUnmarshal(raw, &inv) != nil || len(inv.GPUs) == 0 {
+			problems = append(problems, fmt.Sprintf("节点 %s: 缺少通过的探活报告", n.NodeName))
+			continue
+		}
+		ok := true
+		for _, g := range inv.GPUs {
+			if !ModelMatches(gpuModel, g.Name) {
+				problems = append(problems, fmt.Sprintf("节点 %s: GPU%d 实测 %s 与商品型号 %s 不一致", n.NodeName, g.Index, g.Name, gpuModel))
+				ok = false
+				break
+			}
+		}
+		if ok {
+			verified++
+		}
+	}
+	if verified > 0 {
+		return nil
+	}
+	return errcode.New(errcode.ParamInvalid, "托管商品暂不可提交审核: "+strings.Join(problems, "; "))
+}
+
+// RefreshManagedStock 审核通过等商品状态变化后立即按卡槽重算库存。
+func (s *Service) RefreshManagedStock(productID int64) error {
+	return s.inTx(func(tx *sqlx.Tx) error { return s.recomputeStockTx(tx, productID) })
+}

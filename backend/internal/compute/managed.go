@@ -81,8 +81,13 @@ func (s *Service) checkManagedSubmit(productID int64, gpuModel string) error {
 }
 
 // ManagedProduct 供 fleet 读取商品(只读, 不经 compute repository 之外的路径访问 products)。
+// 商品不存在返回 (nil, nil)。
 func (s *Service) ManagedProduct(productID int64) (*Product, error) {
-	return s.repo.GetProductByID(productID)
+	p, err := s.repo.GetProductByID(productID)
+	if err != nil && err.Error() == "product not found" { // GetProductByID 的不存在哨兵文案
+		return nil, nil
+	}
+	return p, err
 }
 
 // SetManagedStockTx 由 fleet 在自己的事务内回写托管商品派生库存:
