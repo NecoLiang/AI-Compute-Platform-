@@ -240,6 +240,15 @@ func (s *Service) CompleteExpiredManagedOrder(orderNo string) (bool, error) {
 	return s.releaseStockTxDeadline(orderNo, []string{"active"}, "completed", true)
 }
 
+// HasPendingRestartRenewalTx 宽限期满清除前检查(docs/25 §25.7.2): 父单是否有待支付的 restart 续租单。
+// 支付窗口内不清除(续租单已为原节点预留卡槽); 续租单超时关单后下一轮即清除。调用方须已锁父单。
+func (s *Service) HasPendingRestartRenewalTx(tx *sqlx.Tx, parentID int64) (bool, error) {
+	var n int
+	err := tx.Get(&n, `SELECT COUNT(*) FROM order_renewals r JOIN orders o ON o.id=r.order_id
+		WHERE r.parent_order_id=? AND r.mode='restart' AND o.status='pending_payment'`, parentID)
+	return n > 0, err
+}
+
 // OrderForAccess 托管订单访问信息所需的订单字段(买家本人校验在 fleet 侧完成)。
 func (s *Service) OrderForAccess(orderNo string) (*Order, error) {
 	return s.repo.GetOrderByNo(orderNo)

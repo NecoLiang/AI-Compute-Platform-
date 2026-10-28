@@ -17,6 +17,7 @@ import (
 	"tokenfactory/pkg/errcode"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/redis/go-redis/v9"
 )
 
 // ProductStore compute 暴露给 fleet 的商品读取与派生库存回写(*compute.Service 实现)。
@@ -35,6 +36,7 @@ type ProductStore interface {
 	ManagedOrderByID(orderID int64) (*compute.Order, error)
 	// 到期(T-087): 托管订单 active → completed(守卫式, 同事务经 ReleaseTx 转 grace)。
 	CompleteExpiredManagedOrder(orderNo string) (bool, error)
+	HasPendingRestartRenewalTx(tx *sqlx.Tx, parentID int64) (bool, error)
 }
 
 // HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
@@ -72,6 +74,8 @@ type Service struct {
 	health    HealthRefresher
 	notifier  Notifier
 	gateway   GatewaySelfTester
+	rdb       *redis.Client  // 到期提醒去重与周期任务多实例互斥(T-087); nil 时不发到期提醒
+	outage    OutageRecorder // 停机认定(T-105); nil 时只记日志
 	cfg       config.FleetConfig
 	gw        config.AccessGWConfig
 	gwEgress  []string

@@ -166,18 +166,7 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 	case LeaseActive, LeaseParked, LeaseSuspended:
 		if to == "completed" {
 			// 宽限期按订单计费方式快照(S3 T-091)取档, 不读商品当前展示主价; 快照缺失报 50000。
-			mode, err := compute.OrderPricingMode(o)
-			if err != nil {
-				return err
-			}
-			until := time.Now().Add(s.graceFor(mode))
-			if err := s.mustTransition(tx, l, LeaseGrace, ", grace_until=?", until); err != nil {
-				return err
-			}
-			if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotLeased, SlotReserved}, SlotDraining); err != nil {
-				return err
-			}
-			if _, err := s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindStop, prioStop, cleanupMaxAttempts, LeaseTaskPayload{LeaseID: l.ID, Reason: "租期结束"}); err != nil {
+			if err := s.enterGraceTx(tx, l, o, "租期结束"); err != nil {
 				return err
 			}
 		} else if err := s.purgeTx(tx, l, "订单"+to); err != nil {

@@ -149,6 +149,7 @@ func main() {
 			cfg.Fleet, cfg.AccessGW, credKey)
 		computeSvc.SetManagedGate(fleetSvc)
 		computeSvc.SetLeaseHooks(fleetSvc.LeaseHooks())
+		fleetSvc.SetRedis(rdb)
 		paymentSvc.SetPaidHook(computeSvc.OnOrderPaidTx)
 		schedulerSvc.SetManagedNodes(fleetSvc)
 
@@ -376,6 +377,8 @@ func main() {
 	if fleetSvc != nil {
 		fleetSvc.RunWorkers(workerCtx)
 		go fleetSvc.RunPeriodic(workerCtx)
+		// 托管到期/宽限清除(30s)、到期提醒、在租容器对账(T-087)。停机认定(T-105)未接入前观测只写日志。
+		go fleetSvc.RunLeaseJobs(workerCtx)
 	}
 
 	if internalSrv != nil {
