@@ -22,6 +22,20 @@ func (r *Repository) activeProbe(q sqlx.Queryer, nodeID int64) (*Task, error) {
 	return &t, err
 }
 
+// activeProbes 节点上全部未结束的 probe 任务(按 id 升序)。
+func (r *Repository) activeProbes(q sqlx.Queryer, nodeID int64) ([]Task, error) {
+	var list []Task
+	err := sqlx.Select(q, &list, `SELECT `+taskColumns+` FROM node_tasks
+		WHERE node_id=? AND kind='probe' AND state IN ('pending','running') ORDER BY id`, nodeID)
+	return list, err
+}
+
+// failPendingTask 作废一条仍在排队的任务(running 不动: 由执行方自行结束)。
+func (r *Repository) failPendingTask(q sqlx.Execer, id int64, reason string) error {
+	_, err := q.Exec(`UPDATE node_tasks SET state='failed', last_error=?, locked_until=NULL WHERE id=? AND state='pending'`, reason, id)
+	return err
+}
+
 func (r *Repository) insertTask(q sqlx.Execer, nodeID int64, kind string, priority int, payload any) (int64, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -151,6 +165,21 @@ func (r *Repository) finishTask(id int64, attempts int, state string, result any
 		WHERE id=? AND state='running' AND attempts=?`, state, raw, nullStr(truncate(lastErr, 500)), id, attempts))
 }
 
+// renewLock 心跳续期: 只续仍由本次认领持有的任务(state='running' AND attempts=?)。
+// 同一秒内两次续期写入值相同时 MySQL 返回 RowsAffected=0, 因此未改变时按守卫条件复查是否仍持有。
+func (r *Repository) renewLock(id int64, attempts int, ttl time.Duration) (bool, error) {
+	ok, err := affected(r.db.Exec(`UPDATE node_tasks SET locked_until = NOW() + INTERVAL ? SECOND
+		WHERE id=? AND state='running' AND attempts=?`, int(ttl.Seconds()), id, attempts))
+	if err != nil || ok {
+		return ok, err
+	}
+	var n int
+	if err := r.db.Get(&n, `SELECT COUNT(*) FROM node_tasks WHERE id=? AND state='running' AND attempts=?`, id, attempts); err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // retryLater 可重试的失败: running → pending 并延后; 达到上限 → dead。
 // 只有本次调用确实把任务转为 dead 才返回 dead=true(锁已过期被回收的陈旧回写不触发死信善后, 避免重复执行)。
 func (r *Repository) retryLater(id int64, attempts int, delay time.Duration, lastErr string) (dead bool, err error) {
@@ -211,9 +240,13 @@ func (r *Repository) reclaimExpired() ([]Task, error) {
 	return dead, tx.Commit()
 }
 
-// listTasks 运营查询任务(默认 dead)。
+// listTasks 运营查询任务; state 为空 = 全部状态。
 func (r *Repository) listTasks(state string, nodeID int64, page, pageSize int) ([]Task, int64, error) {
-	where, args := `WHERE state=?`, []any{state}
+	where, args := `WHERE 1=1`, []any{}
+	if state != "" {
+		where += ` AND state=?`
+		args = append(args, state)
+	}
 	if nodeID > 0 {
 		where += ` AND node_id=?`
 		args = append(args, nodeID)

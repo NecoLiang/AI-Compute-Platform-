@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"tokenfactory/pkg/errcode"
@@ -46,7 +47,9 @@ func (s *Service) ReimageConfirm(supplierID, nodeID int64, ip string) (int64, er
 		if n.VerifyStatus != VerifyNeedsReimage {
 			return errcode.New(errcode.Conflict, "仅待重装(needs_reimage)的节点可确认重装")
 		}
-		ok, err := affected(tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=NULL, host_key_confirmed_at=NULL, host_fp_claim=NULL
+		// 代次 +1: 重装前入队/在跑的探活(针对旧系统)结论作废。
+		ok, err := affected(tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=NULL, host_key_confirmed_at=NULL, host_fp_claim=NULL,
+			generation=generation+1
 			WHERE id=? AND mgmt_mode='ssh' AND verify_status='needs_reimage'`, nodeID))
 		if err != nil {
 			return err
@@ -182,7 +185,10 @@ func (s *Service) SetSchedulable(supplierID, nodeID int64, v bool, ip string) er
 
 // ===== 运营(docs/25 §25.10) =====
 
-// Suspend 运营停用节点: 停止新分配、释放空闲卡 UUID 与指纹占用、作废未执行任务; 不影响存量租约。
+// Suspend 运营停用节点: 停止新分配、释放空闲卡 UUID 与指纹占用、代次 +1, 作废排队中与进行中的探活; 不影响存量租约。
+// 只作废 probe 任务: 存量租约的 stop/purge/kill_sessions 必须照常执行; provision 在执行时自行检查核验状态,
+// 失败走重试→死信换节点/退款的善后, 直接置 failed 会跳过善后让租约卡在开通中。
+// 进行中的探活被置 failed 后, worker 的回写被 finishTask 的 attempts 守卫忽略, 结论被代次守卫作废。
 func (s *Service) Suspend(operatorID, nodeID int64, reason, ip string) error {
 	var node *Node
 	err := s.inTx(func(tx *sqlx.Tx) error {
@@ -205,7 +211,7 @@ func (s *Service) Suspend(operatorID, nodeID int64, reason, ip string) error {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE node_tasks SET state='failed', last_error='节点已被运营停用', locked_until=NULL
-			WHERE node_id=? AND state='pending'`, nodeID); err != nil {
+			WHERE node_id=? AND kind='probe' AND state IN ('pending','running')`, nodeID); err != nil {
 			return err
 		}
 		if err := s.repo.audit(tx, operatorID, "node.suspended", "supplier_node", nodeID,
@@ -267,8 +273,7 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 // Tasks 运营任务列表(默认死信)。
 func (s *Service) Tasks(state string, nodeID int64, page, pageSize int) ([]Task, int64, error) {
 	switch state {
-	case "":
-		state = TaskDead
+	case "": // 缺省 = 全部状态(与 docs/api 一致)
 	case TaskPending, TaskRunning, TaskSucceeded, TaskFailed, TaskDead:
 	default:
 		return nil, 0, errcode.New(errcode.ParamInvalid, "state 仅支持 pending/running/succeeded/failed/dead")
@@ -303,6 +308,11 @@ func (s *Service) RetryTask(operatorID, taskID int64, ip string) error {
 		return errcode.New(errcode.Conflict, "开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试")
 	}
 	return s.inTx(func(tx *sqlx.Tx) error {
+		if t.Kind == KindProbe {
+			if err := s.prepareProbeRetry(tx, t); err != nil {
+				return err
+			}
+		}
 		ok, err := affected(tx.Exec(`UPDATE node_tasks SET state='pending', attempts=0, run_after=NOW(), locked_until=NULL
 			WHERE id=? AND state='dead'`, taskID))
 		if err != nil {
@@ -315,4 +325,42 @@ func (s *Service) RetryTask(operatorID, taskID int64, ip string) error {
 			map[string]any{"state": TaskDead, "attempts": t.Attempts, "last_error": t.LastError},
 			map[string]any{"state": TaskPending}, ip)
 	})
+}
+
+// prepareProbeRetry 重试死信探活: 按节点当前代次重写 payload(否则会因代次过时被直接作废),
+// 完整探活同时把节点置 verifying; 节点已停用/待处理或已有未结束的探活时 40900。调用方在同一事务内把任务转回 pending。
+func (s *Service) prepareProbeRetry(tx *sqlx.Tx, t *Task) error {
+	n, err := s.repo.lockNode(tx, t.NodeID)
+	if err != nil {
+		return err
+	}
+	if n == nil {
+		return errcode.New(errcode.Conflict, "节点已删除, 不能重试")
+	}
+	switch n.VerifyStatus {
+	case VerifySuspended, VerifyNeedsReimage, VerifyKeyMismatch:
+		return errcode.Newf(errcode.Conflict, "节点当前为 %s, 不能重试探活", n.VerifyStatus)
+	}
+	if a, err := s.repo.activeProbe(tx, t.NodeID); err != nil {
+		return err
+	} else if a != nil {
+		return errcode.Newf(errcode.Conflict, "节点已有未结束的探活任务 #%d", a.ID)
+	}
+	var pl ProbePayload
+	if err := jsonUnmarshal(t.Payload, &pl); err != nil {
+		return errcode.New(errcode.Conflict, "任务 payload 无法解析, 不能重试")
+	}
+	pl.Generation = n.Generation
+	raw, err := json.Marshal(pl)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE node_tasks SET payload=? WHERE id=? AND state='dead'`, string(raw), t.ID); err != nil {
+		return err
+	}
+	if pl.Mode == ProbePortRecheck {
+		return nil
+	}
+	_, err = s.repo.setVerifyStatus(tx, n.ID, []string{VerifyUnverified, VerifyFailed}, VerifyVerifying)
+	return err
 }

@@ -148,7 +148,8 @@ func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 	s := NewService(NewRepository(db), Deps{Products: comp, Health: sched, Notifier: notif}, cfg,
 		config.AccessGWConfig{EgressIPs: []string{"10.0.0.2"}, PublicHost: "gw.test", PublicPort: 2222,
 			UpstreamPubkey: testUpstreamPub}, key)
-	s.dialer = &Dialer{AllowLoopback: true, DialTimeout: 2 * time.Second, Attempts: 1}
+	// 保留 NewService 构造的目标地址策略, 只放开回环(测试 SSH 服务器在 127.0.0.1)。
+	s.dialer.allowLoopback, s.dialer.DialTimeout, s.dialer.Attempts = true, 2*time.Second, 1
 	s.benchSecs, s.sampleN, s.sampleGap = 5, 1, 1
 	return s
 }
@@ -158,7 +159,7 @@ func runTasks(t *testing.T, s *Service) []Task {
 	t.Helper()
 	var done []Task
 	for i := 0; i < 10; i++ {
-		task, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+		task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 		require.NoError(t, err)
 		if task == nil {
 			break
@@ -493,7 +494,7 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 		VALUES (?, 'probe', 'dead', 5, 3, '{"mode":"full","trigger":"supplier"}', 'boom')`, id)
 	require.NoError(t, err)
 	deadID, _ := res2.LastInsertId()
-	list, total, err := s.Tasks("", 0, 1, 20)
+	list, total, err := s.Tasks(TaskDead, 0, 1, 20)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, total)
 	assert.Equal(t, deadID, list[0].ID)
@@ -570,7 +571,7 @@ func TestProbeDiscardedWhenSSHChanged(t *testing.T) {
 	fake.OnCommand("docker run --rm --name omnis-probe-", func() {
 		db.MustExec(`UPDATE supplier_nodes SET ssh_user='omnis' WHERE id=?`, id)
 	})
-	task, err := s.repo.claimNext([]string{KindProbe}, probeLock)
+	task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
 	require.NoError(t, err)
 	require.NotNil(t, task)
 	s.execute(context.Background(), task)
@@ -641,4 +642,40 @@ func TestSameHostCannotBeListedTwice(t *testing.T) {
 	_, err = db.Exec(`UPDATE supplier_nodes SET host_fp_claim=? WHERE id=?`, fake.Fingerprint(), b)
 	require.Error(t, err)
 	assert.True(t, isDuplicate(err), "host_fp_claim 唯一约束: %v", err)
+}
+
+// M2: 提交时拒绝内网/元数据/ULA/配置段地址; 拨号时再按实际地址拦截, 且对供给方只给通用提示不回显地址。
+func TestSSRFDenyList(t *testing.T) {
+	db := setupFleetDB(t)
+	seedManaged(t, db)
+	s := newTestFleet(t, db)
+	ctx := context.Background()
+	fake := newFakeNode(t, "pw-123456")
+	v, err := s.RegisterManagedNode(10, scheduler.ManagedNodeReq{ProductID: 1, NodeName: "gpu-ssrf", TotalCards: 2,
+		LeasePortStart: 47400, LeasePortEnd: 47409})
+	require.NoError(t, err)
+	id := v.(*Node).ID
+	for _, h := range []string{"100.100.100.200", "169.254.169.254", "10.0.0.5", "192.168.1.10", "fd00::1", "::ffff:10.1.1.1"} {
+		_, err := s.UpdateSSH(ctx, 10, id, SSHInput{Host: h, Port: 22, User: "root"}, "")
+		require.Error(t, err, h)
+		assert.Equal(t, errcode.ParamInvalid, codeOf(err), h)
+		assert.NotContains(t, err.Error(), h)
+	}
+	n, _ := s.repo.GetNode(id)
+	assert.Nil(t, n.SSHHost, "被拒绝的地址不落库")
+
+	_, err = s.UpdateSSH(ctx, 10, id, SSHInput{Host: "127.0.0.1", Port: fake.Port(), User: "root", BootstrapPassword: "pw-123456"}, "")
+	require.NoError(t, err)
+	_, err = s.ConfirmHostKey(10, id, fake.Fingerprint(), "")
+	require.NoError(t, err)
+	// 地址事后变成内网(模拟 DNS rebinding / 绕过提交校验): 拨号钩子拦截, P1 只给通用提示。
+	db.MustExec(`UPDATE supplier_nodes SET ssh_host='10.0.0.5' WHERE id=?`, id)
+	before := len(fake.Commands())
+	done := runTasks(t, s)
+	require.Len(t, done, 1)
+	assert.False(t, outcomeOf(t, done[0]).Pass)
+	_, checks := latestChecks(t, db, id)
+	assert.False(t, checks["P1"].OK)
+	assert.Equal(t, "管理端口不可达", checks["P1"].Detail)
+	assert.Len(t, fake.Commands(), before, "被拒绝的地址不得执行任何命令")
 }

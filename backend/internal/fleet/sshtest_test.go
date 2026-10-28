@@ -34,6 +34,7 @@ type fakeNode struct {
 	hooks      map[string]func()
 	cmds       []string
 	pwLogins   int
+	pwTries    int // 收到的密码/键盘交互认证次数(含失败): 用于断言密码根本没有发出
 }
 
 const (
@@ -141,6 +142,12 @@ func (f *fakeNode) Commands() []string {
 	return append([]string(nil), f.cmds...)
 }
 
+func (f *fakeNode) PasswordTries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pwTries
+}
+
 func (f *fakeNode) AuthorizedCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -164,6 +171,9 @@ func (f *fakeNode) handle(c net.Conn) {
 	f.mu.Unlock()
 	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(_ ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
+			f.mu.Lock()
+			f.pwTries++
+			f.mu.Unlock()
 			if f.password != "" && string(pw) == f.password {
 				f.mu.Lock()
 				f.pwLogins++

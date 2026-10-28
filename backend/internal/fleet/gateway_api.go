@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -166,7 +167,7 @@ func (g *GatewayAPI) Authenticate(ctx context.Context, req accessgw.AuthRequest)
 			return deny, err
 		}
 	}
-	resp, err := g.check(req)
+	resp, err := g.check(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +186,7 @@ func (g *GatewayAPI) Authenticate(ctx context.Context, req accessgw.AuthRequest)
 }
 
 // check 买家登录: 租约 active、now < access_until、路由齐全; 公钥属于租约买家且未吊销, 或密码等于访问凭证。
-func (g *GatewayAPI) check(req accessgw.AuthRequest) (*accessgw.AuthResponse, error) {
+func (g *GatewayAPI) check(ctx context.Context, req accessgw.AuthRequest) (*accessgw.AuthResponse, error) {
 	if !ValidLeaseNo(req.Login) {
 		return deny, nil
 	}
@@ -216,10 +217,26 @@ func (g *GatewayAPI) check(req accessgw.AuthRequest) (*accessgw.AuthResponse, er
 			return deny, nil
 		}
 	}
+	upstream, err := g.upstreamIP(ctx, r)
+	if err != nil {
+		return nil, err
+	}
 	ttl := min(accessgw.MaxCacheTTL, r.AccessUntil.Sub(now))
 	until := *r.AccessUntil
-	return &accessgw.AuthResponse{Allow: true, UpstreamHost: *r.Host, UpstreamPort: *r.Port, UpstreamHostKeyFP: *r.HostKeyFP,
+	return &accessgw.AuthResponse{Allow: true, UpstreamHost: upstream, UpstreamPort: *r.Port, UpstreamHostKeyFP: *r.HostKeyFP,
 		AccessUntil: &until, CacheTTLS: int(ttl / time.Second)}, nil
+}
+
+// upstreamIP 网关(sshpiperd)连接上游时不经过主服务的拨号钩子, 因此由主服务按目标地址策略解析并校验节点 host,
+// 只把校验过的 IP 字面量交给网关, 网关侧不再自行解析(防 DNS rebinding 把网关变成内网跳板)。
+// 解析失败/命中拒绝名单按平台侧错误返回(网关拒绝本次登录), 不计入登录失败次数。
+func (g *GatewayAPI) upstreamIP(ctx context.Context, r *gwLeaseRoute) (string, error) {
+	a, err := g.s.dialer.resolveAllowed(ctx, *r.Host)
+	if err != nil {
+		slog.Warn("网关上游地址解析/校验失败, 拒绝本次登录", "host", *r.Host, "error", err)
+		return "", errcode.New(errcode.InternalError, "租约上游地址不可用")
+	}
+	return a.String(), nil
 }
 
 // systemAuth 系统自检身份(fleet.selftest_key_file): 只能登录 provisioning 租约(开通自检), 或领取 P11 端口连通任务。
@@ -249,7 +266,11 @@ func (g *GatewayAPI) systemAuth(ctx context.Context, login string) (*accessgw.Au
 	if r.State != LeaseProvisioning || r.DeliveryKind != "container" || !r.routable() {
 		return deny, nil
 	}
-	return &accessgw.AuthResponse{Allow: true, System: true, UpstreamHost: *r.Host, UpstreamPort: *r.Port,
+	upstream, err := g.upstreamIP(ctx, r)
+	if err != nil {
+		return nil, err
+	}
+	return &accessgw.AuthResponse{Allow: true, System: true, UpstreamHost: upstream, UpstreamPort: *r.Port,
 		UpstreamHostKeyFP: *r.HostKeyFP, CacheTTLS: 0}, nil
 }
 

@@ -77,17 +77,25 @@ type Service struct {
 	sampleGap int
 
 	extraExecutors map[string]taskExecutor // probe 之外的任务执行器(T-084 provision 等), 启动前注册
+	taskTTL        time.Duration           // 任务锁租约, 0 = taskLeaseTTL(测试可缩短)
+	taskBeat       time.Duration           // 心跳续期间隔, 0 = taskHeartbeat
 }
 
 // NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。
 func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.AccessGWConfig, credKey []byte) *Service {
+	dialer, err := newDialer(cfg.DenyCIDRs)
+	if err != nil {
+		// 配置加载阶段(validateFleet)已校验 fleet.deny_cidrs; 走到这里说明调用方绕过了校验。
+		// 不降级为"只用内置名单": 拒绝名单是安全边界, 直接中止。
+		panic("fleet.deny_cidrs 非法: " + err.Error())
+	}
 	s := &Service{
 		repo: repo, products: deps.Products, health: deps.Health, notifier: deps.Notifier, gateway: deps.Gateway,
 		cfg: cfg, gw: gw, gwEgress: gw.EgressIPs, credKey: credKey,
-		dialer:    &Dialer{},
+		dialer:    dialer,
 		benchSecs: 60, sampleN: 6, sampleGap: 10,
 	}
-	s.registerExecutor(KindProvision, taskExecutor{lock: provisionLock, run: s.runProvisionTask, onDead: s.onProvisionDead})
+	s.registerExecutor(KindProvision, taskExecutor{timeout: provisionTimeout, run: s.runProvisionTask, onDead: s.onProvisionDead})
 	return s
 }
 
@@ -231,6 +239,10 @@ func (s *Service) RegisterManagedNode(supplierID int64, req scheduler.ManagedNod
 	if p.DeliveryMode == "container" && req.DiskPerCardGB == 0 {
 		return nil, errcode.New(errcode.ParamInvalid, "分卡容器交付须填写每卡数据盘 disk_per_card_gb(GB)")
 	}
+	expected, err := parseExpectedFingerprint(req.ExpectedHostFingerprint)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.requireCredKey(); err != nil {
 		return nil, err
 	}
@@ -253,7 +265,21 @@ func (s *Service) RegisterManagedNode(supplierID int64, req scheduler.ManagedNod
 		if err != nil {
 			return wrapKeyErr(err)
 		}
-		return s.repo.setNodeKey(tx, id, pub, enc)
+		if err := s.repo.setNodeKey(tx, id, pub, enc); err != nil {
+			return err
+		}
+		if expected == "" {
+			return nil
+		}
+		// 预置指纹: 首次连接(引导或探活)即按它校验, 不一致在握手阶段中止, 不发送任何凭证。
+		if ok, err := s.repo.preconfirmHostKey(tx, id, expected); err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("节点 %d 预置主机指纹未写入", id)
+			}
+			return err
+		}
+		return s.repo.audit(tx, supplierID, "node.host_key_preconfirmed", "supplier_node", id,
+			nil, map[string]any{"fingerprint": expected, "source": "node_create"}, "")
 	})
 	if err != nil {
 		return nil, err

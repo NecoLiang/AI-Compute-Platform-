@@ -92,10 +92,10 @@ func (r *Repository) setNodeKey(tx *sqlx.Tx, id int64, pub, encPriv string) erro
 	return err
 }
 
-// updateSSH 修改连接信息: 节点回到 unverified; host/port 变化时清除指纹钉死(换了机器必须重新确认)。
+// updateSSH 修改连接信息: 节点回到 unverified、代次 +1(进行中的探活结论作废); host/port 变化时清除指纹钉死(换了机器必须重新确认)。
 func (r *Repository) updateSSH(tx *sqlx.Tx, id int64, host string, port int, user string, resetFP bool) (bool, error) {
 	q := `UPDATE supplier_nodes SET ssh_host=?, ssh_port=?, ssh_user=?, verify_status='unverified',
-		host_fp_claim=NULL, verified_at=NULL`
+		host_fp_claim=NULL, verified_at=NULL, generation=generation+1`
 	if resetFP {
 		q += `, host_key_fingerprint=NULL, host_key_confirmed_at=NULL`
 	}
@@ -104,24 +104,35 @@ func (r *Repository) updateSSH(tx *sqlx.Tx, id int64, host string, port int, use
 	return affectedOrMatched(tx, res, err, where+` AND ssh_host=? AND ssh_port=? AND ssh_user=?`, id, host, port, user)
 }
 
-// recordObservedFingerprint TOFU: 首次连接记录观测指纹, 待供给方确认。
-func (r *Repository) recordObservedFingerprint(q sqlx.Execer, id int64, fp string) error {
+// recordObservedFingerprint TOFU: 首次连接记录观测指纹, 待供给方确认。只写回同一代次(连接信息未改、未停用/重装)。
+func (r *Repository) recordObservedFingerprint(q sqlx.Execer, id int64, gen int, fp string) error {
 	_, err := q.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=?
-		WHERE id=? AND mgmt_mode='ssh' AND host_key_confirmed_at IS NULL`, fp, id)
+		WHERE id=? AND mgmt_mode='ssh' AND host_key_confirmed_at IS NULL AND generation=? AND verify_status<>'suspended'`,
+		fp, id, gen)
 	return err
 }
 
+// preconfirmHostKey 供给方提交的预期指纹(expected_host_fingerprint)直接钉死: 之后的首次连接按它校验, 不走 TOFU。
+// 调用方须在同一事务内已锁住/刚写入节点行, 并已把代次 +1(改连接信息)或节点尚未有任何探活(新建)。
+func (r *Repository) preconfirmHostKey(tx *sqlx.Tx, id int64, fp string) (bool, error) {
+	const where = `id=? AND mgmt_mode='ssh' AND verify_status<>'suspended'`
+	res, err := tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=?, host_key_confirmed_at=NOW(), host_fp_claim=NULL
+		WHERE `+where, fp, id)
+	return affectedOrMatched(tx, res, err, where+` AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL`, id, fp)
+}
+
+// confirmHostKey 钉死指纹并把代次 +1: 指纹确认前已在跑的(TOFU)探活结论作废, 由随后入队的完整探活接手。
 func (r *Repository) confirmHostKey(tx *sqlx.Tx, id int64, fp string) (bool, error) {
-	return affected(tx.Exec(`UPDATE supplier_nodes SET host_key_confirmed_at=NOW()
+	return affected(tx.Exec(`UPDATE supplier_nodes SET host_key_confirmed_at=NOW(), generation=generation+1
 		WHERE id=? AND mgmt_mode='ssh' AND host_key_fingerprint=? AND host_key_confirmed_at IS NULL`, id, fp))
 }
 
-// markKeyMismatch 钉死指纹与观测不一致: 停止新分配, 新指纹记为待确认, 释放指纹占用。
-func (r *Repository) markKeyMismatch(tx *sqlx.Tx, id int64, pinned, observed string) (bool, error) {
+// markKeyMismatch 钉死指纹与观测不一致: 停止新分配, 新指纹记为待确认, 释放指纹占用。只写回同一代次的观测。
+func (r *Repository) markKeyMismatch(tx *sqlx.Tx, id int64, gen int, pinned, observed string) (bool, error) {
 	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='key_mismatch', host_fp_claim=NULL, status='offline',
 		host_key_fingerprint=?, host_key_confirmed_at=NULL
 		WHERE id=? AND mgmt_mode='ssh' AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL
-		  AND verify_status<>'suspended'`, observed, id, pinned))
+		  AND verify_status<>'suspended' AND generation=?`, observed, id, pinned, gen))
 }
 
 func (r *Repository) setVerifyStatus(tx *sqlx.Tx, id int64, from []string, to string) (bool, error) {
@@ -176,46 +187,61 @@ type Inventory struct {
 	Faulty        map[int]string `json:"faulty,omitempty"` // gpu_index → 原因
 }
 
-func (r *Repository) markVerified(tx *sqlx.Tx, id int64, g connGuard, fp string, inv *Inventory) (bool, error) {
+// markVerified 完整探活通过: 只允许 verifying(本次入队的完整探活)与 verified(周期补跑)→ verified, 且须同一代次、
+// 连接信息与钉死指纹未变。failed/needs_reimage/key_mismatch/suspended 必须先经供给方/运营操作回到 verifying。
+func (r *Repository) markVerified(tx *sqlx.Tx, id int64, g connGuard, gen int, fp string, inv *Inventory) (bool, error) {
 	const where = `id=? AND mgmt_mode='ssh' AND ssh_host=? AND ssh_port=? AND ssh_user=?
-		  AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL
-		  AND verify_status IN ('unverified','verifying','verified','failed','key_mismatch','needs_reimage')`
+		  AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL AND generation=?
+		  AND verify_status IN ('verifying','verified')`
 	res, err := tx.Exec(`UPDATE supplier_nodes SET verify_status='verified', verified_at=NOW(), host_fp_claim=?,
 		cpu_cores=?, mem_gb=?, disk_free_gb=?, disk_quota_supported=?, driver_version=?, cuda_version=?,
 		status='online', last_heartbeat_at=NOW(), last_probe_ok_at=NOW(), probe_fail_count=0
 		WHERE `+where,
 		fp, inv.CPUCores, inv.MemGB, inv.DiskFreeGB, inv.QuotaOK, inv.DriverVersion, nullStr(inv.CUDAVersion),
-		id, g.Host, g.Port, g.User, fp)
+		id, g.Host, g.Port, g.User, fp, gen)
 	// 命中但值未变(同一秒内重复通过)仍视为成功; 复查时额外要求结果已是 verified/online。
 	return affectedOrMatched(tx, res, err, where+` AND verify_status='verified' AND status='online'`,
-		id, g.Host, g.Port, g.User, fp)
+		id, g.Host, g.Port, g.User, fp, gen)
 }
 
 // markFailed 完整探活失败: unverified/verifying/verified → failed 并释放指纹占用;
-// key_mismatch / needs_reimage 保持(失败不改变"待确认"语义), suspended 不动。
-func (r *Repository) markFailed(tx *sqlx.Tx, id int64, g connGuard) error {
+// key_mismatch / needs_reimage 保持(失败不改变"待确认"语义), suspended 不动; 代次不一致(结论已过时)不动。
+// 返回是否写回(false = 结论作废)。
+func (r *Repository) markFailed(tx *sqlx.Tx, id int64, g connGuard, gen int) (bool, error) {
 	// 失败节点不再接受周期轻量探活, 同时置 offline, 避免健康度聚合仍按"在线"计。
-	_, err := tx.Exec(`UPDATE supplier_nodes SET host_fp_claim=NULL, status='offline',
+	res, err := tx.Exec(`UPDATE supplier_nodes SET host_fp_claim=NULL, status='offline',
 		verify_status = CASE WHEN verify_status IN ('unverified','verifying','verified','failed') THEN 'failed' ELSE verify_status END
-		WHERE id=? AND mgmt_mode='ssh' AND ssh_host=? AND ssh_port=? AND ssh_user=? AND verify_status<>'suspended'`,
-		id, g.Host, g.Port, g.User)
-	return err
+		WHERE id=? AND mgmt_mode='ssh' AND ssh_host=? AND ssh_port=? AND ssh_user=? AND verify_status<>'suspended' AND generation=?`,
+		id, g.Host, g.Port, g.User, gen)
+	return affectedOrMatched(tx, res, err, `id=? AND mgmt_mode='ssh' AND ssh_host=? AND ssh_port=? AND ssh_user=?
+		AND verify_status<>'suspended' AND generation=?`, id, g.Host, g.Port, g.User, gen)
 }
 
-// markAwaitingFingerprint 首次连接尚未确认指纹: verifying → unverified, 等供给方确认后自动继续。
-func (r *Repository) markAwaitingFingerprint(tx *sqlx.Tx, id int64) error {
+// markAwaitingFingerprint 首次连接尚未确认指纹: verifying → unverified, 等供给方确认后自动继续(同一代次才写回)。
+func (r *Repository) markAwaitingFingerprint(tx *sqlx.Tx, id int64, gen int) error {
 	_, err := tx.Exec(`UPDATE supplier_nodes SET verify_status='unverified'
-		WHERE id=? AND mgmt_mode='ssh' AND verify_status IN ('verifying','failed')`, id)
+		WHERE id=? AND mgmt_mode='ssh' AND verify_status IN ('verifying','failed') AND generation=?`, id, gen)
 	return err
 }
 
+// abandonVerifying 本代次的完整探活未能执行(中止/死信): verifying → failed, 避免节点永远停在 verifying。
+// exceptTask 为本次结束的任务; 节点上还有其他未结束的 probe 时不回退。
+func (r *Repository) abandonVerifying(id int64, gen int, exceptTask int64) (bool, error) {
+	return affected(r.db.Exec(`UPDATE supplier_nodes SET verify_status='failed', host_fp_claim=NULL, status='offline'
+		WHERE id=? AND mgmt_mode='ssh' AND verify_status='verifying' AND generation=?
+		  AND NOT EXISTS (SELECT 1 FROM node_tasks WHERE node_id=? AND kind='probe' AND state IN ('pending','running') AND id<>?)`,
+		id, gen, id, exceptTask))
+}
+
+// suspend 运营停用: 代次 +1, 进行中的探活结论一律作废。
 func (r *Repository) suspend(tx *sqlx.Tx, id int64) (bool, error) {
-	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='suspended', host_fp_claim=NULL
+	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='suspended', host_fp_claim=NULL, generation=generation+1
 		WHERE id=? AND mgmt_mode='ssh' AND verify_status<>'suspended'`, id))
 }
 
+// resume 运营恢复: 代次 +1(停用前入队/运行的探活不能复用, 也不能把恢复后的节点直接改回 verified)。
 func (r *Repository) resume(tx *sqlx.Tx, id int64) (bool, error) {
-	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='unverified', verified_at=NULL
+	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='unverified', verified_at=NULL, generation=generation+1
 		WHERE id=? AND mgmt_mode='ssh' AND verify_status='suspended'`, id))
 }
 

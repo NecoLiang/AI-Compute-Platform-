@@ -18,15 +18,22 @@ type CatalogEntry struct {
 
 var memSuffixRe = regexp.MustCompile(`(?i)[-\s]?(\d+)\s*G(B)?$`)
 var tokenSplitRe = regexp.MustCompile(`[^A-Z0-9]+`)
+var memSizeTokenRe = regexp.MustCompile(`^\d+GB?$`)
 
-// modelTokens 归一型号: 去掉显存后缀(-80G / 80GB)、厂商前缀, 大写后按非字母数字切分。
+// modelNoise 型号比对时忽略的 token: 品牌前缀、显存类型、板卡形态。显存容量另由 vramMatches 核对。
+// 其余 token(含 D / TI / S / NVL 等后缀)都区分型号: "RTX 4090 D"、"V100S"、"H100 NVL" 是不同 SKU。
+var modelNoise = map[string]bool{
+	"NVIDIA": true, "TESLA": true, "GEFORCE": true, "QUADRO": true,
+	"HBM2": true, "HBM2E": true, "HBM3": true, "HBM3E": true,
+	"PCIE": true, "SXM": true, "SXM2": true, "SXM3": true, "SXM4": true, "SXM5": true,
+}
+
+// modelTokens 归一型号(商品型号与 nvidia-smi 名称同一规则): 大写后按非字母数字切分,
+// 去掉显存容量(80G / 80GB)与 modelNoise 中的 token, 保留顺序。
 func modelTokens(model string) []string {
-	m := strings.ToUpper(strings.TrimSpace(model))
-	m = memSuffixRe.ReplaceAllString(m, "")
 	var out []string
-	for _, t := range tokenSplitRe.Split(m, -1) {
-		switch t {
-		case "", "NVIDIA", "TESLA", "GEFORCE":
+	for _, t := range tokenSplitRe.Split(strings.ToUpper(strings.TrimSpace(model)), -1) {
+		if t == "" || modelNoise[t] || memSizeTokenRe.MatchString(t) {
 			continue
 		}
 		out = append(out, t)
@@ -44,20 +51,16 @@ func memFromModel(model string) int {
 	return n
 }
 
-// ModelMatches 商品型号的每个归一 token 都必须出现在 nvidia-smi 名称的 token 中:
-// "H100-80G" 匹配 "NVIDIA H100 80GB HBM3"; "RTX 4090-24G" 匹配 "NVIDIA GeForce RTX 4090",
-// 不匹配 "RTX 4090 D"(多出的 D 不影响), 但 "4090" 不匹配 "4090D"(token 不同)。
+// ModelMatches 归一后的 token 序列必须完全相同(CR-S1: 不再是子集匹配):
+// "H100-80G" 匹配 "NVIDIA H100 80GB HBM3" / "NVIDIA H100 PCIe"; "A100-80G" 匹配 "NVIDIA A100-SXM4-80GB";
+// "RTX 4090-24G" 匹配 "NVIDIA GeForce RTX 4090", 不匹配 "NVIDIA GeForce RTX 4090 D"(多出 D)与 "4090D"。
 func ModelMatches(productModel, smiName string) bool {
-	want := modelTokens(productModel)
-	if len(want) == 0 {
+	want, have := modelTokens(productModel), modelTokens(smiName)
+	if len(want) == 0 || len(want) != len(have) {
 		return false
 	}
-	have := map[string]bool{}
-	for _, t := range tokenSplitRe.Split(strings.ToUpper(smiName), -1) {
-		have[t] = true
-	}
-	for _, t := range want {
-		if !have[t] {
+	for i := range want {
+		if want[i] != have[i] {
 			return false
 		}
 	}

@@ -79,6 +79,7 @@ type Node struct {
 	HostKeyConfirmedAt *time.Time `db:"host_key_confirmed_at" json:"host_key_confirmed_at"`
 	HostFPClaim        *string    `db:"host_fp_claim" json:"-"`
 	VerifyStatus       string     `db:"verify_status" json:"verify_status"`
+	Generation         int        `db:"generation" json:"-"` // 探活代次(见 ProbePayload.Generation)
 	Schedulable        bool       `db:"schedulable" json:"schedulable"`
 	VerifiedAt         *time.Time `db:"verified_at" json:"verified_at"`
 	LastProbeOKAt      *time.Time `db:"last_probe_ok_at" json:"last_probe_ok_at"`
@@ -98,7 +99,7 @@ type Node struct {
 
 const nodeColumns = `id, supplier_id, product_id, node_name, status, total_cards, available_cards, last_heartbeat_at,
 	mgmt_mode, ssh_host, ssh_port, ssh_user, mgmt_pubkey, mgmt_privkey_encrypted, host_key_fingerprint,
-	host_key_confirmed_at, host_fp_claim, verify_status, schedulable, verified_at, last_probe_ok_at,
+	host_key_confirmed_at, host_fp_claim, verify_status, generation, schedulable, verified_at, last_probe_ok_at,
 	probe_fail_count, cpu_cores, mem_gb, disk_free_gb, disk_per_card_gb, disk_quota_supported,
 	driver_version, cuda_version, lease_port_start, lease_port_end, created_at, updated_at`
 
@@ -164,6 +165,9 @@ const taskColumns = `id, node_id, lease_id, deployment_id, kind, state, priority
 type ProbePayload struct {
 	Mode    string `json:"mode"`    // full / port_recheck
 	Trigger string `json:"trigger"` // supplier / operator / periodic / host_key_confirm / reimage_confirm / resume
+	// Generation 入队时节点的 supplier_nodes.generation。停用/恢复/重装确认/改连接信息/确认指纹会把节点代次 +1,
+	// 代次不一致的探活在开始前中止、提交时作废(不写报告、不改节点状态), 防止旧探活把节点"复活"。
+	Generation int `json:"generation"`
 }
 
 // Check 探活单项结论。Required=false 的项不通过不阻断上架(P10)。

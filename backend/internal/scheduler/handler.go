@@ -42,6 +42,8 @@ func (h *Handler) RegisterNode(c *gin.Context) {
 		DiskPerCardGB  int    `json:"disk_per_card_gb"`
 		LeasePortStart int    `json:"lease_port_start"`
 		LeasePortEnd   int    `json:"lease_port_end"`
+		// 推荐: 填写机器上 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 的指纹, 首次连接即校验。
+		ExpectedHostFingerprint string `json:"expected_host_fingerprint"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, "product_id / node_name / total_cards 必填")
@@ -53,6 +55,7 @@ func (h *Handler) RegisterNode(c *gin.Context) {
 		node, err := h.svc.RegisterManagedNode(c.GetInt64("user_id"), ManagedNodeReq{
 			ProductID: req.ProductID, NodeName: req.NodeName, TotalCards: req.TotalCards,
 			DiskPerCardGB: req.DiskPerCardGB, LeasePortStart: req.LeasePortStart, LeasePortEnd: req.LeasePortEnd,
+			ExpectedHostFingerprint: req.ExpectedHostFingerprint,
 		})
 		if err != nil {
 			response.Error(c, errcode.CodeOf(err, errcode.ParamInvalid), err.Error())

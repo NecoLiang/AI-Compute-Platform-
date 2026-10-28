@@ -44,7 +44,8 @@
 curl -X POST http://localhost:8080/api/v1/supplier/nodes \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"product_id":12,"node_name":"bj-h100-01","total_cards":8,"mgmt_mode":"ssh",
-       "disk_per_card_gb":200,"lease_port_start":40000,"lease_port_end":40099}'
+       "disk_per_card_gb":200,"lease_port_start":40000,"lease_port_end":40099,
+       "expected_host_fingerprint":"SHA256:Hq3w5kQe0Q8m1c2vFq9yZ7x5pW1n8uT4rL6sK2jD0aE"}'
 ```
 
 | 字段 | 必填 | 说明 |
@@ -55,6 +56,9 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 | `mgmt_mode` | 是 | `"ssh"`；缺省/`"push"` 走原心跳节点逻辑（托管商品拒绝 push 节点 40001） |
 | `disk_per_card_gb` | 分卡容器商品必填 | 每卡数据盘 GB，探活 P8 核对 |
 | `lease_port_start/end` | 否 | 默认 40000–40099；须在 1024–65535、跨度 ≤ 1000、端口数 ≥ 卡数+1（含探活自检端口） |
+| `expected_host_fingerprint` | 否（**推荐**） | 在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 输出的第二列，格式 `SHA256:` + 43 位 base64（无 `=`），首尾空白忽略，其余格式 40001。提交即钉死为已确认指纹（审计 `node.host_key_preconfirmed`）：平台首次连接（含一次性密码引导）就在握手阶段比对，不一致即中止、**不发送任何凭证**；一致则首次探活无需再确认指纹 |
+
+> **推荐上架方式**：手动把 `authorized_keys_line` 加入管理账户 + 提交 `expected_host_fingerprint`。平台全程不接触密码，首次连接即校验主机身份。不提供预期指纹时为 TOFU：平台先连接、记录观测指纹，再由供给方确认；此时若使用 `bootstrap_password`，密码会在指纹确认**之前**发给首次握手到的主机。
 
 **响应**：`{"code":0,"data":{"node":{Node}}}`。平台为该节点生成专属 ed25519 管理密钥（私钥 AES-256-GCM 加密入库），不返回 `node_key`。
 **错误**：40001 参数 / 商品非托管；40400 商品不存在或非本人；40900 同名；50000 `security.credential_key` 未配置。
@@ -91,22 +95,25 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 
 ```
 curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"host":"203.0.113.10","port":22,"user":"root","bootstrap_password":"<仅本次使用>"}'
+  -d '{"host":"203.0.113.10","port":22,"user":"root",
+       "expected_host_fingerprint":"SHA256:Hq3w5kQe0Q8m1c2vFq9yZ7x5pW1n8uT4rL6sK2jD0aE"}'
 ```
 
-- 保存后节点回到 `unverified`，作废排队中的探活任务；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。`verified` 节点修改后立即退出可售。
-- `host`：IP 或域名，拒绝回环 / 链路本地 / 组播 / 未指定地址及 `localhost`（40001）；`user`：小写字母数字下划线短横线，≤32 位。
-- `bootstrap_password`（可选）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: …」，可改为手动添加公钥行。若该主机已有钉死指纹且不一致，返回 40900 并转 `key_mismatch`。
+- 保存后节点回到 `unverified`，作废排队中与进行中的探活任务（进行中的探活结论按节点代次作废，不会改动节点状态）；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。**首次**填写连接信息（此前无 host）不算变化，建节点时提交的 `expected_host_fingerprint` 保留。`verified` 节点修改后立即退出可售。
+- `host`：节点的**公网** IP 或域名。平台按目标地址拒绝名单校验（回环、RFC1918、CGNAT `100.64.0.0/10`（含云元数据 `100.100.100.200`）、链路本地（含 `169.254.169.254`）、ULA `fc00::/7`、组播、保留/文档段，以及运营配置的 `fleet.deny_cidrs`）：IP 直接判断，域名在提交时解析，任一解析结果命中即拒绝 → 40001「host 不允许: 须为节点的公网地址…」；域名无法解析 → 40001「host 无法解析…」；`localhost` 40001。拒绝提示不回显解析出的地址。之后每次连接还会在拨号时按实际地址再校验一次（防 DNS rebinding）。`user`：小写字母数字下划线短横线，≤32 位。
+- `expected_host_fingerprint`（可选，**推荐**）：格式同 POST /supplier/nodes，非法 40001（连接信息不保存）。提交即覆盖当前指纹并钉死为已确认（审计 `node.host_key_preconfirmed`，旧值记入 `before`）。
+- `bootstrap_password`（可选；建议与 `expected_host_fingerprint` 同时提供，或改用手动加公钥）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。存在钉死指纹（已确认或本次/建节点时提交的预期指纹）时，引导在 SSH 握手的主机密钥校验阶段比对，不一致即中止——**密码不会发出**——返回 40900「主机指纹 <实际> 与已确认/预期指纹 <钉死> 不一致: 握手阶段已中止, 一次性密码未发送…」，节点转 `key_mismatch` 并记录实际观测指纹（可经 host-key/confirm 确认，或改正连接信息/预期指纹后重试）。
 - `suspended` 节点 40900。
 
-**响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。引导成功时 `host_key.fingerprint` 为本次观测到的指纹（未确认）。
+**响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。无钉死指纹时引导成功后 `host_key.fingerprint` 为本次观测到的指纹（未确认）；有预期/已确认指纹时为该指纹且 `confirmed:true`。
 
 ## POST /supplier/nodes/:id/verify · 发起完整探活 ✅
 
-**响应**：`{"task_id":123}`。节点 → `verifying`；已有排队/执行中的探活时返回同一 `task_id`。
+**响应**：`{"task_id":123}`。节点 → `verifying`；已有本代次排队/执行中的**完整**探活时返回同一 `task_id`（排队中的端口复测不能代替完整探活：会被作废并另行入队完整探活；在跑的端口复测结束后再执行完整探活）。
+完整探活若因平台侧原因无法完成（平台配置缺失、重试耗尽等），节点 `verifying → failed` 并收到站内信「节点探活未能完成」，可再次发起。
 **错误**：40001 未填 SSH 信息；40900 `suspended` / `key_mismatch`（先确认新指纹）/ `needs_reimage`（先重装确认）。
 
-首次连接（指纹未确认）时探活只执行 P1–P3：记录观测指纹，写一份 `fail` 报告（P2 详情给出指纹与核对命令），节点回 `unverified`，站内信「请确认节点主机指纹」；**不执行任何 nvidia-smi / docker 命令**。
+首次连接（指纹未确认，即未提交 `expected_host_fingerprint` 也未经 host-key/confirm）时探活只执行 P1–P3：记录观测指纹，写一份 `fail` 报告（P2 详情给出指纹与核对命令），节点回 `unverified`，站内信「请确认节点主机指纹」；**不执行任何 nvidia-smi / docker 命令**。
 
 ## POST /supplier/nodes/:id/host-key/confirm · 确认主机指纹 ✅
 
@@ -132,6 +139,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 ```
 
 - `kind`：`verify`（完整探活）/ `port_recheck`（端口复测）。`result=pass` 表示全部必检项通过（P10 为非必检）。
+- 连接类失败的 `detail` 为通用提示：P1「管理端口不可达」、P2「SSH 握手失败」、P11「经网关连接 host:port 失败(检查是否已按上架说明放行网关出口 IP)」；不包含解析出的地址或底层错误串（只写服务端日志）。
 - `checks[].skipped=true` 表示前置项未通过未执行。`inventory` 在连接阶段失败或待确认指纹时为 `null`。
 
 ## GET /supplier/nodes/:id/slots · 卡槽 ✅
@@ -150,7 +158,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 
 ## POST /supplier/nodes/:id/reimage-confirm · 重装确认 ✅
 
-仅 `needs_reimage` 可调（否则 40900）。清除指纹钉死后入队完整探活：新系统首次连接会再次进入「确认主机指纹」。响应 `{"task_id":125}`。
+仅 `needs_reimage` 可调（否则 40900）。节点 → `verifying`，清除指纹钉死后入队完整探活（重装前已在跑的探活结论作废）：新系统首次连接会再次进入「确认主机指纹」。响应 `{"task_id":125}`。
 
 ---
 
@@ -245,7 +253,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 ### POST /admin/nodes/:id/suspend · 停用节点 ✅
 
-`{"reason":"≤200 字，可选"}` → `{"verify_status":"suspended"}`。停止新分配、释放空闲/停用/无租约故障卡槽（卡 UUID 与指纹占用随之释放）、作废排队任务、重算库存、通知供给方、写审计。存量租约不受影响。40400 非托管节点；40900 已停用。
+`{"reason":"≤200 字，可选"}` → `{"verify_status":"suspended"}`。停止新分配、释放空闲/停用/无租约故障卡槽（卡 UUID 与指纹占用随之释放）、作废排队任务、重算库存、通知供给方、写审计。作废该节点**排队中与进行中**的探活任务（任务 `failed`；进行中的探活即使随后通过也不会把节点改回 `verified`，`result.discarded=true`）；租约类任务（stop/purge/kill_sessions/provision）不作废，存量租约不受影响，排队中的开通在执行时发现节点已停用会走重试→换节点/退款。40400 非托管节点；40900 已停用。
 
 ### POST /admin/nodes/:id/resume · 恢复节点 ✅
 
@@ -254,11 +262,11 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ### GET /admin/node-tasks?state=&node_id=&page=&page_size= · 节点任务 ✅
 
 `state` ∈ `pending/running/succeeded/failed/dead`（其他值 40001），缺省为全部。分页信封 `data:{list,total,page,page_size}`。
-`Task`：`id, node_id, lease_id, deployment_id, kind, state, priority, attempts, max_attempts, run_after, locked_until, payload, result, last_error, created_at, updated_at`；`payload/result` 为 JSON（未完成任务 `result` 为 `null`）。探活任务 `result`：`{"mode":"full","pass":true,"report_id":31,"failed_checks":[],"awaiting_host_key":"SHA256:...","discarded":false}`。
+`Task`：`id, node_id, lease_id, deployment_id, kind, state, priority, attempts, max_attempts, run_after, locked_until, payload, result, last_error, created_at, updated_at`；`payload/result` 为 JSON（未完成任务 `result` 为 `null`）。`running` 任务的 `locked_until` 是心跳租约（约 3 分钟，执行期间每分钟续期）；已过期仍为 `running` 表示 worker 已中断，1 分钟内被回收。探活任务 `result`：`{"mode":"full","pass":true,"report_id":31,"failed_checks":[],"awaiting_host_key":"SHA256:...","discarded":false}`。
 
 ### POST /admin/node-tasks/:id/retry · 重试死信 ✅
 
-仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
+仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=probe`：payload 按节点当前代次重写，完整探活同时把节点置 `verifying`；节点已删除、`suspended`/`needs_reimage`/`key_mismatch` 或已有未结束的探活时 40900。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
 
 ### GET /admin/leases?state=&node_id=&buyer_id=&page=&page_size= · 租约检索 ✅（S2 T-086）
 
@@ -307,7 +315,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | P2 | SSH 握手与指纹 | 已钉死则比对，不一致 → `key_mismatch`；未钉死 → 记录观测值并在 P3 后停止 |
 | P3 | 管理密钥认证 | 平台私钥登录 |
 | P4 | GPU 清单 | `nvidia-smi --query-gpu=...`；卡 UUID 已被其他节点登记 → 不通过 |
-| P5 | 声明一致性 | 型号按 `gpu_catalog` 归一、卡数、显存误差 ≤ 3%（GDDR 卡开 ECC 时按可见显存少 1/16 再比） |
+| P5 | 声明一致性 | 型号按 `gpu_catalog` 归一后**完全相同**（忽略品牌/显存容量/HBM 类型/PCIe·SXM 形态；`4090 D`、`V100S`、`H100 NVL` 等后缀视为不同型号）、卡数、显存误差 ≤ 3%（GDDR 卡开 ECC 时按可见显存少 1/16 再比） |
 | P6 | 拓扑 | `nvidia-smi topo -m` → `topo_group` |
 | P7 | 健康 | 不可纠正 ECC、退役页/行重映射待生效或失败、24h 致命 Xid；问题卡标 `faulty`；**全部卡故障才判不通过** |
 | P8 | 主机资源 | CPU/内存/Docker 数据目录所在盘/OS/内核 + 驱动 ≥ `fleet.min_driver_version` |
@@ -319,7 +327,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 在租/预留/排空的卡只做只读检查（P4/P7），侵入项只用空闲卡与未分配端口。
 
-**结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间 SSH 信息被修改或节点被停用 → 结论作废（任务 `result.discarded=true`），不改节点状态。
+**结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间节点被停用/恢复、重装确认、SSH 信息被修改或指纹被确认（节点代次变化）→ 结论作废（任务 `result.discarded=true`，不写报告），不改节点状态；代次已变化后才开始执行的旧任务直接 `failed`、不连接节点。只有 `verifying`（本代次完整探活）或 `verified`（周期补跑）的节点能被探活结论置为 `verified`。
 
 **周期**：`verified` 节点每 60s SSH 轻量探活（`nvidia-smi` 利用率/温度/ECC + Docker 守护进程 + 近 2 分钟 Xid），成功写心跳与 `available_cards`；距上次成功超过 90s → `offline` + 通知，恢复后自动上线。空闲卡掉卡或出现致命错误 → `faulty` + 通知；在租卡异常仅记运营告警（租约侧处理在 S2）。完整探活每 12h、端口复测每 24h 自动入队。
 
@@ -357,6 +365,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 - `method` ∈ `publickey` / `password`，其他 40001；`publickey` 时 `pubkey_fp` 必须以 `SHA256:` 开头，否则 40001；`remote_ip` 必须是合法 IP（不带端口），否则 40001。
 - 不存在/非法的登录名、凭证不符、租约不可登录都**不是错误**：返回 `allow:false`，网关统一提示认证失败。
+- `upstream_host` 恒为 **IP 字面量**：主服务按目标地址拒绝名单（含 `fleet.deny_cidrs`）解析并校验节点 host 后下发，网关不自行解析。节点 host 无法解析或命中拒绝名单时返回 **50000**「租约上游地址不可用」（网关拒绝该次登录，不计入爆破失败）。P11 探活任务的 `probe.host` 同样是 IP 字面量，网关对非 IP 目标直接回报「探活任务地址非法」，并在自身拨号钩子里按内置拒绝名单再拦截。
 
 放行（买家）：
 

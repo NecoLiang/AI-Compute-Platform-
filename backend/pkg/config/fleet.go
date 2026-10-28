@@ -6,6 +6,9 @@ import (
 	"strings"
 	"time"
 
+	tfcrypto "tokenfactory/pkg/crypto"
+	"tokenfactory/pkg/netguard"
+
 	"github.com/spf13/viper"
 )
 
@@ -26,9 +29,12 @@ type FleetConfig struct {
 	// SelftestKeyFile 主服务经网关做开通自检/P11 时使用的 ed25519 私钥文件(0400)。
 	// 网关按其指纹识别"系统自检身份", 只允许登录 provisioning 租约与探活临时路由。
 	SelftestKeyFile string
-	Grace           FleetGrace
-	Outage          FleetOutage
-	Probe           FleetProbe
+	// DenyCIDRs 追加到内置拒绝名单(pkg/netguard.DefaultDenyCIDRs)的目标地址段, 典型为平台自身 VPC/内网网段、
+	// 主服务与网关所在公网段。只能追加, 不能放行内置段。元素为 CIDR 或单个 IP。
+	DenyCIDRs []string
+	Grace     FleetGrace
+	Outage    FleetOutage
+	Probe     FleetProbe
 }
 
 type BaseImage struct {
@@ -80,6 +86,7 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 		HostReserveCPU:      v.GetInt("fleet.host_reserve_cpu"),
 		HostReserveMemGB:    v.GetInt("fleet.host_reserve_mem_gb"),
 		SelftestKeyFile:     strings.TrimSpace(v.GetString("fleet.selftest_key_file")),
+		DenyCIDRs:           cleanList(v.GetStringSlice("fleet.deny_cidrs")),
 		Grace: FleetGrace{
 			Short:   v.GetDuration("fleet.grace.short"),
 			Long:    v.GetDuration("fleet.grace.long"),
@@ -169,6 +176,11 @@ func validateFleet(cfg *Config) error {
 			invalid = append(invalid, "fleet.controller_egress_ips 含非法 IP: "+ip)
 		}
 	}
+	for _, c := range f.DenyCIDRs {
+		if _, err := netguard.ParseCIDROrIP(c); err != nil {
+			invalid = append(invalid, "fleet.deny_cidrs 含非法 CIDR/IP: "+c)
+		}
+	}
 	if len(f.BaseImages) == 0 {
 		missing = append(missing, "fleet.base_images")
 	}
@@ -190,6 +202,9 @@ func validateFleet(cfg *Config) error {
 	}
 	if strings.TrimSpace(cfg.Security.CredentialKey) == "" {
 		missing = append(missing, "security.credential_key")
+	} else if _, err := tfcrypto.ParseKeyHex(cfg.Security.CredentialKey); err != nil {
+		// 节点管理私钥用它加密落库; 非法密钥不能"带病启动"(否则节点接入/探活全部 50000)。
+		invalid = append(invalid, "security.credential_key 须为 64 位 hex(32 字节)")
 	}
 	if gw.PublicHost == "" {
 		missing = append(missing, "accessgw.public_host")

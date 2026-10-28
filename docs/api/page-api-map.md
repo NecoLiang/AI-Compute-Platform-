@@ -146,9 +146,9 @@
 
 | 步骤 | 接口 | 页面要点 |
 |---|---|---|
-| ① 添加节点 | `POST /supplier/nodes` `{product_id, node_name, total_cards, mgmt_mode:"ssh", disk_per_card_gb, lease_port_start?, lease_port_end?}` | 无 `node_key`；默认端口段 40000–40099 |
+| ① 添加节点 | `POST /supplier/nodes` `{product_id, node_name, total_cards, mgmt_mode:"ssh", disk_per_card_gb, lease_port_start?, lease_port_end?, expected_host_fingerprint?}` | 无 `node_key`；默认端口段 40000–40099；**推荐**引导用户在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 并粘贴指纹（`SHA256:…`），填写后首次连接即校验、跳过⑤ |
 | ② 上架说明 | `GET /supplier/nodes/:id/onboarding` | 展示 `authorized_keys_line`（复制按钮）、`requirements`、按发行版切换的 `firewall_scripts`、控制面/网关出口 IP |
-| ③ 连接信息 | `PUT /supplier/nodes/:id/ssh` `{host, port, user, bootstrap_password?}` | 一次性密码为可选项，提交后不回显不缓存；40001 失败时连接信息已保存，引导改为手动加公钥 |
+| ③ 连接信息 | `PUT /supplier/nodes/:id/ssh` `{host, port, user, bootstrap_password?, expected_host_fingerprint?}` | 默认推荐「手动加公钥 + 预期指纹」；一次性密码为次选项，选它时提示一并填写预期指纹（否则密码会在指纹确认前发出），提交后不回显不缓存；40001 失败时连接信息已保存，引导改为手动加公钥；40900「一次性密码未发送」= 指纹不一致，引导用户核对指纹 |
 | ④ 发起探活 | `POST /supplier/nodes/:id/verify` → `task_id` | 轮询 `GET /supplier/nodes` 看 `verify_status` |
 | ⑤ 确认指纹 | `POST /supplier/nodes/:id/host-key/confirm` `{fingerprint}` | 首次连接后 `verify_status=unverified` 且 `host_key_fingerprint` 有值、未确认时出现；展示核对命令，用户粘贴机器上看到的指纹 |
 | ⑥ 探活报告 | `GET /supplier/nodes/:id/probe-reports?limit=` | P1–P13 逐项 ok/skipped/detail；`inventory` 可能为 `null` |

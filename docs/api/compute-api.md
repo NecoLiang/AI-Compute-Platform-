@@ -154,15 +154,15 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 | gpu_model | string | ✅ | GPU 型号 |
 | card_count | int | ✅ | 可售总卡数 |
 | delivery_mode | string | ✅ | bare_metal / container / vm / rack |
+| fulfillment_mode | string | — | 履约模式：`manual`（缺省，供给方人工交付）/ `managed`（平台托管开通，v1.2，仅零租，见下方「托管商品」）；创建后不可修改 |
 | pricing_mode | string | ✅¹ | 零租：hourly / daily / weekly / monthly / nightly；智算中心：monthly；买断：perpetual |
 | unit_price | int | ✅¹ | 单价(分)/卡/周期，如 3500=¥35.00 |
 | min_duration | int | — | 最短租期（周期数），默认 1 |
 | prices | array | — | 仅零租。多计费方式：`[{"pricing_mode":"hourly","unit_price":3500,"min_duration":1,"enabled":true}, ...]`；`min_duration` 省略为 1，`enabled` 省略为 true |
-| fulfillment_mode | string | — | manual（默认）/ managed；managed 仅零租 |
 | availability | string | — | fulltime（默认）/ night_window；night_window 仅零租 |
 | card_split_options | int[] | — | T-092/T-093，仅托管容器零租（`card_rental` + `managed` + `container`）。每个值须属于平台集合 `{1,2,4,6,8}` 且 ≤ `card_count`；去重升序保存；省略取平台集合中 ≤ `card_count` 的全部值。其他商品传入返回 40001「可选卡数仅适用于平台托管的分卡容器(container)零租商品」 |
 | night_start_min / night_end_min | int | — | 仅 night_window；默认 1320/480（22:00-08:00）；30 分钟对齐，窗口长 4-14 小时；`available_hours` 由服务端按窗口生成 |
-| stock | int | ✅ | 可售余量 |
+| stock | int | ✅ | 可售余量；`managed` 商品忽略此值（库存由节点卡槽派生，写入 0） |
 | region | string | ✅ | 地域 |
 | compliance_agreed | bool | ✅ | 合规承诺（必须为 true） |
 | compliance_version | string | ✅ | 当前规范版本：`2026-09-06.1`；发布为上架规范，下单为使用规范 |
@@ -176,6 +176,8 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 {"code":0,"data":{"id":12,"warnings":[{"code":"daily_above_24_hourly","message":"日价高于 24 小时价"}]}}
 ```
 `warnings` 为价格倒挂提醒，只提醒不阻断，无提醒时为 `[]`。只比较已启用价格：`daily_above_24_hourly`（日价 > 24×时价）、`weekly_above_7_daily`（周价 > 7×日价）、`monthly_above_30_daily`（月价 > 30×日价）、`monthly_above_4_weekly`（未设日价时，月价 > 4×周价）。重提时未再提交的计费方式保留为 `enabled=false`（不删除），存量订单续租据此返回 `40900`。
+
+商品对象（`GET /products`、`GET /products/:id`、`GET /supplier/products`、`/admin/products`）均带 `fulfillment_mode`。`managed` 商品的初始状态是 `draft`（不是 `pending`），见下方「托管商品」。
 
 ---
 
@@ -435,11 +437,35 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 - 库存按订单实际 `stock_reserved` 归还并清零，与终态流转同事务；零占用订单不增加库存。历史 NULL 占用必须先核对，释放失败保持原状态，禁止猜测回填。该内部字段不对外返回。
 - 增量迁移、历史核对与应用回退见 [发布说明](trade-controls-release.md)。
 
+## 托管商品（S1，`fulfillment_mode=managed`）
+
+v1.2 S1（T-076~T-081）。`fulfillment_mode` 缺省或 `manual` 的商品所有接口行为不变。设计见 docs/25 §25.4、§25.12；节点接入接口见 [managed-rental-api.md](managed-rental-api.md)。
+
+**发布 `POST /supplier/products`**
+- 仅零租（`product_type=card_rental`）且 `delivery_mode` 为 `container`（分卡容器）或 `bare_metal`（整机）可选 `managed`；否则 40001「平台托管仅支持零租商品」/「平台托管仅支持 container(分卡容器)或 bare_metal(整机)交付」；`fulfillment_mode` 取其他值 40001「履约模式非法…」。
+- `stock` 被忽略并写 0；**创建即为 `draft`**（人工商品为 `pending`），不进审核队列、不在市场展示。供给方随后在该商品下添加 ssh 托管节点并完成探活（managed-rental-api.md），再提交审核。
+- `fleet.enabled=false` 时仍可创建 `managed` 草稿（便于提前准备），但不能提交审核与下单（见下）。
+
+**提交审核 `PUT /supplier/products/:id`**（与驳回后重提同一接口、同一完整请求体；仅 `draft` / `offline` 可提交，成功 → `pending`）
+| 情形 | code | message |
+|---|---|---|
+| `fleet.enabled=false` | 40001 | 托管履约未启用(fleet.enabled=false): 托管商品暂不可提交审核或下单 |
+| 该商品下没有 ssh 托管节点 | 40001 | 托管商品提交审核前须至少接入一个 ssh 托管节点并通过探活 |
+| 没有一台「`verified` + 最近一次通过的完整探活 + 每张卡型号与商品 `gpu_model` 一致（P5 归一比对）」的节点 | 40001 | 托管商品暂不可提交审核: 节点 X: 核验状态 unverified; 节点 Y: GPU0 实测 … 与商品型号 … 不一致; …（逐节点列出原因） |
+| 请求体 `fulfillment_mode` 与创建时不同 | 40001 | 履约模式创建后不可修改, 如需切换请新建商品 |
+| 商品不在 `draft` / `offline`（如已 `pending` / `active`） | 40900 | product review conflict |
+
+**审核通过 `POST /admin/audits/products/:id/approve`**：`managed` 商品按当前节点状态再校验一次（审核期间节点可能已探活失败），不满足返回上表同样的 40001；通过后 `pending → active` 并立即按空闲卡槽重算库存（无空闲卡则 `sold_out`，有卡后自动回到 `active`）。
+
+**其他**
+- `managed` 商品库存由节点卡槽派生（docs/25 §25.6），人工盘点（`POST /supplier/resource-syncs/passive`、`POST /admin/resource-syncs/active`）返回 40001「托管商品库存由节点卡槽探活派生, 不支持人工盘点」。
+- `draft` 商品对公开接口不可见：`GET /products/:id` 40400，`POST /orders` 40900「product not available」。
+
 ## 托管订单（S2，`fulfillment_mode=managed`）
 
 v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.fulfillment_mode='managed'` 的商品与订单；人工订单（`manual`）的所有接口行为不变。设计见 docs/25 §25.5、docs/26 §26.5；租约与连接信息接口见 [managed-rental-api.md](managed-rental-api.md)「买家连接」。
 
-**下单 `POST /orders`**（请求/响应结构不变）
+**下单 `POST /orders`**（请求/响应结构不变；买家准入、协议版本、商品 `active`、供给方资质、节点健康等通用校验在前，与人工订单相同）
 - `fleet.enabled=false`：40001「托管履约未启用(fleet.enabled=false): 托管商品暂不可提交审核或下单」。
 - fleet 已启用但租约钩子未接入：50000「托管履约模块未启用: 租约开通(docs/25 S2)尚未接入, 托管商品暂不可下单」。
 - 买断计费（`pricing_mode=perpetual`）的托管商品：40001「托管商品不支持买断计费」。

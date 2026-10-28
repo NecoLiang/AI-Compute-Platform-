@@ -156,6 +156,7 @@ func TestGatewayFullChain(t *testing.T) {
 	ctr.Override("echo hello", fakeReply{Stdout: "hello\n"})
 
 	gw := accessgw.NewGateway(e.client, nil)
+	gw.AllowLoopbackForTest = true // 假节点在 127.0.0.1
 	pp := newMiniPiper(t, gw, upKey)
 	gwCfg := config.AccessGWConfig{PublicHost: "127.0.0.1", PublicPort: pp.Port(), HostKeyFingerprint: fpOf(pp.hostKey)}
 	gc, err := NewGatewayClient(gwCfg, e.sys, e.rdb)
