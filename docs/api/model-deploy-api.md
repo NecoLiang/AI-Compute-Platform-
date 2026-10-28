@@ -93,14 +93,15 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
 | engine | 缺省 `vllm`，目前只支持 `vllm` |
 | engine_image | 须以 `@sha256:<64hex>` 结尾（按 digest 固定，禁止 `:latest`） |
 | min_driver_version | 点分数字，最多 3 段 |
-| engine_args | JSON 对象；键须在白名单内；值只能是布尔、非负数字或安全字符集字符串 `[A-Za-z0-9._:/=+-]{1,128}` |
+| engine_args | JSON 对象；键须在白名单内；值只能是布尔、非负数字或安全字符集字符串 `[A-Za-z0-9._:/=+-]{1,128}`，且**不得以 `-` 开头**（防止 `"--served-model-name=x"` 这类值被引擎当作另一个参数） |
 | metrics_map | 必须恰好包含上例 7 个逻辑名，值为 Prometheus 指标名 |
 | startup_timeout_s | 缺省 1200；60–7200 |
 | license | 必填，≤64 字符 |
 | commercial_use | `allowed`/`restricted`/`unknown` |
 
-**engine_args 白名单**：`dtype`、`quantization`、`kv-cache-dtype`、`enable-prefix-caching`、`enable-chunked-prefill`、`max-num-seqs`、`max-num-batched-tokens`、`block-size`、`enforce-eager`、`trust-remote-code`、`tokenizer-mode`、`reasoning-parser`、`tool-call-parser`、`enable-auto-tool-choice`、`enable-expert-parallel`、`swap-space`、`disable-custom-all-reduce`。
+**engine_args 白名单**：`dtype`、`quantization`、`kv-cache-dtype`、`enable-prefix-caching`、`enable-chunked-prefill`、`max-num-seqs`、`max-num-batched-tokens`、`block-size`、`enforce-eager`、`tokenizer-mode`、`reasoning-parser`、`tool-call-parser`、`enable-auto-tool-choice`、`enable-expert-parallel`、`swap-space`、`disable-custom-all-reduce`。
 由平台按部署选择决定的参数（`model`、`served-model-name`、`tensor-parallel-size`、`data-parallel-size`、`max-model-len`、`gpu-memory-utilization`、端口/监听地址）**不在白名单**，出现即 40001。
+`trust-remote-code` 同样**不在白名单**（会执行权重仓库内的 Python 代码，属远程代码执行），出现即 40001；依赖自定义代码的模型不进目录。
 
 ### PUT /admin/model-catalog/:id · 整体更新（仅 draft）✅
 

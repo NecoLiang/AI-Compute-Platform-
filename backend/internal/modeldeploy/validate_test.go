@@ -101,6 +101,45 @@ func TestNormalizeEntryRejects(t *testing.T) {
 	}
 }
 
+// engine_args: 字符串值不得以 "-" 开头(防止夹带参数), trust-remote-code 不在白名单。
+func TestNormalizeEngineArgs(t *testing.T) {
+	cases := []struct {
+		name, args string
+		ok         bool
+	}{
+		{"普通取值", `{"dtype":"bfloat16","kv-cache-dtype":"fp8_e4m3","tool-call-parser":"hermes"}`, true},
+		{"取值中间含连字符", `{"tokenizer-mode":"mistral-common"}`, true},
+		{"取值含等号", `{"reasoning-parser":"a=b"}`, true},
+		{"数字与布尔", `{"max-num-seqs":256,"enforce-eager":false}`, true},
+		{"值夹带长参数", `{"dtype":"--served-model-name=x"}`, false},
+		{"值为长参数名", `{"dtype":"--tensor-parallel-size"}`, false},
+		{"值夹带短参数", `{"dtype":"-tp"}`, false},
+		{"值为单个连字符", `{"dtype":"-"}`, false},
+		{"值以空格开头后接参数", `{"dtype":" --x"}`, false},
+		{"空字符串", `{"dtype":""}`, false},
+		{"trust-remote-code=true", `{"trust-remote-code":true}`, false},
+		{"trust-remote-code=false", `{"trust-remote-code":false}`, false},
+		{"负数", `{"max-num-seqs":-1}`, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := normalizeEngineArgs(json.RawMessage(c.args))
+			if (err == nil) != c.ok {
+				t.Fatalf("ok=%v 期望 %v: %v", err == nil, c.ok, err)
+			}
+		})
+	}
+	if EngineArgWhitelist["trust-remote-code"] {
+		t.Fatal("trust-remote-code 不得在白名单内")
+	}
+	// 经 normalizeEntry 整体校验同样拒绝。
+	e := validEntry()
+	e.EngineArgs = json.RawMessage(`{"quantization":"--served-model-name=evil"}`)
+	if err := normalizeEntry(e); err == nil || !strings.Contains(err.Error(), "不能以 - 开头") {
+		t.Fatalf("normalizeEntry 应拒绝以 - 开头的取值: %v", err)
+	}
+}
+
 // manifestOf n 个文件, 每个 size 字节。
 func manifestOf(n int, size int64) json.RawMessage {
 	var b strings.Builder

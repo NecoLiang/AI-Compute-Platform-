@@ -18,8 +18,9 @@ var (
 	ccPattern          = regexp.MustCompile(`^([0-9]{1,2})\.([0-9])$`)
 	driverPattern      = regexp.MustCompile(`^[0-9]{1,4}(?:\.[0-9]{1,4}){0,2}$`)
 	engineImagePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,180}@sha256:[0-9a-f]{64}$`)
-	argValuePattern    = regexp.MustCompile(`^[A-Za-z0-9._:/=+-]{1,128}$`)
-	promNamePattern    = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]{0,127}$`)
+	// argValuePattern 首字符不得为 "-": 否则 "--served-model-name=x" 这类值会被引擎当作另一个参数解析, 绕过白名单。
+	argValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/=+][A-Za-z0-9._:/=+-]{0,127}$`)
+	promNamePattern = regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]{0,127}$`)
 )
 
 // 目录数值上限(docs/27 §27.2 S5 实现口径)。超出即 40001。
@@ -49,11 +50,13 @@ var validCommercialUse = map[string]bool{
 // 由平台按租约/买家选择决定的参数(--model、--served-model-name、--tensor-parallel-size、
 // --data-parallel-size、--max-model-len、--gpu-memory-utilization、端口与监听地址)不在名单内,
 // 模板里出现即拒绝, 防止目录条目覆盖平台控制的取值(docs/27 §27.4.1)。
+// trust-remote-code 不在名单内: 它让引擎执行权重仓库里的 Python 代码, 等于在买家租约的卡上
+// 运行目录之外的任意代码(docs/27 §27.4.1 S5 实现口径); 需要自定义代码的模型不进目录。
 var EngineArgWhitelist = map[string]bool{
 	"dtype": true, "quantization": true, "kv-cache-dtype": true,
 	"enable-prefix-caching": true, "enable-chunked-prefill": true,
 	"max-num-seqs": true, "max-num-batched-tokens": true, "block-size": true,
-	"enforce-eager": true, "trust-remote-code": true, "tokenizer-mode": true,
+	"enforce-eager": true, "tokenizer-mode": true,
 	"reasoning-parser": true, "tool-call-parser": true, "enable-auto-tool-choice": true,
 	"enable-expert-parallel": true, "swap-space": true, "disable-custom-all-reduce": true,
 }
@@ -300,6 +303,9 @@ func normalizeEngineArgs(raw json.RawMessage) (json.RawMessage, error) {
 				return nil, fmt.Errorf("engine_args.%s 不能为负数", k)
 			}
 		case string:
+			if strings.HasPrefix(val, "-") {
+				return nil, fmt.Errorf("engine_args.%s 的值不能以 - 开头(会被当作另一个参数)", k)
+			}
 			if !argValuePattern.MatchString(val) {
 				return nil, fmt.Errorf("engine_args.%s 含非法字符", k)
 			}
