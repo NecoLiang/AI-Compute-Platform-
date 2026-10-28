@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
 
 	"tokenfactory/pkg/errcode"
+	"tokenfactory/pkg/netguard"
 
 	"github.com/jmoiron/sqlx"
 	"golang.org/x/crypto/ssh"
@@ -132,29 +134,31 @@ var (
 	hostRe    = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62})(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$`)
 )
 
-// validateSSHTarget 校验连接信息(白名单字符), IP 字面量不得指向回环/链路本地/组播/未指定地址。
-// allowLoopback 仅测试(Dialer.AllowLoopback)使用。域名在拨号时由 Dialer 再按解析结果拦截一次。
-func validateSSHTarget(host string, port int, user string, allowLoopback bool) error {
+// validateSSHTarget 校验连接信息(白名单字符)并按 Dialer 的目标地址策略检查 host: IP 字面量直接判断,
+// 域名在提交时解析一次, 任一地址落在拒绝名单(回环/RFC1918/CGNAT/链路本地/ULA/组播/保留段 + fleet.deny_cidrs)即拒绝。
+// 拨号时 Dialer.control 还会按实际连接地址再拦一次(防 DNS rebinding)。拒绝原因对供给方只给通用提示。
+func validateSSHTarget(ctx context.Context, d *Dialer, host string, port int, user string) error {
 	if port < 1 || port > 65535 {
 		return errcode.New(errcode.ParamInvalid, "port 须在 1-65535 之间")
 	}
 	if !sshUserRe.MatchString(user) {
 		return errcode.New(errcode.ParamInvalid, "user 非法: 须为小写字母/数字/下划线/短横线, 以字母或下划线开头, ≤32 位")
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() && allowLoopback {
-			return nil
+	if _, err := netip.ParseAddr(host); err != nil {
+		if len(host) > 253 || !hostRe.MatchString(host) {
+			return errcode.New(errcode.ParamInvalid, "host 须为 IP 或合法域名")
 		}
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-			return errcode.New(errcode.ParamInvalid, "host 不能是回环、链路本地、组播或未指定地址")
+		if strings.EqualFold(host, "localhost") {
+			return errcode.New(errcode.ParamInvalid, "host 不能是 localhost")
 		}
-		return nil
 	}
-	if len(host) > 253 || !hostRe.MatchString(host) {
-		return errcode.New(errcode.ParamInvalid, "host 须为 IP 或合法域名")
-	}
-	if strings.EqualFold(host, "localhost") {
-		return errcode.New(errcode.ParamInvalid, "host 不能是 localhost")
+	if _, err := d.resolveAllowed(ctx, host); err != nil {
+		if errors.Is(err, netguard.ErrUnresolvable) {
+			slog.Info("节点 host 解析失败", "host", host, "error", err)
+			return errcode.New(errcode.ParamInvalid, "host 无法解析: 请确认域名已生效, 或直接填写公网 IP")
+		}
+		slog.Warn("节点 host 命中目标地址拒绝名单", "host", host, "error", err)
+		return errcode.New(errcode.ParamInvalid, "host 不允许: 须为节点的公网地址, 不能是回环、内网、链路本地或其他保留地址")
 	}
 	return nil
 }
@@ -178,7 +182,7 @@ type SSHUpdateResult struct {
 // 带 bootstrap_password 时在保存后用它登录一次写入管理公钥, 然后丢弃; 登录失败直接返回错误, 不重试。
 func (s *Service) UpdateSSH(ctx context.Context, supplierID, nodeID int64, in SSHInput, ip string) (*SSHUpdateResult, error) {
 	in.Host, in.User = strings.TrimSpace(in.Host), strings.TrimSpace(in.User)
-	if err := validateSSHTarget(in.Host, in.Port, in.User, s.dialer.AllowLoopback); err != nil {
+	if err := validateSSHTarget(ctx, s.dialer, in.Host, in.Port, in.User); err != nil {
 		return nil, err
 	}
 	var pinned string
@@ -279,7 +283,8 @@ func (s *Service) bootstrap(ctx context.Context, supplierID, nodeID int64, in SS
 	d.Attempts = 1 // 一次性密码: 不重试
 	conn, err := d.TCPCheck(ctx, in.Host, in.Port)
 	if err != nil {
-		return fail("管理端口不可达(" + err.Error() + ")")
+		slog.Warn("一次性密码引导: 连接管理端口失败", "node_id", nodeID, "error", err)
+		return fail("管理端口不可达")
 	}
 	pw := in.BootstrapPassword
 	auth := []ssh.AuthMethod{
@@ -300,6 +305,10 @@ func (s *Service) bootstrap(ctx context.Context, supplierID, nodeID int64, in SS
 		return errcode.New(errcode.Conflict, "主机指纹与已确认指纹不一致, 已停止调度; 若机器重装过系统, 请核对新指纹后确认")
 	}
 	if err != nil {
+		slog.Warn("一次性密码引导: SSH 握手/登录失败", "node_id", nodeID, "error", err)
+		if info.Fingerprint == "" {
+			return fail("SSH 握手失败")
+		}
 		return fail("SSH 登录失败(用户名或密码错误, 或服务器禁用了密码登录)")
 	}
 	defer client.Close()

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -177,7 +178,9 @@ func (p *probeRun) connect(ctx context.Context) error {
 	n := p.n
 	conn, err := p.s.dialer.TCPCheck(ctx, *n.SSHHost, *n.SSHPort)
 	if err != nil {
-		p.set("P1", false, err.Error())
+		// 对供给方只给通用提示: 具体错误(含解析地址、拒绝名单命中)只进日志, 不让探活成为探测内网的回显通道。
+		slog.Warn("探活 P1 连接管理端口失败", "node_id", n.ID, "error", err)
+		p.set("P1", false, "管理端口不可达")
 		return nil
 	}
 	p.set("P1", true, fmt.Sprintf("%s:%d 可达", *n.SSHHost, *n.SSHPort))
@@ -198,7 +201,8 @@ func (p *probeRun) connect(ctx context.Context) error {
 		return nil
 	}
 	if info.Fingerprint == "" {
-		p.set("P2", false, "SSH 握手失败: "+errText(err))
+		slog.Warn("探活 P2 SSH 握手失败", "node_id", n.ID, "error", err)
+		p.set("P2", false, "SSH 握手失败")
 		return nil
 	}
 	if pinned == "" {

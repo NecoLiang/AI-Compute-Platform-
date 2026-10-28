@@ -92,3 +92,21 @@ func TestFleetRejectsTagOnlyImagesAndShortSecret(t *testing.T) {
 		}
 	}
 }
+
+func TestFleetDenyCIDRs(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	base := strings.ReplaceAll(validFleetYAML, "%s", digest)
+	ok := strings.Replace(base, "  selftest_key_file:", "  deny_cidrs: [\"47.236.0.0/16\", \"8.211.182.3\"]\n  selftest_key_file:", 1)
+	cfg, err := Load(writeFleetConfig(t, ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Fleet.DenyCIDRs) != 2 || cfg.Fleet.DenyCIDRs[1] != "8.211.182.3" {
+		t.Fatalf("deny_cidrs parsing: %+v", cfg.Fleet.DenyCIDRs)
+	}
+	bad := strings.Replace(base, "  selftest_key_file:", "  deny_cidrs: [\"47.236.0.0/99\"]\n  selftest_key_file:", 1)
+	_, err = Load(writeFleetConfig(t, bad))
+	if err == nil || !strings.Contains(err.Error(), "fleet.deny_cidrs 含非法 CIDR/IP: 47.236.0.0/99") {
+		t.Fatalf("invalid deny_cidrs must be rejected: %v", err)
+	}
+}

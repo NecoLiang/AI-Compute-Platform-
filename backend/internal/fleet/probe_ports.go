@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -60,22 +61,32 @@ func (p *probeRun) ports(ctx context.Context) {
 	}
 	host := *p.n.SSHHost
 
-	if p.s.gateway == nil {
+	// 交给网关的是主服务按目标地址策略解析并校验过的 IP 字面量, 网关不再自行解析(防 DNS rebinding)。
+	target, rerr := p.s.dialer.resolveAllowed(ctx, host)
+	switch {
+	case rerr != nil:
+		slog.Warn("探活 P11: 目标地址解析/校验失败", "node_id", p.n.ID, "host", host, "error", rerr)
+		p.set("P11", false, "管理端口不可达")
+	case p.s.gateway == nil:
 		p.set("P11", false, "访问网关(cmd/accessgw, docs/25 S2 T-085)尚未接入, 无法经网关做自检登录; 该项接入前不能判定通过")
-	} else if err := p.s.gateway.SelfTestPort(ctx, p.n.ID, host, port); err != nil {
-		p.set("P11", false, fmt.Sprintf("经网关连接 %s:%d 失败(检查是否已按上架说明放行网关出口 IP): %v", host, port, err))
-	} else {
-		p.set("P11", true, fmt.Sprintf("经网关连接 %s:%d 成功", host, port))
+	default:
+		if err := p.s.gateway.SelfTestPort(ctx, p.n.ID, target.String(), port); err != nil {
+			slog.Warn("探活 P11: 经网关连接租约端口失败", "node_id", p.n.ID, "target", target.String(), "port", port, "error", err)
+			p.set("P11", false, fmt.Sprintf("经网关连接 %s:%d 失败(检查是否已按上架说明放行网关出口 IP)", host, port))
+		} else {
+			p.set("P11", true, fmt.Sprintf("经网关连接 %s:%d 成功", host, port))
+		}
 	}
 
-	d := Dialer{DialTimeout: 5 * time.Second, Attempts: 1, AllowLoopback: p.s.dialer.AllowLoopback}
+	d := p.s.dialer.with(5*time.Second, 1)
 	conn, err := d.TCPCheck(ctx, host, port)
 	switch {
 	case err == nil:
 		_ = conn.Close()
 		p.set("P12", false, fmt.Sprintf("从平台主服务出口可以直接连上 %s:%d, 说明租约端口段未限制来源; 请按上架说明只放行网关出口 IP", host, port))
 	case errors.Is(err, ErrAddrNotAllowed):
-		p.set("P12", false, "目标地址不允许探测: "+err.Error())
+		slog.Warn("探活 P12: 目标地址命中拒绝名单", "node_id", p.n.ID, "error", err)
+		p.set("P12", false, "管理端口不可达")
 	default:
 		p.set("P12", true, fmt.Sprintf("从平台主服务出口连接 %s:%d 失败(符合预期)。注: 只能证明主服务出口连不上, 不能证明对全网关闭", host, port))
 	}

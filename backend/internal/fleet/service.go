@@ -81,10 +81,16 @@ type Service struct {
 
 // NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。
 func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.AccessGWConfig, credKey []byte) *Service {
+	dialer, err := newDialer(cfg.DenyCIDRs)
+	if err != nil {
+		// 配置加载阶段(validateFleet)已校验 fleet.deny_cidrs; 走到这里说明调用方绕过了校验。
+		// 不降级为"只用内置名单": 拒绝名单是安全边界, 直接中止。
+		panic("fleet.deny_cidrs 非法: " + err.Error())
+	}
 	s := &Service{
 		repo: repo, products: deps.Products, health: deps.Health, notifier: deps.Notifier, gateway: deps.Gateway,
 		cfg: cfg, gw: gw, gwEgress: gw.EgressIPs, credKey: credKey,
-		dialer:    &Dialer{},
+		dialer:    dialer,
 		benchSecs: 60, sampleN: 6, sampleGap: 10,
 	}
 	s.registerExecutor(KindProvision, taskExecutor{lock: provisionLock, run: s.runProvisionTask, onDead: s.onProvisionDead})

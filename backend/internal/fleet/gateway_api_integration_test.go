@@ -447,3 +447,24 @@ func TestGatewayAPISignature(t *testing.T) {
 	n5, _ := accessgw.NewNonce()
 	assert.Equal(t, errcode.Unauthorized, send("GET", "/api/v1/health", now, n5, "/api/v1/health/x", nil))
 }
+
+// M2: 节点 host 事后指向内网(如域名 rebinding 或绕过提交校验): 网关鉴权不下发该上游, 也不计入登录失败。
+func TestGatewayAPIUpstreamDenyList(t *testing.T) {
+	e := newGWEnv(t, true)
+	ctx := context.Background()
+	buyer := newSigner(t)
+	e.addBuyerKey(t, 21, buyer)
+	login := e.lease.LeaseNo
+	for _, h := range []string{"10.0.0.5", "100.100.100.200", "fd00::5"} {
+		e.db.MustExec(`UPDATE supplier_nodes SET ssh_host=? WHERE id=(SELECT node_id FROM leases WHERE lease_no=?)`, h, login)
+		r, err := e.api.Authenticate(ctx, pkReq(login, "198.51.100.1", buyer))
+		require.Error(t, err, h)
+		assert.Nil(t, r)
+		assert.NotContains(t, err.Error(), h)
+	}
+	e.db.MustExec(`UPDATE supplier_nodes SET ssh_host='127.0.0.1' WHERE id=(SELECT node_id FROM leases WHERE lease_no=?)`, login)
+	r, err := e.api.Authenticate(ctx, pkReq(login, "198.51.100.1", buyer))
+	require.NoError(t, err)
+	assert.True(t, r.Allow)
+	assert.Equal(t, "127.0.0.1", r.UpstreamHost)
+}

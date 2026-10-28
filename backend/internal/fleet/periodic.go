@@ -160,7 +160,8 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	}
 	conn, err := s.dialer.TCPCheck(ctx, *n.SSHHost, *n.SSHPort)
 	if err != nil {
-		return "管理端口不可达: " + err.Error(), false
+		slog.Warn("周期轻检: 连接管理端口失败", "node_id", n.ID, "error", err)
+		return "管理端口不可达", false
 	}
 	client, info, err := s.dialer.Connect(conn, *n.SSHUser, []ssh.AuthMethod{ssh.PublicKeys(signer)}, *n.HostKeyFingerprint)
 	if errors.Is(err, ErrHostKeyMismatch) {
@@ -168,7 +169,11 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		return "", true
 	}
 	if err != nil {
-		return "SSH 登录失败: " + err.Error(), false
+		slog.Warn("周期轻检: SSH 握手/登录失败", "node_id", n.ID, "error", err)
+		if info.Fingerprint == "" {
+			return "SSH 握手失败", false
+		}
+		return "SSH 登录失败", false
 	}
 	defer client.Close()
 	p := &probeRun{s: s, n: n, client: client}

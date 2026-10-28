@@ -415,11 +415,15 @@ func (p *provisionRun) selftest(ctx context.Context) error {
 		return fmt.Errorf("自检: 容器内可见 GPU %v 与分配的卡 %v 不一致", got, want)
 	}
 	host, port := *p.n.SSHHost, *p.l.PortClaim
-	d := Dialer{DialTimeout: 5 * time.Second, Attempts: 1, AllowLoopback: p.s.dialer.AllowLoopback}
+	d := p.s.dialer.with(5*time.Second, 1)
 	conn, err := d.TCPCheck(ctx, host, port)
-	if err == nil {
+	switch {
+	case err == nil:
 		_ = conn.Close()
 		return fmt.Errorf("自检: 从平台主服务出口可直接连上 %s:%d, 租约端口未限制来源", host, port)
+	case errors.Is(err, ErrAddrNotAllowed):
+		// 连不上是因为目标地址被策略拒绝, 不能当作"端口未裸露"的证据。
+		return fmt.Errorf("自检: 节点地址命中目标地址拒绝名单: %w", err)
 	}
 	return nil
 }

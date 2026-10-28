@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
+
+	"tokenfactory/pkg/netguard"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -34,35 +37,97 @@ type Runner interface {
 }
 
 // Dialer 建立管理连接。字段零值使用 docs/25 的默认: 3 次 × 5s 拨号, 单命令 60s, 输出上限 1 MiB。
+// 目标地址策略(policy)为 nil 时使用 netguard 内置拒绝名单; 生产由 NewService 按 fleet.deny_cidrs 构造。
+// 复制 Dialer(d := *s.dialer)会连同策略一起复制, 改超时/次数时请用复制而不是新建零值 Dialer。
 type Dialer struct {
 	DialTimeout time.Duration
 	Attempts    int
 	CmdTimeout  time.Duration
 	MaxOutput   int
-	// AllowLoopback 仅测试使用: 允许连接 127.0.0.0/8 上的测试 SSH 服务器。
-	AllowLoopback bool
+
+	policy *netguard.Policy
+	lookup netguard.Resolver // nil = 系统解析器
+	// allowLoopback 仅测试(_test.go)置位: 允许连接 127.0.0.0/8、::1 上的测试 SSH 服务器; 不放开其他任何拒绝段。
+	// 刻意不导出、无配置项, 生产代码无法打开。
+	allowLoopback bool
 }
 
-// ErrAddrNotAllowed 目标解析到回环/链路本地/组播/未指定地址: 拒绝连接, 防止借探活访问平台自身或云元数据服务。
-var ErrAddrNotAllowed = errors.New("目标地址不允许: 不能是回环、链路本地(含云元数据 169.254.0.0/16)、组播或未指定地址")
+// newDialer 生产构造: 内置拒绝名单 + extraDeny(fleet.deny_cidrs)。
+func newDialer(extraDeny []string) (*Dialer, error) {
+	p, err := netguard.New(extraDeny)
+	if err != nil {
+		return nil, err
+	}
+	return &Dialer{policy: p}, nil
+}
+
+// ErrAddrNotAllowed 目标(含域名解析结果)落在拒绝名单内: 拒绝连接, 防止借探活访问平台自身、内网或云元数据服务。
+var ErrAddrNotAllowed = netguard.ErrDenied
+
+func (d *Dialer) pol() *netguard.Policy {
+	if d.policy != nil {
+		return d.policy
+	}
+	return defaultPolicy
+}
+
+var defaultPolicy = netguard.Default()
+
+func (d *Dialer) checkAddr(a netip.Addr) error {
+	a = a.Unmap()
+	if d.allowLoopback && a.IsLoopback() {
+		return nil
+	}
+	return d.pol().CheckAddr(a)
+}
 
 func (d *Dialer) control(_, address string, _ syscall.RawConn) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return err
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
 		return ErrAddrNotAllowed
 	}
-	if ip.IsLoopback() && d.AllowLoopback {
-		return nil
-	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() ||
-		ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
+	a, err := netip.ParseAddr(host)
+	if err != nil {
 		return ErrAddrNotAllowed
 	}
-	return nil
+	return d.checkAddr(a)
+}
+
+// resolveAllowed 提交时校验: IP 字面量直接按策略判断, 域名解析后任一地址被拒即整体拒绝。
+// 返回第一个地址(交给网关作为上游/探活目标的 IP 字面量, 网关侧不再自行解析)。
+func (d *Dialer) resolveAllowed(ctx context.Context, host string) (netip.Addr, error) {
+	if a, err := netip.ParseAddr(host); err == nil {
+		if err := d.checkAddr(a); err != nil {
+			return netip.Addr{}, err
+		}
+		return a.Unmap(), nil
+	}
+	lookup := d.lookup
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupNetIP
+	}
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	addrs, err := lookup(rctx, "ip", host)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("%w: %v", netguard.ErrUnresolvable, err)
+	}
+	if len(addrs) == 0 {
+		return netip.Addr{}, netguard.ErrUnresolvable
+	}
+	for _, a := range addrs {
+		if err := d.checkAddr(a); err != nil {
+			return netip.Addr{}, err
+		}
+	}
+	return addrs[0].Unmap(), nil
+}
+
+// with 复制一份(保留目标地址策略与测试开关)并改拨号超时/次数。
+func (d *Dialer) with(timeout time.Duration, attempts int) Dialer {
+	c := *d
+	c.DialTimeout, c.Attempts = timeout, attempts
+	return c
 }
 
 func (d *Dialer) dialTimeout() time.Duration {

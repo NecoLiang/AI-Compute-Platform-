@@ -9,9 +9,13 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
+
+	"tokenfactory/pkg/netguard"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -70,8 +74,11 @@ type Gateway struct {
 	api API
 	log *slog.Logger
 	now func() time.Time
-	// ProbeDial P11 的 TCP 连接实现(默认 net.Dialer, 5s 超时)。
+	// ProbeDial P11 的 TCP 连接实现(默认 net.Dialer, 5s 超时, Control 钩子按 netguard 内置拒绝名单拦截)。
 	probeDial func(ctx context.Context, addr string) error
+	// AllowLoopbackForTest 只允许在 _test.go 中置位(TestAllowLoopbackOnlySetInTests 扫描源码强制): P11 探活放开
+	// 127.0.0.0/8、::1, 供跨包集成测试连接本机假节点; 不放开其他任何拒绝段, 也没有对应的配置项/命令行参数。
+	AllowLoopbackForTest bool
 
 	pwKey []byte // 进程内随机密钥, 缓存键里的口令只存其 HMAC
 
@@ -90,15 +97,31 @@ func NewGateway(api API, log *slog.Logger) *Gateway {
 	}
 	k := make([]byte, 32)
 	_, _ = rand.Read(k)
-	return &Gateway{api: api, log: log, now: time.Now, pwKey: k, cache: map[string]cacheEntry{}, conns: map[string]*connInfo{},
-		probeDial: func(ctx context.Context, addr string) error {
-			d := net.Dialer{Timeout: ProbeDialTimeout}
-			c, err := d.DialContext(ctx, "tcp", addr)
-			if err != nil {
-				return err
+	g := &Gateway{api: api, log: log, now: time.Now, pwKey: k, cache: map[string]cacheEntry{}, conns: map[string]*connInfo{}}
+	g.probeDial = g.dialProbe
+	return g
+}
+
+var probePolicy = netguard.Default()
+
+// dialProbe 主服务下发的探活目标已按完整策略(含 fleet.deny_cidrs)校验并解析为 IP 字面量;
+// 网关侧再按内置拒绝名单在拨号钩子里拦一次, 防止主服务被绕过时网关成为内网跳板。
+func (g *Gateway) dialProbe(ctx context.Context, addr string) error {
+	d := net.Dialer{Timeout: ProbeDialTimeout, Control: func(network, address string, c syscall.RawConn) error {
+		if g.AllowLoopbackForTest {
+			if h, _, err := net.SplitHostPort(address); err == nil {
+				if a, err := netip.ParseAddr(h); err == nil && a.Unmap().IsLoopback() {
+					return nil
+				}
 			}
-			return c.Close()
-		}}
+		}
+		return probePolicy.Control(network, address, c)
+	}}
+	c, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+	return c.Close()
 }
 
 func remoteIP(remoteAddr string) string {
@@ -175,7 +198,8 @@ func (g *Gateway) remember(connID string, req AuthRequest, r Route, now time.Tim
 
 func (g *Gateway) probe(ctx context.Context, t ProbeTask) {
 	res := ProbeResult{Token: t.Token}
-	if t.Host == "" || t.Port <= 0 || t.Port > 65535 {
+	if _, perr := netip.ParseAddr(t.Host); perr != nil || t.Port <= 0 || t.Port > 65535 {
+		// 主服务只下发 IP 字面量; 域名一律拒绝, 网关不自行解析。
 		res.Error = "探活任务地址非法"
 	} else if err := g.probeDial(ctx, net.JoinHostPort(t.Host, strconv.Itoa(t.Port))); err != nil {
 		res.Error = err.Error()

@@ -95,8 +95,8 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 ```
 
 - 保存后节点回到 `unverified`，作废排队中的探活任务；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。`verified` 节点修改后立即退出可售。
-- `host`：IP 或域名，拒绝回环 / 链路本地 / 组播 / 未指定地址及 `localhost`（40001）；`user`：小写字母数字下划线短横线，≤32 位。
-- `bootstrap_password`（可选）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: …」，可改为手动添加公钥行。若该主机已有钉死指纹且不一致，返回 40900 并转 `key_mismatch`。
+- `host`：节点的**公网** IP 或域名。平台按目标地址拒绝名单校验（回环、RFC1918、CGNAT `100.64.0.0/10`（含云元数据 `100.100.100.200`）、链路本地（含 `169.254.169.254`）、ULA `fc00::/7`、组播、保留/文档段，以及运营配置的 `fleet.deny_cidrs`）：IP 直接判断，域名在提交时解析，任一解析结果命中即拒绝 → 40001「host 不允许: 须为节点的公网地址…」；域名无法解析 → 40001「host 无法解析…」；`localhost` 40001。拒绝提示不回显解析出的地址。之后每次连接还会在拨号时按实际地址再校验一次（防 DNS rebinding）。`user`：小写字母数字下划线短横线，≤32 位。
+- `bootstrap_password`（可选）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。若该主机已有钉死指纹且不一致，返回 40900 并转 `key_mismatch`。
 - `suspended` 节点 40900。
 
 **响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。引导成功时 `host_key.fingerprint` 为本次观测到的指纹（未确认）。
@@ -132,6 +132,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 ```
 
 - `kind`：`verify`（完整探活）/ `port_recheck`（端口复测）。`result=pass` 表示全部必检项通过（P10 为非必检）。
+- 连接类失败的 `detail` 为通用提示：P1「管理端口不可达」、P2「SSH 握手失败」、P11「经网关连接 host:port 失败(检查是否已按上架说明放行网关出口 IP)」；不包含解析出的地址或底层错误串（只写服务端日志）。
 - `checks[].skipped=true` 表示前置项未通过未执行。`inventory` 在连接阶段失败或待确认指纹时为 `null`。
 
 ## GET /supplier/nodes/:id/slots · 卡槽 ✅
@@ -357,6 +358,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 - `method` ∈ `publickey` / `password`，其他 40001；`publickey` 时 `pubkey_fp` 必须以 `SHA256:` 开头，否则 40001；`remote_ip` 必须是合法 IP（不带端口），否则 40001。
 - 不存在/非法的登录名、凭证不符、租约不可登录都**不是错误**：返回 `allow:false`，网关统一提示认证失败。
+- `upstream_host` 恒为 **IP 字面量**：主服务按目标地址拒绝名单（含 `fleet.deny_cidrs`）解析并校验节点 host 后下发，网关不自行解析。节点 host 无法解析或命中拒绝名单时返回 **50000**「租约上游地址不可用」（网关拒绝该次登录，不计入爆破失败）。P11 探活任务的 `probe.host` 同样是 IP 字面量，网关对非 IP 目标直接回报「探活任务地址非法」，并在自身拨号钩子里按内置拒绝名单再拦截。
 
 放行（买家）：
 

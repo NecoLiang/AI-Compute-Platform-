@@ -5,8 +5,12 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"io/fs"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -289,6 +293,7 @@ func TestGatewayProbeTask(t *testing.T) {
 		"p-closed|" + fp: {Probe: &ProbeTask{Token: "tok2", Host: "127.0.0.1", Port: port}},
 	}}
 	g := NewGateway(api, nil)
+	g.AllowLoopbackForTest = true
 	ctx := context.Background()
 	if _, err := g.AuthPublicKey(ctx, "a", "p-open", "1.1.1.1:1", k.Marshal()); !errors.Is(err, ErrDenied) {
 		t.Fatal("probe login must always be denied")
@@ -367,5 +372,66 @@ func TestGatewayQueueBounded(t *testing.T) {
 	}
 	if len(g.queue) != maxQueue || g.queue[0].GWSessionID != "5" || g.dropped != 5 {
 		t.Fatalf("len=%d first=%s dropped=%d", len(g.queue), g.queue[0].GWSessionID, g.dropped)
+	}
+}
+
+func TestGatewayProbeDeniesInternalTargets(t *testing.T) {
+	k, fp := newKey(t)
+	api := &fakeAPI{allow: map[string]*AuthResponse{
+		"p-meta|" + fp: {Probe: &ProbeTask{Token: "t1", Host: "100.100.100.200", Port: 80}},
+		"p-lo|" + fp:   {Probe: &ProbeTask{Token: "t2", Host: "127.0.0.1", Port: 22}},
+		"p-dns|" + fp:  {Probe: &ProbeTask{Token: "t3", Host: "localhost", Port: 22}},
+		"p-ula|" + fp:  {Probe: &ProbeTask{Token: "t4", Host: "fd00::1", Port: 22}},
+	}}
+	g := NewGateway(api, nil) // 生产默认: 不放开回环
+	ctx := context.Background()
+	for _, login := range []string{"p-meta", "p-lo", "p-dns", "p-ula"} {
+		if _, err := g.AuthPublicKey(ctx, login, login, "1.1.1.1:1", k.Marshal()); !errors.Is(err, ErrDenied) {
+			t.Fatal("probe login must always be denied")
+		}
+	}
+	if len(api.probes) != 4 {
+		t.Fatalf("probe results %+v", api.probes)
+	}
+	for _, r := range api.probes {
+		if r.Reachable || r.Error == "" {
+			t.Fatalf("internal target must not be probed: %+v", r)
+		}
+	}
+	if api.probes[2].Error != "探活任务地址非法" {
+		t.Fatalf("domain names must be rejected without resolving: %+v", api.probes[2])
+	}
+}
+
+// AllowLoopbackForTest 不得在生产代码中置位。
+func TestAllowLoopbackOnlySetInTests(t *testing.T) {
+	root := filepath.Join("..", "..")
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if n := d.Name(); n == "vendor" || n == "node_modules" || strings.HasPrefix(n, ".") && n != "." && n != ".." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.Contains(line, "AllowLoopbackForTest") && !strings.HasPrefix(strings.TrimSpace(line), "//") &&
+				!strings.Contains(line, "AllowLoopbackForTest bool") && !strings.Contains(line, "g.AllowLoopbackForTest {") {
+				t.Errorf("%s: AllowLoopbackForTest 只能在 _test.go 中使用: %s", path, strings.TrimSpace(line))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
