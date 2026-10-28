@@ -127,7 +127,10 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 		if err := requireRenewableAccess(tx, parent.ID); err != nil {
 			return nil, err
 		}
-		end := LeaseEndAt(*parent.LeaseEnd, product.PricingMode, duration)
+		end, err := LeaseEndAt(*parent.LeaseEnd, product.PricingMode, duration, OrderNightWindow(parent))
+		if err != nil {
+			return nil, err
+		}
 		q.RenewedUntil = &end
 	} else {
 		q.Mode = "restart"

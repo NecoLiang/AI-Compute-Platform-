@@ -52,16 +52,22 @@ type Product struct {
 	StorageSpec       string  `db:"storage_spec" json:"storage_spec"`
 	BandwidthSpec     string  `db:"bandwidth_spec" json:"bandwidth_spec"`
 	DeliveryMode      string  `db:"delivery_mode" json:"delivery_mode"`
-	PricingMode       string  `db:"pricing_mode" json:"pricing_mode"`
-	UnitPrice         int64   `db:"unit_price" json:"unit_price"` // fen
-	PriceNegotiable   bool    `db:"price_negotiable" json:"price_negotiable"`
-	AvailableHours    string  `db:"available_hours" json:"available_hours"`
-	Stock             int     `db:"stock" json:"stock"`
-	MinOrder          int     `db:"min_order" json:"min_order"`
-	MinDuration       int     `db:"min_duration" json:"min_duration"`
-	Region            string  `db:"region" json:"region"`
-	Status            string  `db:"status" json:"status"`
-	RejectedReason    string  `db:"rejected_reason" json:"rejected_reason"`
+	// FulfillmentMode / Availability / 夜间窗口 / Prices: v1.2 灵活计费 (docs/26, 迁移 026/028)。
+	FulfillmentMode string         `db:"fulfillment_mode" json:"fulfillment_mode"`
+	Availability    string         `db:"availability" json:"availability"`
+	NightStartMin   *int           `db:"night_start_min" json:"night_start_min"`
+	NightEndMin     *int           `db:"night_end_min" json:"night_end_min"`
+	Prices          []ProductPrice `db:"-" json:"prices"`
+	PricingMode     string         `db:"pricing_mode" json:"pricing_mode"`
+	UnitPrice       int64          `db:"unit_price" json:"unit_price"` // fen
+	PriceNegotiable bool           `db:"price_negotiable" json:"price_negotiable"`
+	AvailableHours  string         `db:"available_hours" json:"available_hours"`
+	Stock           int            `db:"stock" json:"stock"`
+	MinOrder        int            `db:"min_order" json:"min_order"`
+	MinDuration     int            `db:"min_duration" json:"min_duration"`
+	Region          string         `db:"region" json:"region"`
+	Status          string         `db:"status" json:"status"`
+	RejectedReason  string         `db:"rejected_reason" json:"rejected_reason"`
 	// Health 节点探活聚合的健康度(unknown/healthy/degraded/offline), 由 scheduler 模块维护。
 	// offline 时下单被拦截; unknown 表示商品未接入节点探活, 不参与联动。
 	Health       string `db:"health" json:"health"`
@@ -75,13 +81,18 @@ type Product struct {
 }
 
 type Order struct {
-	ID               int64      `db:"id" json:"id"`
-	OrderNo          string     `db:"order_no" json:"order_no"`
-	BuyerID          int64      `db:"buyer_id" json:"buyer_id"`
-	ProductID        int64      `db:"product_id" json:"product_id"`
-	StockReserved    *int       `db:"stock_reserved" json:"-"`
-	Quantity         int        `db:"quantity" json:"quantity"`
-	Duration         int        `db:"duration" json:"duration"`
+	ID            int64  `db:"id" json:"id"`
+	OrderNo       string `db:"order_no" json:"order_no"`
+	BuyerID       int64  `db:"buyer_id" json:"buyer_id"`
+	ProductID     int64  `db:"product_id" json:"product_id"`
+	StockReserved *int   `db:"stock_reserved" json:"-"`
+	Quantity      int    `db:"quantity" json:"quantity"`
+	Duration      int    `db:"duration" json:"duration"`
+	// PricingMode 下单时计费方式快照(028); NULL=v1.2 前订单, 读取时回退商品当前方式。
+	PricingMode      *string    `db:"pricing_mode" json:"pricing_mode"`
+	NightStartDate   *time.Time `db:"night_start_date" json:"night_start_date"`
+	NightStartMin    *int       `db:"night_start_min" json:"night_start_min"`
+	NightEndMin      *int       `db:"night_end_min" json:"night_end_min"`
 	UnitPrice        int64      `db:"unit_price" json:"unit_price"`
 	TotalAmount      int64      `db:"total_amount" json:"total_amount"`
 	PlatformFee      int64      `db:"platform_fee" json:"platform_fee"`
@@ -154,13 +165,15 @@ const productColumns = `id, supplier_id, product_type,
 	machine_count, total_pflops_approx, power_capacity_kw, rack_count,
 	COALESCE(cpu_spec,'') AS cpu_spec, COALESCE(memory_spec,'') AS memory_spec,
 	COALESCE(storage_spec,'') AS storage_spec, COALESCE(bandwidth_spec,'') AS bandwidth_spec,
-	COALESCE(delivery_mode,'') AS delivery_mode, pricing_mode, unit_price,
+	COALESCE(delivery_mode,'') AS delivery_mode, fulfillment_mode, availability, night_start_min, night_end_min,
+	pricing_mode, unit_price,
 	COALESCE(price_negotiable,0) AS price_negotiable, COALESCE(available_hours,'') AS available_hours,
 	stock, COALESCE(min_order,1) AS min_order, COALESCE(min_duration,1) AS min_duration,
 	COALESCE(region,'') AS region, status, COALESCE(health,'unknown') AS health, COALESCE(self_operated,0) AS self_operated,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, rejected_reason, created_at, updated_at`
 
-const orderColumns = `id, order_no, buyer_id, product_id, stock_reserved, quantity, duration, unit_price,
+const orderColumns = `id, order_no, buyer_id, product_id, stock_reserved, quantity, duration,
+	pricing_mode, night_start_date, night_start_min, night_end_min, unit_price,
 	total_amount, platform_fee, status, payment_expires_at, lease_start_at, lease_end_at,
 	COALESCE(compliance_agreed,0) AS compliance_agreed, created_at, updated_at`
 
@@ -168,7 +181,8 @@ const buyerOrderColumns = `o.id, o.order_no, o.buyer_id, o.product_id, o.stock_r
 	o.total_amount, o.platform_fee, o.status, o.payment_expires_at, o.lease_start_at, o.lease_end_at,
 	COALESCE(o.compliance_agreed,0) AS compliance_agreed, o.created_at, o.updated_at,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
-	COALESCE(p.pricing_mode,'') AS pricing_mode,
+	COALESCE(o.pricing_mode,p.pricing_mode,'') AS pricing_mode,
+	o.night_start_date, o.night_start_min, o.night_end_min,
 	COALESCE(p.self_operated,0) AS self_operated,
 	CASE WHEN COALESCE(p.self_operated,0)=1 THEN '平台自营' ELSE COALESCE(e.name,'') END AS supplier_name`
 
@@ -472,12 +486,14 @@ func (r *Repository) CreateProduct(p *Product, version string) (int64, error) {
 	res, err := tx.Exec(
 		`INSERT INTO products (supplier_id, product_type, gpu_model, card_count, machine_count, total_pflops_approx,
 		power_capacity_kw, rack_count, cpu_spec, memory_spec, storage_spec, bandwidth_spec,
-		delivery_mode, pricing_mode, unit_price, price_negotiable, available_hours, stock, min_order, min_duration,
+		delivery_mode, fulfillment_mode, availability, night_start_min, night_end_min,
+		pricing_mode, unit_price, price_negotiable, available_hours, stock, min_order, min_duration,
 		region, status, compliance_agreed)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)`,
 		p.SupplierID, p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
 		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
-		nullString(p.DeliveryMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock,
+		nullString(p.DeliveryMode), p.FulfillmentMode, p.Availability, p.NightStartMin, p.NightEndMin,
+		p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours, p.Stock,
 		p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed,
 	)
 	if err != nil {
@@ -486,6 +502,11 @@ func (r *Repository) CreateProduct(p *Product, version string) (int64, error) {
 	id, err := res.LastInsertId()
 	if err != nil {
 		return 0, err
+	}
+	if len(p.Prices) > 0 {
+		if err := savePricesTx(tx, id, p.Prices); err != nil {
+			return 0, err
+		}
 	}
 	if err := legal.Record(tx, p.SupplierID, legal.Acceptance{Document: "resource-listing-rules", Version: version}, "publish", strconv.FormatInt(id, 10)); err != nil {
 		return 0, err
@@ -502,7 +523,7 @@ func (r *Repository) GetProductByID(id int64) (*Product, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &p, nil
+	return &p, attachPrices(r.db, []*Product{&p})
 }
 
 // SupplierOfflineProduct 供给方主动下架自己的商品(在售/待审核均可);
@@ -536,13 +557,15 @@ func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error
 	defer tx.Rollback()
 	result, err := tx.Exec(`UPDATE products SET product_type=?, gpu_model=?, card_count=?,
 		machine_count=?, total_pflops_approx=?, power_capacity_kw=?, rack_count=?, cpu_spec=?,
-		memory_spec=?, storage_spec=?, bandwidth_spec=?, delivery_mode=?, pricing_mode=?, unit_price=?,
+		memory_spec=?, storage_spec=?, bandwidth_spec=?, delivery_mode=?, fulfillment_mode=?, availability=?,
+		night_start_min=?, night_end_min=?, pricing_mode=?, unit_price=?,
 		price_negotiable=?, available_hours=?, stock=?, min_order=?, min_duration=?, region=?,
 		compliance_agreed=?, status='pending', rejected_reason=''
 		WHERE id=? AND supplier_id=? AND status IN ('draft','offline')`,
 		p.ProductType, nullString(p.GpuModel), nullInt(p.CardCount), p.MachineCount, p.TotalPflopsApprox,
 		p.PowerCapacityKw, p.RackCount, p.CpuSpec, p.MemorySpec, p.StorageSpec, p.BandwidthSpec,
-		nullString(p.DeliveryMode), p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours,
+		nullString(p.DeliveryMode), p.FulfillmentMode, p.Availability, p.NightStartMin, p.NightEndMin,
+		p.PricingMode, p.UnitPrice, p.PriceNegotiable, p.AvailableHours,
 		p.Stock, p.MinOrder, p.MinDuration, p.Region, p.ComplianceAgreed, id, p.SupplierID)
 	if err != nil {
 		return err
@@ -553,6 +576,10 @@ func (r *Repository) ResubmitProduct(id int64, p *Product, version string) error
 	}
 	if n != 1 {
 		return fmt.Errorf("product review conflict")
+	}
+	// 同一事务内保存价格; 非零租商品 Prices 为空 -> 历史价格行全部停用。
+	if err := savePricesTx(tx, id, p.Prices); err != nil {
+		return err
 	}
 	if err := legal.Record(tx, p.SupplierID, legal.Acceptance{Document: "resource-listing-rules", Version: version}, "resubmit", strconv.FormatInt(id, 10)); err != nil {
 		return err
@@ -637,7 +664,7 @@ func (r *Repository) LockProductForUpdate(tx *sqlx.Tx, id int64) (*Product, erro
 	if err != nil {
 		return nil, err
 	}
-	return &p, nil
+	return &p, attachPrices(tx, []*Product{&p})
 }
 
 // SetProductStockTx 在事务内把库存改为绝对值(盘点用)。负库存直接拒绝。
@@ -775,21 +802,27 @@ func (r *Repository) ListProducts(f ProductFilter) ([]Product, int64, error) {
 		FROM products %s %s LIMIT ? OFFSET ?`, productColumns, where, f.orderBy())
 	args = append(args, f.PageSize, offset)
 	var list []Product
-	err := r.db.Select(&list, query, args...)
-	return list, total, err
+	if err := r.db.Select(&list, query, args...); err != nil {
+		return nil, 0, err
+	}
+	return list, total, attachPricesToSlice(r.db, list)
 }
 
 func (r *Repository) GetProductsBySupplier(supplierID int64) ([]Product, error) {
 	var list []Product
-	err := r.db.Select(&list, "SELECT "+productColumns+" FROM products WHERE supplier_id = ? ORDER BY product_type, created_at DESC", supplierID)
-	return list, err
+	if err := r.db.Select(&list, "SELECT "+productColumns+" FROM products WHERE supplier_id = ? ORDER BY product_type, created_at DESC", supplierID); err != nil {
+		return nil, err
+	}
+	return list, attachPricesToSlice(r.db, list)
 }
 
 // Orders
 func (r *Repository) CreateOrderTx(tx *sqlx.Tx, o *Order) error {
-	const q = `INSERT INTO orders (order_no, buyer_id, product_id, quantity, duration, unit_price, total_amount, platform_fee,
-		status, payment_expires_at, compliance_agreed, stock_reserved) VALUES (?,?,?,?,?,?,?,?,'pending_payment',?,?,?)`
-	args := []interface{}{o.OrderNo, o.BuyerID, o.ProductID, o.Quantity, o.Duration, o.UnitPrice, o.TotalAmount,
+	const q = `INSERT INTO orders (order_no, buyer_id, product_id, quantity, duration, pricing_mode, night_start_date,
+		night_start_min, night_end_min, unit_price, total_amount, platform_fee,
+		status, payment_expires_at, compliance_agreed, stock_reserved) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'pending_payment',?,?,?)`
+	args := []interface{}{o.OrderNo, o.BuyerID, o.ProductID, o.Quantity, o.Duration, o.PricingMode, o.NightStartDate,
+		o.NightStartMin, o.NightEndMin, o.UnitPrice, o.TotalAmount,
 		o.PlatformFee, o.PaymentExpires, o.ComplianceAgreed, o.StockReserved}
 	var err error
 	// tx 为 nil 时退回库句柄, 避免 nil *sqlx.Tx 调 Exec 直接 panic。
@@ -1029,8 +1062,13 @@ func (r *Repository) ListSupplierOrders(supplierID int64, status string, page, p
 	if pageSize <= 0 {
 		pageSize = 20
 	}
-	query := fmt.Sprintf(`SELECT o.*, COALESCE(p.gpu_model,'') AS gpu_model,
-		COALESCE(p.product_type,'') AS product_type, COALESCE(p.pricing_mode,'') AS pricing_mode
+	// 显式列清单: SELECT o.* 会把 026/028 新增列(fulfillment_mode 等)扫进没有对应字段的结构体而失败。
+	// pricing_mode 只输出一列: 订单快照优先, v1.2 前订单回退商品当前方式。
+	query := fmt.Sprintf(`SELECT o.id, o.order_no, o.buyer_id, o.product_id, o.stock_reserved, o.quantity, o.duration,
+		o.night_start_date, o.night_start_min, o.night_end_min, o.unit_price, o.total_amount, o.platform_fee, o.status,
+		o.payment_expires_at, o.lease_start_at, o.lease_end_at, COALESCE(o.compliance_agreed,0) AS compliance_agreed,
+		o.created_at, o.updated_at, COALESCE(p.gpu_model,'') AS gpu_model,
+		COALESCE(p.product_type,'') AS product_type, COALESCE(o.pricing_mode,p.pricing_mode,'') AS pricing_mode
 		FROM orders o JOIN products p ON o.product_id=p.id %s ORDER BY o.created_at DESC LIMIT ? OFFSET ?`, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	list := make([]SupplierOrder, 0)
@@ -1263,8 +1301,14 @@ func (r *Repository) ListAllProducts(status string, page, pageSize int) ([]Admin
 		FROM products %s ORDER BY created_at DESC LIMIT ? OFFSET ?`, productColumns, where)
 	args = append(args, pageSize, (page-1)*pageSize)
 	var list []AdminProduct
-	err := r.db.Select(&list, query, args...)
-	return list, total, err
+	if err := r.db.Select(&list, query, args...); err != nil {
+		return nil, 0, err
+	}
+	ps := make([]*Product, len(list))
+	for i := range list {
+		ps[i] = &list[i].Product
+	}
+	return list, total, attachPrices(r.db, ps)
 }
 
 // SupplierCompanyName 供给方公司名(自营返回"平台自营", 无企业认证返回空串)。
@@ -1281,8 +1325,12 @@ func (r *Repository) SupplierCompanyName(supplierID int64, selfOperated bool) (s
 // 分三类: 已知的英文哨兵串按语义映射; 加密密钥未配置属服务端配置缺失 -> 500;
 // 其余为参数/权限校验产生的中文提示 -> 40001 / 40300, 直接把原因回给前端展示。
 func ErrToCode(err error) int {
-	if errors.Is(err, trading.ErrDisabled) || errors.Is(err, ErrRenewalConflict) {
+	if errors.Is(err, trading.ErrDisabled) || errors.Is(err, ErrRenewalConflict) || errors.Is(err, ErrPricingModeDisabled) {
 		return errcode.Conflict
+	}
+	// 托管履约钩子未注入: 服务端能力缺失而非参数问题, 必须 50000 (docs/25 §25.4)。
+	if errors.Is(err, ErrManagedFulfillmentDisabled) {
+		return errcode.InternalError
 	}
 	if err == nil {
 		return errcode.Success

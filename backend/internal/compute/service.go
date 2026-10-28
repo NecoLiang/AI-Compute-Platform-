@@ -69,6 +69,7 @@ var maxDurationByPricingMode = map[string]int{
 	PricingWeekly:    520,   // 10 年
 	PricingMonthly:   120,   // 10 年
 	PricingPerpetual: 1,     // 买断无租期
+	PricingNightly:   31,    // 包夜按晚, 单笔最多 31 晚 (docs/26 §26.4)
 }
 
 // durationUnitLabel 用于拼中文错误提示，避免"租期超出上限 120"这种没有单位的歧义提示。
@@ -78,6 +79,7 @@ var durationUnitLabel = map[string]string{
 	PricingWeekly:    "周",
 	PricingMonthly:   "个月",
 	PricingPerpetual: "次",
+	PricingNightly:   "晚",
 }
 
 // MaxDurationFor 返回该计费模式允许的最大周期数；未知模式回退到最严格的上限。
@@ -100,20 +102,26 @@ func DurationUnit(pricingMode string) string {
 // monthly / weekly 走自然日历（AddDate），不用固定 30 天/720 小时近似，
 // 避免"买 1 个月却在 2 月少给 2 天"这类与账单不符的情况。
 // 买断（perpetual）无结束时间，返回零值 time.Time，调用方必须判空。
-func LeaseEndAt(start time.Time, pricingMode string, duration int) time.Time {
+// 包夜（nightly）必须显式走窗口换算，窗口取订单快照(win)；缺窗口直接报错，绝不落入默认的按小时分支。
+func LeaseEndAt(start time.Time, pricingMode string, duration int, win *NightWindow) (time.Time, error) {
 	switch pricingMode {
 	case PricingHourly:
-		return start.Add(time.Duration(duration) * time.Hour)
+		return start.Add(time.Duration(duration) * time.Hour), nil
 	case PricingDaily:
-		return start.AddDate(0, 0, duration)
+		return start.AddDate(0, 0, duration), nil
 	case PricingWeekly:
-		return start.AddDate(0, 0, duration*7)
+		return start.AddDate(0, 0, duration*7), nil
 	case PricingMonthly:
-		return start.AddDate(0, duration, 0)
+		return start.AddDate(0, duration, 0), nil
 	case PricingPerpetual:
-		return time.Time{}
+		return time.Time{}, nil
+	case PricingNightly:
+		if win == nil {
+			return time.Time{}, fmt.Errorf("包夜订单缺少夜间窗口快照, 无法计算租期")
+		}
+		return NightlyLeaseEnd(NightDateOf(start, *win), duration, *win), nil
 	default:
-		return start.Add(time.Duration(duration) * time.Hour)
+		return start.Add(time.Duration(duration) * time.Hour), nil
 	}
 }
 
@@ -141,7 +149,8 @@ var validDeliveryModes = map[string]bool{
 
 // allowedPricingModes 各商品类型允许的计费模式 (C-01, C-04)。
 var allowedPricingModes = map[string]map[string]bool{
-	ProductTypeCardRental: {PricingHourly: true, PricingDaily: true, PricingWeekly: true},
+	// v1.2: 零租全天商品 h/d/w/m 可多选; 夜间窗口商品仅 nightly。组合约束见 validateCardRentalPricing。
+	ProductTypeCardRental: {PricingHourly: true, PricingDaily: true, PricingWeekly: true, PricingMonthly: true, PricingNightly: true},
 	ProductTypeOutright:   {PricingPerpetual: true},
 	ProductTypeCenter:     {PricingDaily: true, PricingWeekly: true, PricingMonthly: true, PricingPerpetual: true},
 	ProductTypeColocation: {PricingHourly: true, PricingDaily: true, PricingWeekly: true, PricingMonthly: true, PricingPerpetual: true},
@@ -154,6 +163,7 @@ var pricingModeLabels = map[string]string{
 	PricingWeekly:    "按周",
 	PricingMonthly:   "按月",
 	PricingPerpetual: "永久",
+	PricingNightly:   "包夜",
 }
 
 type Service struct {
@@ -561,6 +571,14 @@ type CreateProductReq struct {
 	Region            string `json:"region"`
 	ComplianceAgreed  bool   `json:"compliance_agreed"`
 	ComplianceVersion string `json:"compliance_version"`
+
+	// v1.2 灵活计费 (docs/26 §26.9)。零租商品传 prices 时忽略顶层 pricing_mode/unit_price/min_duration,
+	// 改由已启用价格中周期最短的一项同步为展示主价; 不传则按顶层字段生成一行(兼容旧前端)。
+	FulfillmentMode string       `json:"fulfillment_mode"`
+	Availability    string       `json:"availability"`
+	NightStartMin   *int         `json:"night_start_min"`
+	NightEndMin     *int         `json:"night_end_min"`
+	Prices          []PriceInput `json:"prices"`
 }
 
 // NormalizeProductReq 填补可省略字段的默认值。纯函数, 便于测试。
@@ -602,9 +620,13 @@ func NormalizeProductReq(req CreateProductReq) CreateProductReq {
 			req.PricingMode = PricingMonthly
 		}
 	case ProductTypeCardRental:
-		if req.PricingMode == "" {
-			req.PricingMode = PricingHourly
-		}
+		req = normalizeCardRentalPricing(req)
+	}
+	if req.FulfillmentMode == "" {
+		req.FulfillmentMode = FulfillmentManual
+	}
+	if req.Availability == "" {
+		req.Availability = AvailabilityFulltime
 	}
 	return req
 }
@@ -626,6 +648,15 @@ func ValidateProductReq(req CreateProductReq) error {
 	}
 	if req.Stock > MaxOrderQuantity {
 		return fmt.Errorf("库存超出上限(不得超过 %d)", MaxOrderQuantity)
+	}
+	if err := validateFulfillmentAndAvailability(req); err != nil {
+		return err
+	}
+	// 零租: 多价格组合约束先于顶层展示主价校验(传 prices 时顶层字段由归一化同步, 不作为输入)。
+	if req.ProductType == ProductTypeCardRental {
+		if err := validateCardRentalPricing(req); err != nil {
+			return err
+		}
 	}
 
 	if modes := allowedPricingModes[req.ProductType]; !modes[req.PricingMode] {
@@ -708,7 +739,7 @@ func validateCardsPerMachine(req CreateProductReq) error {
 }
 
 func allowedModesText(productType string) string {
-	order := []string{PricingHourly, PricingDaily, PricingWeekly, PricingMonthly, PricingPerpetual}
+	order := []string{PricingHourly, PricingDaily, PricingWeekly, PricingMonthly, PricingNightly, PricingPerpetual}
 	modes := allowedPricingModes[productType]
 	var parts []string
 	for _, m := range order {
@@ -719,27 +750,35 @@ func allowedModesText(productType string) string {
 	return strings.Join(parts, "/")
 }
 
-func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, error) {
+// CreateProduct 发布商品; 返回价格倒挂提醒(只提醒不阻断, 永不为 nil)。
+func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, []PriceWarning, error) {
 	p, err := s.prepareProduct(supplierID, req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return s.repo.CreateProduct(p, req.ComplianceVersion)
+	id, err := s.repo.CreateProduct(p, req.ComplianceVersion)
+	if err != nil {
+		return 0, nil, err
+	}
+	return id, PriceWarnings(p.Prices), nil
 }
 
-func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) error {
+func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) ([]PriceWarning, error) {
 	p, err := s.prepareProduct(supplierID, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	existing, err := s.repo.GetProductByID(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if existing.SupplierID != supplierID {
-		return fmt.Errorf("无权修改其他供给方的商品")
+		return nil, fmt.Errorf("无权修改其他供给方的商品")
 	}
-	return s.repo.ResubmitProduct(id, p, req.ComplianceVersion)
+	if err := s.repo.ResubmitProduct(id, p, req.ComplianceVersion); err != nil {
+		return nil, err
+	}
+	return PriceWarnings(p.Prices), nil
 }
 
 func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Product, error) {
@@ -776,6 +815,14 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 		MinDuration:      req.MinDuration,
 		Region:           req.Region,
 		ComplianceAgreed: req.ComplianceAgreed,
+		FulfillmentMode:  req.FulfillmentMode,
+		Availability:     req.Availability,
+	}
+	if req.ProductType == ProductTypeCardRental {
+		p.Prices = priceRowsOf(req.Prices)
+		if req.Availability == AvailabilityNightWindow {
+			p.NightStartMin, p.NightEndMin = req.NightStartMin, req.NightEndMin
+		}
 	}
 	// 可空字段: 只在有意义时写入, 否则留 NULL, 避免 0/"" 被当成真实值展示。
 	if req.MachineCount > 0 {
@@ -807,6 +854,7 @@ func (s *Service) GetProduct(id int64) (*Product, *CreditScore, error) {
 	if p.Status != "active" {
 		return nil, nil, fmt.Errorf("product not found")
 	}
+	p.Prices = EnabledPrices(p.Prices) // 市场只展示已启用价格
 	credit, _ := s.repo.GetCreditScore(p.SupplierID)
 	return p, credit, nil
 }
@@ -831,7 +879,14 @@ func (s *Service) ListProducts(f ProductFilter) ([]Product, int64, error) {
 		len([]rune(f.Region)) > 100 || len([]rune(f.AvailableHours)) > 100 {
 		return nil, 0, fmt.Errorf("搜索条件不能超过 100 个字符")
 	}
-	return s.repo.ListProducts(f)
+	list, total, err := s.repo.ListProducts(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range list {
+		list[i].Prices = EnabledPrices(list[i].Prices) // 市场只展示已启用价格
+	}
+	return list, total, nil
 }
 
 func (s *Service) GetSupplierProducts(supplierID int64) ([]Product, error) {
@@ -1404,7 +1459,10 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 		}
 		if status == "active" || status == "completed" {
 			start := createdAt.Add(time.Hour)
-			end := LeaseEndAt(start, product.PricingMode, duration)
+			end, err := LeaseEndAt(start, product.PricingMode, duration, NightWindowOf(&product))
+			if err != nil {
+				return nil, err
+			}
 			leaseStartAt = &start
 			if !end.IsZero() {
 				leaseEndAt = &end
@@ -1585,7 +1643,10 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 	}
 	var expiresAt *time.Time
 	if pricingMode != PricingPerpetual {
-		e := LeaseEndAt(time.Now(), pricingMode, leaseOrder.Duration)
+		e, err := LeaseEndAt(time.Now(), pricingMode, leaseOrder.Duration, OrderNightWindow(o))
+		if err != nil {
+			return nil, err
+		}
 		expiresAt = &e
 	}
 
@@ -1676,7 +1737,11 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 	now := time.Now().Truncate(time.Second)
 	var leaseEnd interface{}
 	if pricingMode != PricingPerpetual {
-		leaseEnd = LeaseEndAt(now, pricingMode, leaseOrder.Duration)
+		end, err := LeaseEndAt(now, pricingMode, leaseOrder.Duration, OrderNightWindow(o))
+		if err != nil {
+			return err
+		}
+		leaseEnd = end
 	}
 
 	result, err := tx.Exec(`UPDATE order_deliveries d
