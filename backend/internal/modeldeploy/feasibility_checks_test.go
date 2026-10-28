@@ -74,11 +74,11 @@ func TestF1SuggestsAlternatives(t *testing.T) {
 		{ModelKey: "llama-fp8", MinComputeCapability: "8.9"},
 	}
 	c := checkByID(t, mustEval(t, in), "F1")
-	if c.OK || !strings.HasSuffix(c.Message, "qwen3-32b-bf16, qwen3-32b-int4-awq") {
+	if c.OK || !strings.HasSuffix(c.Message, "其他可用目录条目: qwen3-32b-bf16, qwen3-32b-int4-awq") {
 		t.Fatalf("应按字典序列出可在 8.0 上运行的其他条目: %q", c.Message)
 	}
 	in.Alternatives = in.Alternatives[:1]
-	if c := checkByID(t, mustEval(t, in), "F1"); !strings.Contains(c.Message, "暂无") {
+	if c := checkByID(t, mustEval(t, in), "F1"); !strings.HasSuffix(c.Message, "暂无其他可用目录条目") {
 		t.Fatalf("无替代时应明确说明: %q", c.Message)
 	}
 }

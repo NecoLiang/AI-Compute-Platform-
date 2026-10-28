@@ -228,7 +228,7 @@ M1 为 `error`：“目录条目 … 参数超出合理范围(…), 无法判定
 |---|---|---|
 | M1 | 至少一个 (tp,dp) 满足显存与最低上下文 | error |
 | M2 | 推荐组合上下文是否紧张 | warning |
-| F1 | 型号库 `compute_capability` ≥ 条目 `min_compute_capability`；型号未登记即"无法判定" | error，并列出目录中可在该卡型运行的其他 active 条目 |
+| F1 | 型号库 `compute_capability` ≥ 条目 `min_compute_capability`；型号未登记即"无法判定" | error，message 末尾列出"其他可用目录条目"：所有 `min_compute_capability` ≤ 该卡型的其他 active 条目（按 model_key 字典序）。目录无"基础模型"字段，**不限于同一模型的量化变体** |
 | F2 | 节点实测驱动 ≥ `min_driver_version`；驱动未知即"无法判定" | error |
 | F3 | 各卡当前显存占用 ≤ 2% | error |
 | F4 | 节点已缓存该模型，或缓存区剩余 + 可按 LRU 清理 ≥ 权重×1.1 | error |

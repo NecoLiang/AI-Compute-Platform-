@@ -52,7 +52,9 @@ type ModelSpec struct {
 	CommercialUse        string
 }
 
-// Alternative 目录中其他 active 条目, F1 不满足时据此提示可用的量化变体。
+// Alternative 目录中其他 active 条目, F1 不满足时据此列出"其他可用目录条目"。
+// 目录没有标识基础模型的字段(display_name 为自由文本、量化变体的 repo 各不相同), 因此不限定为同一模型的
+// 量化变体, 而是列出所有架构要求满足该卡型的 active 条目(docs/27 §27.3.2 S5 实现口径)。
 type Alternative struct {
 	ModelKey             string
 	MinComputeCapability string
@@ -459,9 +461,9 @@ func checkF1(in Input) Check {
 	sort.Strings(alts)
 	msg := fmt.Sprintf("GPU 架构 %s 低于该模型要求的 %s(如 FP8 权重需 ≥ 8.9)", in.ComputeCapability, in.Model.MinComputeCapability)
 	if len(alts) > 0 {
-		msg += ", 目录中可在该卡型运行的条目: " + strings.Join(alts, ", ")
+		msg += ", 其他可用目录条目: " + strings.Join(alts, ", ")
 	} else {
-		msg += ", 目录中暂无可在该卡型运行的其他条目"
+		msg += ", 暂无其他可用目录条目"
 	}
 	return fail("F1", LevelError, msg)
 }
