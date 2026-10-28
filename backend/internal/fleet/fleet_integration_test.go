@@ -494,7 +494,7 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 		VALUES (?, 'probe', 'dead', 5, 3, '{"mode":"full","trigger":"supplier"}', 'boom')`, id)
 	require.NoError(t, err)
 	deadID, _ := res2.LastInsertId()
-	list, total, err := s.Tasks("", 0, 1, 20)
+	list, total, err := s.Tasks(TaskDead, 0, 1, 20)
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, total)
 	assert.Equal(t, deadID, list[0].ID)

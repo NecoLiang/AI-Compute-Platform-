@@ -240,9 +240,13 @@ func (r *Repository) reclaimExpired() ([]Task, error) {
 	return dead, tx.Commit()
 }
 
-// listTasks 运营查询任务(默认 dead)。
+// listTasks 运营查询任务; state 为空 = 全部状态。
 func (r *Repository) listTasks(state string, nodeID int64, page, pageSize int) ([]Task, int64, error) {
-	where, args := `WHERE state=?`, []any{state}
+	where, args := `WHERE 1=1`, []any{}
+	if state != "" {
+		where += ` AND state=?`
+		args = append(args, state)
+	}
 	if nodeID > 0 {
 		where += ` AND node_id=?`
 		args = append(args, nodeID)

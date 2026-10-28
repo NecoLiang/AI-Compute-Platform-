@@ -273,8 +273,7 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 // Tasks 运营任务列表(默认死信)。
 func (s *Service) Tasks(state string, nodeID int64, page, pageSize int) ([]Task, int64, error) {
 	switch state {
-	case "":
-		state = TaskDead
+	case "": // 缺省 = 全部状态(与 docs/api 一致)
 	case TaskPending, TaskRunning, TaskSucceeded, TaskFailed, TaskDead:
 	default:
 		return nil, 0, errcode.New(errcode.ParamInvalid, "state 仅支持 pending/running/succeeded/failed/dead")
