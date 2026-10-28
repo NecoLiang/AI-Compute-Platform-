@@ -58,9 +58,26 @@ func (r *Repository) getTask(q sqlx.Queryer, id int64) (*Task, error) {
 	return &t, err
 }
 
-// claimNext 认领一条到期的 pending 任务。同一节点同时只运行一个任务: 先锁节点行,
-// 确认无未过期的 running 任务, 再守卫式 pending→running(RowsAffected=1 才算认领成功)。
+// claimNext 认领一条到期的指定类型任务(单一锁时长; 测试与 S1 调用方使用)。
 func (r *Repository) claimNext(kinds []string, lock time.Duration) (*Task, error) {
+	locks := make(map[string]time.Duration, len(kinds))
+	for _, k := range kinds {
+		locks[k] = lock
+	}
+	return r.claimNextFor(locks)
+}
+
+// claimNextFor 认领一条到期的 pending 任务, locks 为可认领类型 → 锁时长。同一节点同时只运行一个任务:
+// 先锁节点行, 确认无未过期的 running 任务, 再守卫式 pending→running(RowsAffected=1 才算认领成功)。
+// 候选按 priority(小者优先)、run_after、id 排序。
+func (r *Repository) claimNextFor(locks map[string]time.Duration) (*Task, error) {
+	if len(locks) == 0 {
+		return nil, nil
+	}
+	kinds := make([]string, 0, len(locks))
+	for k := range locks {
+		kinds = append(kinds, k)
+	}
 	q, args, err := sqlx.In(`SELECT `+taskColumns+` FROM node_tasks
 		WHERE state='pending' AND run_after<=NOW() AND kind IN (?)
 		  AND node_id NOT IN (SELECT node_id FROM node_tasks WHERE state='running' AND locked_until>NOW())
@@ -73,7 +90,7 @@ func (r *Repository) claimNext(kinds []string, lock time.Duration) (*Task, error
 		return nil, err
 	}
 	for _, c := range cands {
-		t, err := r.tryClaim(c.ID, c.NodeID, lock)
+		t, err := r.tryClaim(c.ID, c.NodeID, locks[c.Kind])
 		if err != nil {
 			return nil, err
 		}
@@ -135,38 +152,63 @@ func (r *Repository) finishTask(id int64, attempts int, state string, result any
 }
 
 // retryLater 可重试的失败: running → pending 并延后; 达到上限 → dead。
+// 只有本次调用确实把任务转为 dead 才返回 dead=true(锁已过期被回收的陈旧回写不触发死信善后, 避免重复执行)。
 func (r *Repository) retryLater(id int64, attempts int, delay time.Duration, lastErr string) (dead bool, err error) {
-	_, err = r.db.Exec(`UPDATE node_tasks SET
-		state = IF(attempts>=max_attempts, 'dead', 'pending'),
-		run_after = NOW() + INTERVAL ? SECOND, locked_until=NULL, last_error=?
-		WHERE id=? AND state='running' AND attempts=?`, int(delay.Seconds()), nullStr(truncate(lastErr, 500)), id, attempts)
+	tx, err := r.db.Beginx()
 	if err != nil {
 		return false, err
 	}
-	var state string
-	if err := r.db.Get(&state, `SELECT state FROM node_tasks WHERE id=?`, id); err != nil {
+	defer tx.Rollback()
+	var maxAttempts []int
+	if err := tx.Select(&maxAttempts, `SELECT max_attempts FROM node_tasks WHERE id=? AND state='running' AND attempts=? FOR UPDATE`,
+		id, attempts); err != nil {
 		return false, err
 	}
-	return state == TaskDead, nil
+	if len(maxAttempts) == 0 {
+		return false, nil
+	}
+	dead = attempts >= maxAttempts[0]
+	state := TaskPending
+	if dead {
+		state = TaskDead
+	}
+	if _, err := tx.Exec(`UPDATE node_tasks SET state=?, run_after = NOW() + INTERVAL ? SECOND, locked_until=NULL, last_error=?
+		WHERE id=?`, state, int(delay.Seconds()), nullStr(truncate(lastErr, 500)), id); err != nil {
+		return false, err
+	}
+	return dead, tx.Commit()
 }
 
-// reclaimExpired 锁过期视为 worker 崩溃: 回到 pending; attempts ≥ max → dead。返回转 dead 的任务。
+// reclaimExpired 锁过期视为 worker 崩溃: 回到 pending(延后按退避); attempts ≥ max → dead。返回本次转 dead 的任务。
+// 同一事务内先锁定再更新, 只返回确由本次转 dead 的任务(死信善后不会重复执行)。
 func (r *Repository) reclaimExpired() ([]Task, error) {
+	tx, err := r.db.Beginx()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var expired []Task
+	if err := tx.Select(&expired, `SELECT `+taskColumns+` FROM node_tasks
+		WHERE state='running' AND locked_until<=NOW() FOR UPDATE`); err != nil {
+		return nil, err
+	}
 	var dead []Task
-	if err := r.db.Select(&dead, `SELECT `+taskColumns+` FROM node_tasks
-		WHERE state='running' AND locked_until<=NOW() AND attempts>=max_attempts`); err != nil {
-		return nil, err
+	for _, t := range expired {
+		if t.Attempts >= t.MaxAttempts {
+			if _, err := tx.Exec(`UPDATE node_tasks SET state='dead', locked_until=NULL,
+				last_error=COALESCE(last_error, '执行超时(锁过期)') WHERE id=? AND state='running'`, t.ID); err != nil {
+				return nil, err
+			}
+			t.State = TaskDead
+			dead = append(dead, t)
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE node_tasks SET state='pending', locked_until=NULL, run_after=NOW() + INTERVAL ? SECOND
+			WHERE id=? AND state='running'`, int(retryBackoff(t.Attempts).Seconds()), t.ID); err != nil {
+			return nil, err
+		}
 	}
-	if _, err := r.db.Exec(`UPDATE node_tasks SET state='dead', locked_until=NULL,
-		last_error=COALESCE(last_error, '执行超时(锁过期)')
-		WHERE state='running' AND locked_until<=NOW() AND attempts>=max_attempts`); err != nil {
-		return nil, err
-	}
-	if _, err := r.db.Exec(`UPDATE node_tasks SET state='pending', locked_until=NULL
-		WHERE state='running' AND locked_until<=NOW() AND attempts<max_attempts`); err != nil {
-		return nil, err
-	}
-	return dead, nil
+	return dead, tx.Commit()
 }
 
 // listTasks 运营查询任务(默认 dead)。

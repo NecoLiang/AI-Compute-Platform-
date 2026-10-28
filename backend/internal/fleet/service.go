@@ -24,6 +24,9 @@ type ProductStore interface {
 	ManagedProduct(productID int64) (*compute.Product, error)
 	LockManagedProductTx(tx *sqlx.Tx, productID int64) error
 	SetManagedStockTx(tx *sqlx.Tx, productID int64, stock int) error
+	// 订单侧(托管开通/失败善后), 全部在 fleet 的事务内调用。
+	LockManagedOrderTx(tx *sqlx.Tx, orderID int64) (*compute.Order, error)
+	FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error)
 }
 
 // HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
@@ -63,6 +66,8 @@ type Service struct {
 	benchSecs int
 	sampleN   int
 	sampleGap int
+
+	extraExecutors map[string]taskExecutor // probe 之外的任务执行器(T-084 provision 等), 启动前注册
 }
 
 // NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。
@@ -156,12 +161,15 @@ func (s *Service) refreshHealth(n *Node) {
 }
 
 func (s *Service) notify(userID int64, title, content string, nodeID int64) {
+	s.notifyLink(userID, title, content, fmt.Sprintf("/console/supplier/nodes/%d", nodeID))
+}
+
+func (s *Service) notifyLink(userID int64, title, content, link string) {
 	if s.notifier == nil || userID == 0 {
 		return
 	}
-	link := fmt.Sprintf("/console/supplier/nodes/%d", nodeID)
 	if err := s.notifier.Record(userID, "system", title, content, link); err != nil {
-		slog.Error("发送节点通知失败", "user_id", userID, "node_id", nodeID, "error", err)
+		slog.Error("发送站内通知失败", "user_id", userID, "link", link, "error", err)
 	}
 }
 

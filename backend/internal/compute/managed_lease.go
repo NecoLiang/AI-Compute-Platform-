@@ -73,6 +73,19 @@ func (s *Service) OnOrderPaidTx(tx *sqlx.Tx, order *Order) error {
 	return s.leaseHooks.OnPaidTx(tx, order)
 }
 
+// LockManagedOrderTx fleet 侧事务(开通失败善后等)按锁顺序"订单 → 租约 → 节点 → 卡槽 → 商品"先锁订单行。
+// 订单不存在返回 (nil, nil)。
+func (s *Service) LockManagedOrderTx(tx *sqlx.Tx, orderID int64) (*Order, error) {
+	o, err := s.lockOrderByIDTx(tx, orderID)
+	if err != nil || o == nil {
+		return o, err
+	}
+	if o.FulfillmentMode != FulfillmentManaged {
+		return nil, fmt.Errorf("订单 %s 不是托管订单", o.OrderNo)
+	}
+	return o, nil
+}
+
 func (s *Service) lockOrderByIDTx(tx *sqlx.Tx, orderID int64) (*Order, error) {
 	var o Order
 	err := tx.Get(&o, "SELECT "+orderColumns+" FROM orders WHERE id=? FOR UPDATE", orderID)

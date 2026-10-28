@@ -298,6 +298,10 @@ func (s *Service) RetryTask(operatorID, taskID int64, ip string) error {
 	if t.State != TaskDead {
 		return errcode.Newf(errcode.Conflict, "仅死信(dead)任务可重试, 当前为 %s", t.State)
 	}
+	if t.Kind == KindProvision {
+		// 开通任务进入死信时已自动换节点或取消订单并退款(docs/25 §25.5.1), 重放会在已释放的卡槽上重复开通。
+		return errcode.New(errcode.Conflict, "开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试")
+	}
 	return s.inTx(func(tx *sqlx.Tx) error {
 		ok, err := affected(tx.Exec(`UPDATE node_tasks SET state='pending', attempts=0, run_after=NOW(), locked_until=NULL
 			WHERE id=? AND state='dead'`, taskID))

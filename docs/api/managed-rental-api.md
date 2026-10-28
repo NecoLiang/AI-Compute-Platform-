@@ -176,7 +176,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 
 ### POST /admin/node-tasks/:id/retry · 重试死信 ✅
 
-仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
+仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
 
 ---
 

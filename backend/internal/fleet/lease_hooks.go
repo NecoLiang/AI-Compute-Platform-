@@ -55,9 +55,16 @@ type LeaseProvisionPayload struct {
 }
 
 // LeaseTaskPayload stop/purge/kill_sessions 任务参数。
+//
+// CleanupOnly=true(开通失败换节点/失败善后, T-083 入队): 只清理任务所在节点上的残留容器/数据卷/网络
+// (ContainerName/VolumeName 为入队时的名字), 完成后把本租约在该节点上的 draining 卡槽释放为 free,
+// 不迁移租约状态(租约此时已在别的节点 pending 或已 failed)。执行器属 T-087。
 type LeaseTaskPayload struct {
-	LeaseID int64  `json:"lease_id"`
-	Reason  string `json:"reason,omitempty"`
+	LeaseID       int64  `json:"lease_id"`
+	Reason        string `json:"reason,omitempty"`
+	CleanupOnly   bool   `json:"cleanup_only,omitempty"`
+	ContainerName string `json:"container_name,omitempty"`
+	VolumeName    string `json:"volume_name,omitempty"`
 }
 
 // onLeasePaidTx 收款确认: 租约 reserved → pending, 入队 provision(优先级 3)。

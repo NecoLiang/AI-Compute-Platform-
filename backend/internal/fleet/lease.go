@@ -32,9 +32,11 @@ const (
 //   - pending → cancelled: 已支付但尚未开通(未建容器)即被取消/退款, 无现场可清, 直接作废;
 //   - provisioning → purging: 开通中被取消/退款, 可能已建出部分容器, 交给 purge 清理;
 //   - parked → grace: 包夜租约在窗口外到期(容器已停, 数据卷保留进入宽限);
+//   - provisioning → pending: 开通重试耗尽后换节点重新分配一次(T-083, docs/25 §25.5.1);
+//   - pending → failed: 重新分配时已无可用节点、或换节点后的开通任务在领取前即被判定失败;
 //   - grace → pending(restart 续租)、parked/suspended 相关迁移由 T-088/T-095 使用, 表中先列出以便统一校验。
 var leaseFrom = map[string][]string{
-	LeasePending:      {LeaseReserved, LeaseGrace},
+	LeasePending:      {LeaseReserved, LeaseGrace, LeaseProvisioning},
 	LeaseProvisioning: {LeasePending},
 	LeaseActive:       {LeaseProvisioning, LeaseSuspended, LeaseParked},
 	LeaseParked:       {LeaseActive},
@@ -42,7 +44,7 @@ var leaseFrom = map[string][]string{
 	LeaseGrace:        {LeaseActive, LeaseSuspended, LeaseParked},
 	LeasePurging:      {LeaseProvisioning, LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace},
 	LeasePurged:       {LeasePurging},
-	LeaseFailed:       {LeaseProvisioning},
+	LeaseFailed:       {LeaseProvisioning, LeasePending},
 	LeaseCancelled:    {LeaseReserved, LeasePending},
 }
 

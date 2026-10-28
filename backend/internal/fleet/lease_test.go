@@ -13,7 +13,7 @@ var allLeaseStates = []string{LeaseReserved, LeasePending, LeaseProvisioning, Le
 func TestLeaseTransitionTable(t *testing.T) {
 	legal := map[[2]string]bool{}
 	for _, p := range [][2]string{
-		{LeaseReserved, LeasePending}, {LeaseGrace, LeasePending},
+		{LeaseReserved, LeasePending}, {LeaseGrace, LeasePending}, {LeaseProvisioning, LeasePending},
 		{LeasePending, LeaseProvisioning},
 		{LeaseProvisioning, LeaseActive}, {LeaseSuspended, LeaseActive}, {LeaseParked, LeaseActive},
 		{LeaseActive, LeaseParked},
@@ -22,7 +22,7 @@ func TestLeaseTransitionTable(t *testing.T) {
 		{LeaseProvisioning, LeasePurging}, {LeaseActive, LeasePurging}, {LeaseParked, LeasePurging},
 		{LeaseSuspended, LeasePurging}, {LeaseGrace, LeasePurging},
 		{LeasePurging, LeasePurged},
-		{LeaseProvisioning, LeaseFailed},
+		{LeaseProvisioning, LeaseFailed}, {LeasePending, LeaseFailed},
 		{LeaseReserved, LeaseCancelled}, {LeasePending, LeaseCancelled},
 	} {
 		legal[p] = true
