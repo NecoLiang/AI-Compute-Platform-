@@ -704,9 +704,12 @@ type ProductFilter struct {
 	PriceMin       int64
 	PriceMax       int64
 	CardCountMin   int
-	Page           int
-	PageSize       int
-	Sort           string
+	// MinCards 能一次租到至少 N 张卡(T-093): 托管=max_free_per_node>=N(单机空闲, 与卡槽分配同口径);
+	// 人工零租=stock>=N(stock 即可租卡数); 人工买断/算力中心=card_count>=N(每份所含卡数); 空心机房不参与(无卡)。
+	MinCards int
+	Page     int
+	PageSize int
+	Sort     string
 }
 
 const (
@@ -761,8 +764,13 @@ func (f ProductFilter) buildWhere() (string, []interface{}) {
 		args = append(args, f.DeliveryMode)
 	}
 	if f.PricingMode != "" {
-		where += " AND pricing_mode=?"
-		args = append(args, f.PricingMode)
+		// 与 PriceFor 同口径: 零租商品有价格行时按已启用的价格行匹配(任一行即可, 不限展示主价);
+		// 非零租商品与无价格行的存量零租商品按 products.pricing_mode。
+		where += ` AND ((product_type='card_rental' AND EXISTS (SELECT 1 FROM product_prices pp
+			WHERE pp.product_id=products.id AND pp.pricing_mode=? AND pp.enabled=1))
+			OR ((product_type<>'card_rental' OR NOT EXISTS (SELECT 1 FROM product_prices pp WHERE pp.product_id=products.id))
+			AND pricing_mode=?))`
+		args = append(args, f.PricingMode, f.PricingMode)
 	}
 	if f.AvailableHours != "" {
 		where += " AND available_hours LIKE ?"
@@ -779,6 +787,14 @@ func (f ProductFilter) buildWhere() (string, []interface{}) {
 	if f.CardCountMin > 0 {
 		where += " AND card_count >= ?"
 		args = append(args, f.CardCountMin)
+	}
+	if f.MinCards > 0 {
+		where += ` AND (CASE
+			WHEN fulfillment_mode='managed' THEN COALESCE(max_free_per_node,0) >= ?
+			WHEN product_type='card_rental' THEN stock >= ?
+			WHEN product_type IN ('outright','center') THEN card_count >= ?
+			ELSE 0 END)`
+		args = append(args, f.MinCards, f.MinCards, f.MinCards)
 	}
 	return where, args
 }

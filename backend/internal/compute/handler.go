@@ -121,6 +121,10 @@ func (h *Handler) ListProducts(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
+	if f.MinCards, err = nonNegativeIntQuery(c, "min_cards"); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
 	f.Normalize()
 	list, total, err := h.svc.ListProducts(f)
 	if err != nil {
