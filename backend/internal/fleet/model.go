@@ -46,7 +46,11 @@ const (
 	TaskFailed    = "failed"
 	TaskDead      = "dead"
 
-	KindProbe = "probe"
+	KindProbe        = "probe"
+	KindProvision    = "provision"
+	KindKillSessions = "kill_sessions"
+	KindStop         = "stop"
+	KindPurge        = "purge"
 )
 
 // 探活模式(写在 probe 任务 payload 中)。

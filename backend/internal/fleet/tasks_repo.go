@@ -35,6 +35,20 @@ func (r *Repository) insertTask(q sqlx.Execer, nodeID int64, kind string, priori
 	return res.LastInsertId()
 }
 
+// insertLeaseTask 租约相关任务(provision/stop/purge/kill_sessions), 写 lease_id 便于运营按租约检索。
+func (r *Repository) insertLeaseTask(q sqlx.Execer, nodeID, leaseID int64, kind string, priority int, payload any) (int64, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	res, err := q.Exec(`INSERT INTO node_tasks (node_id, lease_id, kind, state, priority, payload) VALUES (?,?,?,'pending',?,?)`,
+		nodeID, leaseID, kind, priority, string(raw))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 func (r *Repository) getTask(q sqlx.Queryer, id int64) (*Task, error) {
 	var t Task
 	err := sqlx.Get(q, &t, `SELECT `+taskColumns+` FROM node_tasks WHERE id=?`, id)

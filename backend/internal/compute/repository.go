@@ -793,18 +793,24 @@ func (r *Repository) GetProductsBySupplier(supplierID int64) ([]Product, error) 
 
 // Orders
 func (r *Repository) CreateOrderTx(tx *sqlx.Tx, o *Order) error {
-	const q = `INSERT INTO orders (order_no, buyer_id, product_id, quantity, duration, unit_price, total_amount, platform_fee,
-		status, payment_expires_at, compliance_agreed, stock_reserved) VALUES (?,?,?,?,?,?,?,?,'pending_payment',?,?,?)`
-	args := []interface{}{o.OrderNo, o.BuyerID, o.ProductID, o.Quantity, o.Duration, o.UnitPrice, o.TotalAmount,
-		o.PlatformFee, o.PaymentExpires, o.ComplianceAgreed, o.StockReserved}
-	var err error
+	const q = `INSERT INTO orders (order_no, buyer_id, product_id, fulfillment_mode, quantity, duration, unit_price, total_amount, platform_fee,
+		status, payment_expires_at, compliance_agreed, stock_reserved) VALUES (?,?,?,?,?,?,?,?,?,'pending_payment',?,?,?)`
+	args := []interface{}{o.OrderNo, o.BuyerID, o.ProductID, fulfillmentOrManual(o.FulfillmentMode), o.Quantity, o.Duration,
+		o.UnitPrice, o.TotalAmount, o.PlatformFee, o.PaymentExpires, o.ComplianceAgreed, o.StockReserved}
+	var db sqlx.Execer = r.db
 	// tx 为 nil 时退回库句柄, 避免 nil *sqlx.Tx 调 Exec 直接 panic。
 	if tx != nil {
-		_, err = tx.Exec(q, args...)
-	} else {
-		_, err = r.db.Exec(q, args...)
+		db = tx
 	}
-	return err
+	res, err := db.Exec(q, args...)
+	if err != nil {
+		return err
+	}
+	if id, err := res.LastInsertId(); err == nil {
+		o.ID = id
+	}
+	o.FulfillmentMode = fulfillmentOrManual(o.FulfillmentMode)
+	return nil
 }
 
 func (r *Repository) GetOrderByNo(orderNo string) (*Order, error) {

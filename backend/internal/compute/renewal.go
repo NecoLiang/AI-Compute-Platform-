@@ -71,6 +71,9 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if parent == nil {
 		return nil, fmt.Errorf("order not found")
 	}
+	if err := s.requireManagedRenewable(parent); err != nil {
+		return nil, err
+	}
 	if parent.LeaseEnd == nil || parent.StockReserved == nil || (parent.Status != "active" && parent.Status != "completed") {
 		return nil, ErrRenewalConflict
 	}

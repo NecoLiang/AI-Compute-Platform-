@@ -143,6 +143,8 @@ func main() {
 			fleet.Deps{Products: computeSvc, Health: schedulerSvc, Notifier: notificationSvc},
 			cfg.Fleet, cfg.AccessGW, credKey)
 		computeSvc.SetManagedGate(fleetSvc)
+		computeSvc.SetLeaseHooks(fleetSvc.LeaseHooks())
+		paymentSvc.SetPaidHook(computeSvc.OnOrderPaidTx)
 		schedulerSvc.SetManagedNodes(fleetSvc)
 		slog.Warn("fleet 已启用; 访问网关(S2)未接入前探活 P11 判为不通过, 托管节点无法进入 verified")
 	}

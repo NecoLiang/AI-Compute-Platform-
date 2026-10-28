@@ -7,6 +7,9 @@ package compute
 // 未注入(fleet.enabled=false)时托管商品不可提交审核、不可下单, 人工模式行为不变。
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -90,6 +93,17 @@ func (s *Service) ManagedProduct(productID int64) (*Product, error) {
 	return p, err
 }
 
+// LockManagedProductTx 派生库存重算的串行化锁: 计数与回写之前锁商品行(SELECT … FOR UPDATE)。
+// 配合 READ COMMITTED 事务, 拿到锁之后的计数语句能看到上一个持锁者已提交的卡槽变化, 不会丢更新(CR-S1 M3)。
+func (s *Service) LockManagedProductTx(tx *sqlx.Tx, productID int64) error {
+	var id int64
+	err := tx.Get(&id, `SELECT id FROM products WHERE id=? FOR UPDATE`, productID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // 商品已不存在: 后续 SetManagedStockTx 为空操作
+	}
+	return err
+}
+
 // SetManagedStockTx 由 fleet 在自己的事务内回写托管商品派生库存:
 // stock = 可售空闲卡数; 只在 active↔sold_out 间切换, 不触碰草稿/待审/下架/冻结状态。
 // 只作用于 fulfillment_mode='managed' 的行, 人工商品不受影响。
@@ -104,4 +118,23 @@ func (s *Service) SetManagedStockTx(tx *sqlx.Tx, productID int64, stock int) err
 		return err
 	}
 	return nil
+}
+
+// beginManagedAware 托管订单的事务使用 READ COMMITTED: 释放/预留卡槽后在同一事务内重算派生库存,
+// 计数必须在拿到商品行锁之后读到最新已提交数据(REPEATABLE READ 的快照可能早于锁, 造成丢更新)。
+// 人工订单保持默认隔离级别, 行为不变。fulfillment_mode 下单后不可变, 事务外预读是安全的。
+func (s *Service) beginManagedAware(managed bool) (*sqlx.Tx, error) {
+	if managed {
+		return s.db.BeginTxx(context.Background(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	}
+	return s.db.Beginx()
+}
+
+func (s *Service) orderIsManaged(orderNo string) (bool, error) {
+	var mode string
+	err := s.db.Get(&mode, `SELECT fulfillment_mode FROM orders WHERE order_no=?`, orderNo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return mode == FulfillmentManaged, err
 }

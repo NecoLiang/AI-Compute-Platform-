@@ -169,6 +169,8 @@ type Service struct {
 	notifier Notifier
 	// managedGate 托管履约判定(fleet 注入)。nil = fleet 未启用, 托管商品不可提审/下单。
 	managedGate ManagedGate
+	// leaseHooks 托管租约钩子(fleet 注入, managed_lease.go)。零值 = 未接入, 托管商品不可下单。
+	leaseHooks LeaseHooks
 }
 
 // Notifier 消息中心写接口, 由 notification 包实现。
@@ -1129,19 +1131,23 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if p.Health == "offline" {
 		return nil, fmt.Errorf("供应方算力节点已全部离线, 该商品暂不可下单")
 	}
-	// 托管商品: fleet 未启用 → 40001; 租约开通(S2)未接入 → 50000, 不走人工交付路径。
-	if p.FulfillmentMode == FulfillmentManaged {
+	// 托管商品: fleet 未启用 → 40001; 租约钩子未接入 → 50000, 不走人工交付路径。
+	// 托管订单不扣 products.stock(派生库存由 fleet 按卡槽重算), 改为同事务预留同机卡槽(docs/26 §26.5.2)。
+	managed := p.FulfillmentMode == FulfillmentManaged
+	if managed {
 		if s.managedGate == nil {
 			return nil, ErrManagedDisabled
 		}
-		return nil, errManagedLeaseNotWired
+		if !s.leaseWired() {
+			return nil, errManagedLeaseNotWired
+		}
 	}
 
 	qty, dur, err := ValidateOrderParams(p, req.Quantity, req.Duration)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.db.Beginx()
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,11 +1182,22 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		ComplianceAgreed: req.ComplianceAgreed,
 	}
 
-	if err := s.repo.DecrProductStock(tx, p.ID, qty); err != nil {
+	if managed {
+		zero := 0
+		o.StockReserved, o.FulfillmentMode = &zero, FulfillmentManaged
+		if p.PricingMode == PricingPerpetual {
+			return nil, fmt.Errorf("托管商品不支持买断计费")
+		}
+	} else if err := s.repo.DecrProductStock(tx, p.ID, qty); err != nil {
 		return nil, fmt.Errorf("insufficient stock")
 	}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err
+	}
+	if managed {
+		if err := s.leaseHooks.ReserveTx(tx, o, p); err != nil {
+			return nil, err
+		}
 	}
 	if err := legal.Record(tx, buyerID, legal.Acceptance{Document: "resource-usage-rules", Version: req.ComplianceVersion}, "order", orderNo); err != nil {
 		return nil, err
@@ -2081,7 +2098,11 @@ func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, 
 }
 
 func (s *Service) releaseStockTxDeadline(orderNo string, from []string, to string, expiredLeaseOnly bool) (bool, error) {
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return false, err
 	}
@@ -2114,7 +2135,7 @@ func (s *Service) releaseStockTxDeadline(orderNo string, from []string, to strin
 			return false, err
 		}
 	}
-	if err := s.returnReservedStockTx(tx, o); err != nil {
+	if err := s.releaseHoldTx(tx, o, to); err != nil {
 		return false, err
 	}
 	if renewal == nil {
@@ -2231,7 +2252,11 @@ func (s *Service) AdminUpdateOrderStatus(operatorID int64, orderNo, status, ip s
 	if status != "cancelled" && status != "frozen" {
 		return fmt.Errorf("运营仅支持关闭订单或冻结订单")
 	}
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return err
 	}
@@ -2260,7 +2285,7 @@ func (s *Service) AdminUpdateOrderStatus(operatorID int64, orderNo, status, ip s
 		if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "cancelled"); err != nil {
 			return err
 		}
-		if err := s.returnReservedStockTx(tx, order); err != nil {
+		if err := s.releaseHoldTx(tx, order, "cancelled"); err != nil {
 			return err
 		}
 		if renewal == nil {

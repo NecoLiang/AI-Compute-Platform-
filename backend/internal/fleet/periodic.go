@@ -225,6 +225,10 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	var prev string
 	var changed int64
 	err = s.inTx(func(tx *sqlx.Tx) error {
+		// 锁顺序 节点行 → 卡槽 → 商品行(与下单预留一致, 见 reserveSlotsTx)。
+		if err := s.lockNodeRow(tx, n.ID); err != nil {
+			return err
+		}
 		var err error
 		if changed, err = s.repo.markSlotsFaulty(tx, n.ID, faulty); err != nil {
 			return err

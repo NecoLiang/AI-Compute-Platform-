@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,6 +22,7 @@ import (
 // ProductStore compute 暴露给 fleet 的商品读取与派生库存回写(*compute.Service 实现)。
 type ProductStore interface {
 	ManagedProduct(productID int64) (*compute.Product, error)
+	LockManagedProductTx(tx *sqlx.Tx, productID int64) error
 	SetManagedStockTx(tx *sqlx.Tx, productID int64, stock int) error
 }
 
@@ -115,9 +117,10 @@ func (s *Service) getOwned(supplierID, nodeID int64) (*Node, error) {
 	return n, nil
 }
 
-// inTx 执行事务; fn 返回错误即回滚。
+// inTx 执行事务; fn 返回错误即回滚。隔离级别 READ COMMITTED: 事务内重算派生库存时,
+// 拿到商品行锁后的计数语句必须读到最新已提交数据(见 recomputeStockTx)。
 func (s *Service) inTx(fn func(tx *sqlx.Tx) error) error {
-	tx, err := s.repo.db.Beginx()
+	tx, err := s.repo.db.BeginTxx(context.Background(), &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
@@ -129,7 +132,16 @@ func (s *Service) inTx(fn func(tx *sqlx.Tx) error) error {
 }
 
 // recomputeStockTx 托管商品派生库存在卡槽/节点状态变化的同一事务内重算(docs/26 §26.5.4)。
+//
+// 并发正确性(CR-S1 M3): 先锁商品行再计数。同一商品的所有重算由该行锁串行化; 事务为 READ COMMITTED,
+// 计数语句在拿到锁之后执行, 能读到上一个持锁者已提交的卡槽变化, 不会以旧快照覆盖(丢更新)。
+// 计数是非锁定读, 不等待其他事务未提交的卡槽行锁, 因此不会与"已改卡槽、正等商品锁"的事务互相死锁;
+// 那些事务拿到锁后会再计一次, 最终值收敛。调用方事务必须是 READ COMMITTED(fleet inTx、
+// compute.beginManagedAware 均满足), REPEATABLE READ 下快照可能早于锁, 不得调用。
 func (s *Service) recomputeStockTx(tx *sqlx.Tx, productID int64) error {
+	if err := s.products.LockManagedProductTx(tx, productID); err != nil {
+		return err
+	}
 	n, err := s.repo.freeSlotCount(tx, productID)
 	if err != nil {
 		return err

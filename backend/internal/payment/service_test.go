@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"tokenfactory/internal/compute"
+
 	"github.com/stretchr/testify/assert"
 )
 
@@ -152,6 +154,19 @@ func TestSplitEligible(t *testing.T) {
 		assert.False(t, splitEligible(status, nil), status)
 	}
 	assert.False(t, splitEligible("completed", &paid), "重新开通的续租需等新的交付确认")
+}
+
+// 托管订单在 settle_ready_at 写入(租期末结算, T-089)前一律不分账; 续租按根订单判断。人工订单不受影响。
+func TestManagedSettleBlocked(t *testing.T) {
+	now := time.Now()
+	manual := &compute.Order{FulfillmentMode: compute.FulfillmentManual}
+	managed := &compute.Order{FulfillmentMode: compute.FulfillmentManaged}
+	ready := &compute.Order{FulfillmentMode: compute.FulfillmentManaged, SettleReadyAt: &now}
+	assert.False(t, managedSettleBlocked(manual, nil))
+	assert.True(t, managedSettleBlocked(managed, nil))
+	assert.False(t, managedSettleBlocked(ready, nil))
+	assert.True(t, managedSettleBlocked(manual, managed), "续租看根订单")
+	assert.False(t, managedSettleBlocked(managed, ready))
 }
 
 // 分账金额必须 int64 分且守恒: 平台佣金 + 供给方所得 == 总额, 不允许出现分币误差。

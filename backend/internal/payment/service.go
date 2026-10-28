@@ -20,6 +20,8 @@ type Service struct {
 	db         *sqlx.DB
 	yeepay     Gateway
 	onRefunded func(orderNo string) error
+	// onPaid 托管订单收款确认的同事务钩子(compute.OnOrderPaidTx → fleet 入队开通, docs/25 §25.5.1)。
+	onPaid func(tx *sqlx.Tx, order *compute.Order) error
 }
 
 // Gateway is the external payment boundary (易宝). Every result that moves
@@ -48,6 +50,9 @@ func NewService(repo *Repository, db *sqlx.DB, gateway ...Gateway) *Service {
 
 // SetRefundHook 退款成功后回调订单域(释放余量、吊销凭证、通知买家)。
 func (s *Service) SetRefundHook(fn func(orderNo string) error) { s.onRefunded = fn }
+
+// SetPaidHook 收款确认后在同一事务内回调订单域。托管订单必须接入, 否则确认收款失败(重试由回调/补单驱动)。
+func (s *Service) SetPaidHook(fn func(tx *sqlx.Tx, order *compute.Order) error) { s.onPaid = fn }
 
 type PayReq struct {
 	OrderNo string `json:"order_no"`
@@ -311,6 +316,15 @@ func (s *Service) confirmPayment(r *PaymentResult) error {
 	if err := compute.ApplyRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
 		return err
 	}
+	if renewal == nil && renewalOrder.FulfillmentMode == compute.FulfillmentManaged {
+		if s.onPaid == nil {
+			return fmt.Errorf("托管订单 %s 收款钩子未接入(fleet 未启用), 无法确认收款", r.OrderNo)
+		}
+		renewalOrder.Status = "paid"
+		if err := s.onPaid(tx, renewalOrder); err != nil {
+			return err
+		}
+	}
 	// 应结记录在收款时按下单时锁定的佣金生成; 实际分账在清算入账且交付确认后发起。
 	for _, item := range []struct {
 		payee  string
@@ -373,6 +387,14 @@ func splitEligible(orderStatus string, parentStatus *string) bool {
 	return parentStatus == nil || *parentStatus == "active" || *parentStatus == "completed"
 }
 
+func managedSettleBlocked(order, parent *compute.Order) bool {
+	root := order
+	if parent != nil {
+		root = parent
+	}
+	return root.FulfillmentMode == compute.FulfillmentManaged && root.SettleReadyAt == nil
+}
+
 // trySplit 对一笔已清算、未退款、交付已确认的订单发起分账: 供给方应得部分分到其易宝商编,
 // 剩余部分(平台服务费)随分账解冻到平台收款商编。请求号先落库再请求易宝, 结果不明时按请求号查询。
 func (s *Service) trySplit(orderNo string) error {
@@ -390,6 +412,10 @@ func (s *Service) trySplit(orderNo string) error {
 		parentStatus = &parent.Status
 	}
 	if !splitEligible(order.Status, parentStatus) {
+		return nil
+	}
+	// 托管订单: 激活(active)不代表可分账, 须等租期末结算(settle_ready_at, T-106)。续租看母单。
+	if managedSettleBlocked(order, parent) {
 		return nil
 	}
 	var pay Payment
