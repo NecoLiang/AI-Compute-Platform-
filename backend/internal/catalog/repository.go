@@ -22,6 +22,9 @@ type GPUModel struct {
 	// ProbeBaselineTFLOPS 托管探活 P13 实测基准(docs/25 §25.4); nil=未标定, P13 只验稳定性。
 	ProbeBaselineTFLOPS *float64 `db:"probe_baseline_tflops" json:"probe_baseline_tflops"`
 	Interconnect        *string  `db:"interconnect" json:"interconnect"`
+	// ComputeCapability CUDA 算力架构, 如 "8.0"/"8.9"/"9.0"(docs/27 §27.2)。
+	// 未填写时该型号上的一键部署一律判为"无法判定", 不放行。
+	ComputeCapability *string `db:"compute_capability" json:"compute_capability"`
 	// SecureCertified 是否入选国家安可认证目录(2026-05 起「AI 训练与推理芯片」类)。
 	SecureCertified bool      `db:"secure_certified" json:"secure_certified"`
 	SpecSource      *string   `db:"spec_source" json:"spec_source,omitempty"` // 仅管理端返回
@@ -31,7 +34,7 @@ type GPUModel struct {
 	UpdatedAt       time.Time `db:"updated_at" json:"updated_at"`
 }
 
-const gpuColumns = "id, vendor, model_name, origin, grade, vram_gb, vram_type, fp16_tflops, probe_baseline_tflops, interconnect, secure_certified, spec_source, status, sort_weight, created_at, updated_at"
+const gpuColumns = "id, vendor, model_name, origin, grade, vram_gb, vram_type, fp16_tflops, probe_baseline_tflops, interconnect, compute_capability, secure_certified, spec_source, status, sort_weight, created_at, updated_at"
 
 // Filter 列表筛选。IncludeDisabled 仅管理端为 true。
 type Filter struct {
@@ -87,10 +90,10 @@ func (r *Repository) Get(id int64) (*GPUModel, error) {
 
 func (r *Repository) Create(m *GPUModel) error {
 	res, err := r.db.Exec(`INSERT INTO gpu_catalog
-		(vendor, model_name, origin, grade, vram_gb, vram_type, fp16_tflops, probe_baseline_tflops, interconnect, secure_certified, spec_source, sort_weight)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(vendor, model_name, origin, grade, vram_gb, vram_type, fp16_tflops, probe_baseline_tflops, interconnect, compute_capability, secure_certified, spec_source, sort_weight)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		m.Vendor, m.ModelName, m.Origin, m.Grade, m.VRAMGB, m.VRAMType, m.FP16TFLOPS, m.ProbeBaselineTFLOPS,
-		m.Interconnect, m.SecureCertified, m.SpecSource, m.SortWeight)
+		m.Interconnect, m.ComputeCapability, m.SecureCertified, m.SpecSource, m.SortWeight)
 	if err != nil {
 		return err
 	}
@@ -103,8 +106,22 @@ func (r *Repository) Create(m *GPUModel) error {
 func (r *Repository) Update(m *GPUModel) error {
 	_, err := r.db.Exec(`UPDATE gpu_catalog SET
 		vendor=?, model_name=?, origin=?, grade=?, vram_gb=?, vram_type=?, fp16_tflops=?, probe_baseline_tflops=?,
-		interconnect=?, secure_certified=?, spec_source=?, status=?, sort_weight=? WHERE id=?`,
+		interconnect=?, compute_capability=?, secure_certified=?, spec_source=?, status=?, sort_weight=? WHERE id=?`,
 		m.Vendor, m.ModelName, m.Origin, m.Grade, m.VRAMGB, m.VRAMType, m.FP16TFLOPS, m.ProbeBaselineTFLOPS,
-		m.Interconnect, m.SecureCertified, m.SpecSource, m.Status, m.SortWeight, m.ID)
+		m.Interconnect, m.ComputeCapability, m.SecureCertified, m.SpecSource, m.Status, m.SortWeight, m.ID)
 	return err
+}
+
+// ComputeCapabilityByModel 按标准型号名取算力架构, 供一键部署可行性判定使用。
+// 型号不存在返回 found=false; 型号存在但未填写返回 found=true, cc="".
+func (r *Repository) ComputeCapabilityByModel(modelName string) (cc string, found bool, err error) {
+	var v sql.NullString
+	err = r.db.Get(&v, "SELECT compute_capability FROM gpu_catalog WHERE model_name=?", modelName)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v.String, true, nil
 }

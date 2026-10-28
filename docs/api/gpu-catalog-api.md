@@ -38,6 +38,7 @@ curl "http://localhost:8080/api/v1/gpu-catalog?origin=domestic"
     "fp16_tflops":320.0,          // FP16 稠密 Tensor 算力; null=待核实
     "probe_baseline_tflops":null, // v1.2 托管探活 P13 实测基准; null=未标定
     "interconnect":"HCCS",        // 多卡互联; null=待核实
+    "compute_capability":null,    // CUDA 算力架构 "主.次"(如 9.0); null=未登记, 一键部署对该型号判"无法判定"(v1.2)
     "secure_certified":true,      // ⭐ 是否入选国家安可认证目录 → 前端可打「安可认证」徽章
     "status":"enabled",
     "sort_weight":100,
@@ -68,12 +69,15 @@ curl "http://localhost:8080/api/v1/gpu-catalog?origin=domestic"
  "secure_certified":false,"spec_source":"寒武纪官网","sort_weight":86}
 ```
 - `vendor`/`model_name`/`origin`/`grade` 必填，其余可空；`model_name` 全局唯一（重复返回 40001「型号已存在」）。
+- `compute_capability`（v1.2，迁移 030）：CUDA 算力架构，格式 `主.次`（正则 `^[0-9]{1,2}\.[0-9]$`，如 `8.0` A100、`8.9` L40S/4090、`9.0` H100/H200/H20），首尾空白自动去除，空串视为未登记（存 `null`）；格式错误返回 40001。仅 NVIDIA 卡有意义，国产卡留空。
 - 新增默认 `enabled`。
 - `probe_baseline_tflops` 可空，非空须为正数（否则 40001）。
 
 ## PUT /admin/gpu-catalog/:id · 更新型号 ✅
 
 整体提交（与 POST 同字段 + `status`）。`status:"disabled"` 即从公开下拉隐藏（下架不删除，商品历史引用不受影响）。
+
+> ⚠️ 整体替换：请求体**未带** `compute_capability` / `probe_baseline_tflops` 时对应字段会被置为 `null`。编辑已有型号须回传原值，否则该型号的一键部署 F1 检查会变成"无法判定"、托管探活 P13 会退回"未标定"（只验稳定性）。
 
 | 错误码 | 场景 |
 |---|---|
@@ -89,3 +93,9 @@ curl "http://localhost:8080/api/v1/gpu-catalog?origin=domestic"
 - 原样提交 `model_name` 到商品 `gpu_model`；不再提供自由输入。历史商品原型号保持展示，可选择替换。
 - 规格 `null` 不显示；认证标记直接使用 `secure_certified`。厂商标识为本地静态资源，后续新增厂商无图标时显示通用芯片图标。
 - 新数据库的 Docker 初始化包含 `009_gpu_catalog.up.sql`；已有数据库须先备份，再单独执行该迁移。
+
+## 与一键部署的关系（v1.2）
+
+- 迁移 `030_model_deployment.up.sql` 新增 `gpu_catalog.compute_capability VARCHAR(8) NULL`，**不预置数值**，须由运营按厂商官方 CUDA Compute Capability 表逐款填写。
+- 一键部署可行性检查 F1 用租约卡型的 `compute_capability` 与模型条目 `min_compute_capability` 比较；为 `null` 时 F1 判为 error「无法判定」，阻断部署。
+- 模型目录真机验证记录的 `gpu_model` 必须是本表中存在的 `model_name`（否则 40001），F8「未验证卡型」按此精确匹配。详见 [model-deploy-api.md](model-deploy-api.md)。

@@ -164,6 +164,22 @@ curl -X PUT http://localhost:8080/api/v1/admin/config \
 
 ---
 
+## 模型目录（v1.2 一键部署）
+
+完整字段、校验规则与状态机见 [model-deploy-api.md](model-deploy-api.md#模型目录运营operatoradmin)。
+
+### GET /admin/model-catalog?status= · 目录列表
+### GET /admin/model-catalog/:id · 条目详情（含真机验证记录）
+### POST /admin/model-catalog · 新建条目（一律 draft）
+### PUT /admin/model-catalog/:id · 整体更新（仅 draft，否则 40900）
+### POST /admin/model-catalog/:id/verifications · 录入真机验证记录
+### POST /admin/model-catalog/:id/activate · 上线（无 pass 验证记录 40001）
+### POST /admin/model-catalog/:id/retire · 退役（不影响运行中部署）
+
+`active` 条目不可编辑，修改须新建条目（`revision` 变化即为新模型）；`retired` 为终态。GPU 型号库 `PUT /admin/gpu-catalog/:id` 同期新增 `compute_capability` 字段，见 [gpu-catalog-api.md](gpu-catalog-api.md)。
+
+---
+
 ## 告警级别
 
 | level | 含义 |
