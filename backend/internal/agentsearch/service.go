@@ -186,8 +186,18 @@ type AnalysisStep struct {
 // Match 平台真实商品 + 确定性打分与理由。
 type Match struct {
 	Product compute.Product `json:"product"`
-	Score   int             `json:"score"`
-	Reasons []string        `json:"reasons"`
+	// Quote 本次匹配采用的价格: 需求指定了计费方式时为该方式的价格(零租多价格商品取对应价格行),
+	// 未指定时为展示主价; 商品未开放该方式或需询价时为 null。预算估算与 reasons 中的单价都按它。
+	Quote   *MatchQuote `json:"quote"`
+	Score   int         `json:"score"`
+	Reasons []string    `json:"reasons"`
+}
+
+// MatchQuote 匹配所用价格, 单价为 分/卡(整机商品为 分/台)/周期。
+type MatchQuote struct {
+	PricingMode string `json:"pricing_mode"`
+	UnitPrice   int64  `json:"unit_price"`
+	MinDuration int    `json:"min_duration"`
 }
 
 type SearchResult struct {
@@ -359,27 +369,38 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 			}
 		}
 
+		// 计费方式按下单同一规则取价(compute.PriceFor): 零租商品命中任一已启用价格行即可, 不只看展示主价;
+		// 非零租商品无价格行, 看商品主价方式。需求未指定方式时取展示主价。
+		quote, quoteErr := compute.PriceFor(&p, req.PricingMode)
+		negotiable := p.PriceNegotiable || p.ProductType == compute.ProductTypeColocation
+		var matchQuote *MatchQuote
+		if quoteErr == nil && !negotiable {
+			matchQuote = &MatchQuote{PricingMode: quote.PricingMode, UnitPrice: quote.UnitPrice, MinDuration: quote.MinDuration}
+		}
+
 		if req.BudgetFenMax > 0 {
 			switch {
 			case !capacityKnown:
 				reasons = append(reasons, "规格不足, 无法估算满足需求的费用")
-			case p.PriceNegotiable || p.ProductType == compute.ProductTypeColocation:
+			case negotiable:
 				reasons = append(reasons, "商品需询价, 暂无法核对预算")
-			case req.PricingMode != "" && p.PricingMode != req.PricingMode:
-				reasons = append(reasons, "计费方式与需求不同, 请按商品计费周期核对预算")
+			case quoteErr != nil && req.PricingMode != "":
+				reasons = append(reasons, "商品未开放需求的计费方式, 请按商品计费周期核对预算")
+			case quoteErr != nil:
+				reasons = append(reasons, "商品暂无有效价格, 无法核对预算")
 			default:
-				dur := max(1, p.MinDuration, int(math.Round(req.DurationHint)))
-				q, d, err := compute.ValidateRenewParams(&p, qty, dur)
+				dur := max(1, quote.MinDuration, int(math.Round(req.DurationHint)))
+				q, d, err := compute.ValidateRenewParamsFor(&p, quote, qty, dur)
 				if err != nil {
 					reasons = append(reasons, "采购条件无法满足: "+err.Error())
 					break
 				}
-				est, _, err := compute.CalcOrderAmount(p.UnitPrice, q, d, 0)
+				est, _, err := compute.CalcOrderAmount(quote.UnitPrice, q, d, 0)
 				if err != nil {
 					reasons = append(reasons, "预估费用暂不可确定: "+err.Error())
 					break
 				}
-				reasons = append(reasons, fmt.Sprintf("按 %d%s、%d%s及商品最低采购条件估算", q, unit, d, compute.DurationUnit(p.PricingMode)))
+				reasons = append(reasons, fmt.Sprintf("按 %d%s、%d%s及商品最低采购条件估算", q, unit, d, compute.DurationUnit(quote.PricingMode)))
 				if est <= int64(math.Round(req.BudgetFenMax)) {
 					score += 20
 					reasons = append(reasons, fmt.Sprintf("预估费用 %.2f 元在预算内", float64(est)/100))
@@ -396,14 +417,19 @@ func matchProducts(req parsedRequirement, products []compute.Product) []Match {
 			score += 10
 			reasons = append(reasons, "地域 "+p.Region+" 符合要求")
 		}
-		if req.PricingMode != "" && p.PricingMode == req.PricingMode {
+		if req.PricingMode != "" && quoteErr == nil {
 			score += 10
-			reasons = append(reasons, "计费模式匹配("+p.PricingMode+")")
+			if matchQuote != nil {
+				reasons = append(reasons, fmt.Sprintf("计费模式匹配(%s, 单价 %.2f 元/%s/%s)",
+					req.PricingMode, float64(quote.UnitPrice)/100, unit, compute.DurationUnit(quote.PricingMode)))
+			} else {
+				reasons = append(reasons, "计费模式匹配("+req.PricingMode+")")
+			}
 		}
 
 		if score >= minMatchScore {
 			p.SupplierName = compute.MaskCompanyName(p.SupplierName)
-			matches = append(matches, Match{Product: p, Score: score, Reasons: reasons})
+			matches = append(matches, Match{Product: p, Quote: matchQuote, Score: score, Reasons: reasons})
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool { return matches[i].Score > matches[j].Score })
