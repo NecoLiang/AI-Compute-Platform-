@@ -292,16 +292,18 @@ func TestManagedLeaseHooksLifecycle(t *testing.T) {
 	stock, _ = leaseStock(t, db)
 	assert.Equal(t, 2, stock)
 
-	// ⑥ 托管订单续租: T-088 前 50000 明确拒绝。
+	// ⑥ 托管订单续租已接入(T-088): 不再 50000"未接入"; 本用例的 activate 未生成交付记录, 续租按冲突拒绝。
+	// 完整 extend/restart 链路见 lease_renew_integration_test.go(真实开通流水线)。
 	o4, err := placeManaged(comp, 23, 1)
 	require.NoError(t, err)
 	payOrder(t, db, comp, o4.OrderNo)
 	l4, _ := s.repo.getLeaseByOrder(db, o4.ID)
 	activate(t, db, o4.ID, l4.ID)
+	db.MustExec(`UPDATE leases SET access_until=NOW()+INTERVAL 1 HOUR WHERE id=?`, l4.ID)
 	_, err = comp.GetRenewalQuote(23, o4.OrderNo, 1)
 	require.Error(t, err)
-	assert.Equal(t, 50000, codeOf(err))
-	assert.Contains(t, err.Error(), "T-088")
+	assert.NotEqual(t, 50000, codeOf(err))
+	assert.NotContains(t, err.Error(), "T-088")
 }
 
 // payOrder 收款确认的订单侧最小等价(payment.confirmPayment: 守卫式 → paid + OnOrderPaidTx 同事务)。

@@ -282,12 +282,9 @@ func (s *Service) restartReserveTx(tx *sqlx.Tx, l *Lease) error {
 		if err != nil {
 			return err
 		}
-		ok, err := affected(tx.Exec(`UPDATE leases SET node_id=? WHERE id=? AND state='purged'`, nodeID, l.ID))
-		if err != nil {
+		// 租约行已在本事务内锁定且确认 purged; 新节点可能与原节点相同(值不变时 RowsAffected=0), 不以行数判定。
+		if _, err := tx.Exec(`UPDATE leases SET node_id=? WHERE id=? AND state='purged'`, nodeID, l.ID); err != nil {
 			return err
-		}
-		if !ok {
-			return fmt.Errorf("租约 %s 状态已变化", l.LeaseNo)
 		}
 		l.NodeID = nodeID
 	case LeasePurging:
