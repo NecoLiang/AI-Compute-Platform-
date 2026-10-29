@@ -13,13 +13,13 @@ var allLeaseStates = []string{LeaseReserved, LeasePending, LeaseProvisioning, Le
 func TestLeaseTransitionTable(t *testing.T) {
 	legal := map[[2]string]bool{}
 	for _, p := range [][2]string{
-		{LeaseReserved, LeasePending}, {LeaseGrace, LeasePending}, {LeaseProvisioning, LeasePending},
+		{LeaseReserved, LeasePending}, {LeaseGrace, LeasePending}, {LeaseProvisioning, LeasePending}, {LeasePurged, LeasePending}, {LeasePending, LeaseGrace}, {LeaseProvisioning, LeaseGrace},
 		{LeasePending, LeaseProvisioning},
 		{LeaseProvisioning, LeaseActive}, {LeaseSuspended, LeaseActive}, {LeaseParked, LeaseActive},
 		{LeaseActive, LeaseParked},
 		{LeaseActive, LeaseSuspended}, {LeaseParked, LeaseSuspended},
 		{LeaseActive, LeaseGrace}, {LeaseSuspended, LeaseGrace}, {LeaseParked, LeaseGrace},
-		{LeaseProvisioning, LeasePurging}, {LeaseActive, LeasePurging}, {LeaseParked, LeasePurging},
+		{LeasePending, LeasePurging}, {LeaseProvisioning, LeasePurging}, {LeaseActive, LeasePurging}, {LeaseParked, LeasePurging},
 		{LeaseSuspended, LeasePurging}, {LeaseGrace, LeasePurging},
 		{LeasePurging, LeasePurged},
 		{LeaseProvisioning, LeaseFailed}, {LeasePending, LeaseFailed},
@@ -32,9 +32,12 @@ func TestLeaseTransitionTable(t *testing.T) {
 			assert.Equal(t, legal[[2]string{from, to}], CanTransitionLease(from, to), "%s → %s", from, to)
 		}
 	}
-	// 终态不可再迁出。
+	// 终态不可再迁出; 唯一例外 purged → pending(宽限期后 restart 续租复用租约行, T-088)。
 	for _, term := range leaseTerminal {
 		for _, to := range allLeaseStates {
+			if term == LeasePurged && to == LeasePending {
+				continue
+			}
 			assert.False(t, CanTransitionLease(term, to), "%s → %s", term, to)
 		}
 	}

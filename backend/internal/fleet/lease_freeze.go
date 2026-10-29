@@ -132,7 +132,7 @@ func (s *Service) requeueProvisionTx(tx *sqlx.Tx, l *Lease) error {
 		if err := json.Unmarshal(raw, &prev); err != nil {
 			return fmt.Errorf("租约 %s 最近一次开通任务 payload 无法解析: %w", l.LeaseNo, err)
 		}
-		pl.Reallocated = prev.Reallocated
+		pl.Reallocated, pl.Renewal, pl.Resume = prev.Reallocated, prev.Renewal, prev.Resume
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}

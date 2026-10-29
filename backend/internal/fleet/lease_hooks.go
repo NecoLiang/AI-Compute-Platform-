@@ -27,9 +27,9 @@ const (
 // 退避 1m,2m,4m…封顶 1h, 10 次合计约 6 小时)。
 const cleanupMaxAttempts = 10
 
-// LeaseHooks 供 main 注入 compute.SetLeaseHooks。RenewTx 留空: 托管续租属 T-088。
+// LeaseHooks 供 main 注入 compute.SetLeaseHooks。
 func (s *Service) LeaseHooks() compute.LeaseHooks {
-	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx,
+	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx, RenewTx: s.renewLeaseTx,
 		Feasible: s.leaseFeasible, FreezeTx: s.freezeLeaseTx, UnfreezeTx: s.unfreezeLeaseTx, WrongFreeze: s.wrongFreeze}
 }
 
@@ -83,9 +83,15 @@ func (s *Service) reserveLeaseTx(tx *sqlx.Tx, o *compute.Order, p *compute.Produ
 }
 
 // LeaseProvisionPayload provision 任务参数。Reallocated=true 表示已换过一次节点(docs/25 §25.5.1 重试耗尽规则)。
+//
+// Renewal=true: restart 续租触发的重新开通(T-088), 开通彻底失败时退的是续租单而不是原订单。
+// Resume=true: 宽限期内原节点重新开通, 沿用保留的容器/数据卷(同卡 docker start, 换卡 commit 后重建);
+// 数据在原节点上, 不换节点, 失败回到宽限期。
 type LeaseProvisionPayload struct {
 	LeaseID     int64 `json:"lease_id"`
 	Reallocated bool  `json:"reallocated,omitempty"`
+	Renewal     bool  `json:"renewal,omitempty"`
+	Resume      bool  `json:"resume,omitempty"`
 }
 
 // LeaseTaskPayload stop/purge/kill_sessions 任务参数。

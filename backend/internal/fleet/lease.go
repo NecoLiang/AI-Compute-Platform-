@@ -34,15 +34,19 @@ const (
 //   - parked → grace: 包夜租约在窗口外到期(容器已停, 数据卷保留进入宽限);
 //   - provisioning → pending: 开通重试耗尽后换节点重新分配一次(T-083, docs/25 §25.5.1);
 //   - pending → failed: 重新分配时已无可用节点、或换节点后的开通任务在领取前即被判定失败;
-//   - grace → pending(restart 续租)、parked/suspended 相关迁移由 T-088/T-095 使用, 表中先列出以便统一校验。
+//   - grace → pending(restart 续租, 宽限期内原节点重新开通)、parked/suspended 相关迁移由 T-088/T-095 使用;
+//   - purged → pending: 宽限期后 restart 续租复用同一租约行(leases.order_id 唯一), 重新分配节点、全新开通(T-088);
+//   - pending → purging: 宽限期后 restart 续租(全新开通)在开通完成前退款, 已建出的环境清除(T-088);
+//   - pending/provisioning → grace: 宽限期内 restart 续租在开通完成前失败或退款, 回到宽限期并保留原数据卷,
+//     grace_until 沿用续租前的值(期满照常清除, T-088)。
 var leaseFrom = map[string][]string{
-	LeasePending:      {LeaseReserved, LeaseGrace, LeaseProvisioning},
+	LeasePending:      {LeaseReserved, LeaseGrace, LeaseProvisioning, LeasePurged},
 	LeaseProvisioning: {LeasePending},
 	LeaseActive:       {LeaseProvisioning, LeaseSuspended, LeaseParked},
 	LeaseParked:       {LeaseActive},
 	LeaseSuspended:    {LeaseActive, LeaseParked},
-	LeaseGrace:        {LeaseActive, LeaseSuspended, LeaseParked},
-	LeasePurging:      {LeaseProvisioning, LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace},
+	LeaseGrace:        {LeaseActive, LeaseSuspended, LeaseParked, LeasePending, LeaseProvisioning},
+	LeasePurging:      {LeasePending, LeaseProvisioning, LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace},
 	LeasePurged:       {LeasePurging},
 	LeaseFailed:       {LeaseProvisioning, LeasePending},
 	LeaseCancelled:    {LeaseReserved, LeasePending},

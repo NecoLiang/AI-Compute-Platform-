@@ -462,7 +462,7 @@ func (p *provisionRun) activate() error {
 		if cur == nil {
 			return fmt.Errorf("租约 %s 不存在", l.LeaseNo)
 		}
-		if err := s.mustTransition(tx, cur, LeaseActive, ", access_until=?, provisioned_at=NOW()", *end); err != nil {
+		if err := s.mustTransition(tx, cur, LeaseActive, ", access_until=?, provisioned_at=NOW(), grace_until=NULL", *end); err != nil {
 			return err
 		}
 		moved, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotReserved}, SlotLeased)
