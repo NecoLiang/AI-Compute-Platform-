@@ -47,7 +47,11 @@ func (s *Service) freezeLeaseTx(tx *sqlx.Tx, o *compute.Order) error {
 		}
 		slog.Info("订单冻结: 租约已暂停, 入队断开会话", "lease_no", l.LeaseNo, "order_no", o.OrderNo)
 	default:
-		slog.Info("订单冻结: 租约不在租, 不做租约侧动作", "lease_no", l.LeaseNo, "state", l.State, "order_no", o.OrderNo)
+		// 状态不变但订单凭证随冻结吊销(compute 同事务): 刷新撤销游标, 网关丢弃该登录名的缓存放行(防御性, 非 active 本就不放行)。
+		if err := s.repo.touchAccess(tx, l.ID); err != nil {
+			return err
+		}
+		slog.Info("订单冻结: 租约不在租, 只刷新撤销游标", "lease_no", l.LeaseNo, "state", l.State, "order_no", o.OrderNo)
 	}
 	return nil
 }
