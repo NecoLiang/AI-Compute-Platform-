@@ -115,8 +115,11 @@ func (s *Service) beginManagedAware(managed bool) (*sqlx.Tx, error) {
 }
 
 func (s *Service) orderIsManaged(orderNo string) (bool, error) {
+	// 续租单自身 fulfillment_mode 为默认 manual, 按原订单判定(托管 restart 续租单关单/退款要释放卡槽、重算派生库存)。
 	var mode string
-	err := s.db.Get(&mode, `SELECT fulfillment_mode FROM orders WHERE order_no=?`, orderNo)
+	err := s.db.Get(&mode, `SELECT COALESCE(p.fulfillment_mode, o.fulfillment_mode) FROM orders o
+		LEFT JOIN order_renewals r ON r.order_id=o.id LEFT JOIN orders p ON p.id=r.parent_order_id
+		WHERE o.order_no=?`, orderNo)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

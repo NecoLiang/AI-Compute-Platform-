@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 )
@@ -9,7 +10,8 @@ import (
 var ErrAlertConflict = errors.New("告警已处置或正在冻结，不能忽略")
 
 func (s *Service) FreezeAlert(ctx context.Context, operatorID, id int64, ip string) error {
-	tx, err := s.repo.db.Beginx()
+	// READ COMMITTED: 冻结托管订单会取消待支付的 restart 续租并退回卡槽、重算派生库存(与 compute 托管路径一致)。
+	tx, err := s.repo.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}

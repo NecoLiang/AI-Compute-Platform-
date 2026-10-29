@@ -103,6 +103,8 @@ func main() {
 	}
 	paymentSvc := payment.NewService(paymentRepo, sqlDB, yeepay)
 	paymentSvc.SetRefundHook(computeSvc.CompleteRefund)
+	// 续租收款经 compute.Service: 人工订单与包级函数等价; 托管原订单走租约钩子(fleet 未启用时 50000)。
+	paymentSvc.SetRenewalHooks(computeSvc.ValidateRenewalPaymentTx, computeSvc.ApplyRenewalPaymentTx)
 	intermediaryRepo := intermediary.NewRepository(sqlDB)
 	intermediarySvc := intermediary.NewService(intermediaryRepo)
 	equipmentRepo := equipment.NewRepository(sqlDB)

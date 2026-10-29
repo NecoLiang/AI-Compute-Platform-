@@ -29,8 +29,9 @@ type LeaseHooks struct {
 	// ReleaseTx 订单进入 cancelled/refunded/completed: 释放卡槽、租约迁移、入队 stop/purge。
 	// to 为订单的目标状态。已释放过的租约必须幂等返回 nil。
 	ReleaseTx func(tx *sqlx.Tx, order *Order, to string) error
-	// RenewTx 托管续租衔接(T-088)。nil 时托管订单不可续租(50000 明确提示)。
-	RenewTx func(tx *sqlx.Tx, parent, renewal *Order) error
+	// RenewTx 托管续租衔接(docs/25 §25.7.2, T-088), ev 见 Renew* 常量; r.Mode 为 extend/restart。
+	// nil 时托管订单不可续租(50000 明确提示)。
+	RenewTx func(tx *sqlx.Tx, ev string, parent *Order, r *Renewal) error
 	// Feasible 只读可行性(GET /products/:id/availability): 是否存在一个节点能按 docs/26 §26.5.2 的候选规则
 	// 容纳 cards 张同机空闲卡。不加锁、不写库; 结论是快照, 成交以 ReserveTx 为准。
 	Feasible func(product *Product, cards int) (bool, error)
@@ -53,6 +54,22 @@ type ManagedUnfreeze struct {
 	LeaseID     int64
 	SuspendedAt *time.Time
 }
+
+// 托管续租事件(LeaseHooks.RenewTx)。锁顺序: 订单 → 交易配置 → 租约 → 节点行 → 卡槽 → 商品行。
+const (
+	// RenewCheck 报价: extend 校验租约在租未到期; restart 校验卡槽余量(宽限期内查原节点, 宽限期后查商品全部节点)。只读。
+	RenewCheck = "check"
+	// RenewReserve 下单(pending_payment): restart 预留 k 张卡槽并重算派生库存(不调用 DecrProductStock); extend 同 check。
+	RenewReserve = "reserve"
+	// RenewVerify 收款前校验: extend 租约仍在租未到期; restart 预留仍完整。不满足返回 ErrRenewalConflict(款项原路退回)。
+	RenewVerify = "verify"
+	// RenewRelease 未支付的续租单关闭/取消: restart 退回预留。
+	RenewRelease = "release"
+	// RenewApply 收款落账: extend 顺延 leases.access_until; restart 租约 → pending 并入队开通。
+	RenewApply = "apply"
+	// RenewRevert 未使用的续租退款: extend 回退 access_until; restart(尚未开通完成)清除租约。
+	RenewRevert = "revert"
+)
 
 // SetLeaseHooks 注入租约钩子(fleet.enabled=true 时由 main 调用)。
 func (s *Service) SetLeaseHooks(h LeaseHooks) { s.leaseHooks = h }
@@ -171,11 +188,16 @@ func (s *Service) ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt 
 	if err != nil {
 		return nil, err
 	}
+	// restart 续租后重新开通: 租期取最近一次已落账的 restart 续租单(时长/计费方式), 新租期自自检通过起算(docs/25 §25.7.2)。
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, pricingMode)
+	if err != nil {
+		return nil, err
+	}
 	if pricingMode == PricingPerpetual {
 		return nil, fmt.Errorf("托管订单不支持买断计费")
 	}
 	start := selftestAt.Truncate(time.Second)
-	end, err := LeaseEndAt(start, pricingMode, o.Duration, OrderNightWindow(o))
+	end, err := LeaseEndAt(start, pricingMode, leaseOrder.Duration, OrderNightWindow(o))
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +241,15 @@ func (s *Service) ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt 
 			return nil, err
 		}
 		return nil, fmt.Errorf("订单 %s 状态已变化", o.OrderNo)
+	}
+	if leaseOrder.ID != o.ID {
+		// 与人工签收一致: 续租单记录本次租期, confirmed_at 标记续租已开始使用(此后不再按"未使用续租"退款)。
+		if _, err := tx.Exec("UPDATE orders SET lease_start_at=?,lease_end_at=? WHERE id=?", start, end, leaseOrder.ID); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec("UPDATE order_renewals SET confirmed_at=? WHERE order_id=?", start, leaseOrder.ID); err != nil {
+			return nil, err
+		}
 	}
 	return &end, nil
 }

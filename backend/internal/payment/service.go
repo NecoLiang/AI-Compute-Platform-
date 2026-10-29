@@ -22,6 +22,8 @@ type Service struct {
 	onRefunded func(orderNo string) error
 	// onPaid 托管订单收款确认的同事务钩子(compute.OnOrderPaidTx → fleet 入队开通, docs/25 §25.5.1)。
 	onPaid func(tx *sqlx.Tx, order *compute.Order) error
+	// 续租收款校验/落账(SetRenewalHooks); nil 时回退 compute 包级函数。
+	validateRenewal, applyRenewal RenewalPaymentFunc
 }
 
 // Gateway is the external payment boundary (易宝). Every result that moves
@@ -53,6 +55,29 @@ func (s *Service) SetRefundHook(fn func(orderNo string) error) { s.onRefunded = 
 
 // SetPaidHook 收款确认后在同一事务内回调订单域。托管订单必须接入, 否则确认收款失败(重试由回调/补单驱动)。
 func (s *Service) SetPaidHook(fn func(tx *sqlx.Tx, order *compute.Order) error) { s.onPaid = fn }
+
+// RenewalPaymentFunc 续租收款校验/落账(order 为续租单, parent 为原订单)。
+type RenewalPaymentFunc func(tx *sqlx.Tx, order, parent *compute.Order, r *compute.Renewal) error
+
+// SetRenewalHooks 注入 compute.Service 的续租收款校验/落账(托管原订单经租约钩子, docs/25 §25.7.2)。
+// 未注入时回退 compute 包级函数: 人工订单行为不变, 托管原订单返回 50000。
+func (s *Service) SetRenewalHooks(validate, apply RenewalPaymentFunc) {
+	s.validateRenewal, s.applyRenewal = validate, apply
+}
+
+func (s *Service) validateRenewalTx(tx *sqlx.Tx, order, parent *compute.Order, r *compute.Renewal) error {
+	if s.validateRenewal != nil {
+		return s.validateRenewal(tx, order, parent, r)
+	}
+	return compute.ValidateRenewalPaymentTx(tx, order, parent, r)
+}
+
+func (s *Service) applyRenewalTx(tx *sqlx.Tx, order, parent *compute.Order, r *compute.Renewal) error {
+	if s.applyRenewal != nil {
+		return s.applyRenewal(tx, order, parent, r)
+	}
+	return compute.ApplyRenewalPaymentTx(tx, order, parent, r)
+}
 
 type PayReq struct {
 	OrderNo string `json:"order_no"`
@@ -123,7 +148,7 @@ func (s *Service) Pay(buyerID int64, req PayReq) (*PayResp, error) {
 	if s.yeepay.Configured() && !slices.Contains(s.yeepay.PayChannels(), req.Channel) {
 		return nil, fmt.Errorf("该支付方式暂未开通, 请选择其他支付方式")
 	}
-	if err := compute.ValidateRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
+	if err := s.validateRenewalTx(tx, renewalOrder, parent, renewal); err != nil {
 		return nil, err
 	}
 	var paid int
@@ -289,7 +314,7 @@ func (s *Service) confirmPayment(r *PaymentResult) error {
 	}
 	payable := order.Status == "pending_payment"
 	if payable {
-		switch err := compute.ValidateRenewalPaymentTx(tx, renewalOrder, parent, renewal); {
+		switch err := s.validateRenewalTx(tx, renewalOrder, parent, renewal); {
 		case errors.Is(err, compute.ErrRenewalConflict):
 			payable = false
 		case err != nil:
@@ -313,7 +338,7 @@ func (s *Service) confirmPayment(r *PaymentResult) error {
 	if _, err := tx.Exec("UPDATE orders SET status='paid' WHERE order_no=?", r.OrderNo); err != nil {
 		return err
 	}
-	if err := compute.ApplyRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
+	if err := s.applyRenewalTx(tx, renewalOrder, parent, renewal); err != nil {
 		return err
 	}
 	if renewal == nil && renewalOrder.FulfillmentMode == compute.FulfillmentManaged {

@@ -2156,7 +2156,12 @@ func (s *Service) ListResourceSyncs(operatorID int64, isAdmin bool, productID in
 // RequestRefund 买家申请退款。必须校验订单归属:
 // 否则任意登录买家都能把他人正常使用中的订单打成 refunding 状态。
 func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
-	tx, err := s.db.Beginx()
+	// 托管订单取消待支付的 restart 续租会退回卡槽并重算派生库存, 须 READ COMMITTED。
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return err
 	}
@@ -2267,6 +2272,12 @@ func (s *Service) releaseStockTxDeadline(orderNo string, from []string, to strin
 			return false, ErrRenewalConflict
 		}
 		if err := s.refundRenewalTx(tx, parent, renewal); err != nil {
+			return false, err
+		}
+	}
+	if renewal != nil && renewal.AppliedAt == nil {
+		// 未支付的托管 restart 续租单关闭: 退回下单时预留的卡槽(续租单本身 stock_reserved=0)。
+		if err := s.releaseManagedRenewalTx(tx, parent, renewal); err != nil {
 			return false, err
 		}
 	}
