@@ -36,6 +36,7 @@ type ProvisionOutcome struct {
 	Firewall          []string `json:"firewall,omitempty"`
 	ImagePulled       bool     `json:"image_pulled,omitempty"`
 	Abandoned         bool     `json:"abandoned,omitempty"` // 激活前订单已被取消/冻结, 容器由 purge 清理
+	Resume            string   `json:"resume,omitempty"`    // restart 续租原节点恢复: started / recreated / fresh(T-088)
 }
 
 // provisionRun 一次开通的上下文。
@@ -47,6 +48,7 @@ type provisionRun struct {
 	slots  []Slot
 	client Runner
 	out    ProvisionOutcome
+	resume bool // restart 续租: 宽限期内原节点恢复(T-088)
 }
 
 func (s *Service) runProvisionTask(ctx context.Context, t *Task) (any, error) {
@@ -54,7 +56,7 @@ func (s *Service) runProvisionTask(ctx context.Context, t *Task) (any, error) {
 	if err := jsonUnmarshal(t.Payload, &pl); err != nil || pl.LeaseID == 0 {
 		return nil, errTaskAborted{fmt.Sprintf("payload 无法解析: %v", err)}
 	}
-	p := &provisionRun{s: s, t: t}
+	p := &provisionRun{s: s, t: t, resume: pl.Resume}
 	if err := p.begin(pl.LeaseID); err != nil {
 		return nil, err
 	}
@@ -325,20 +327,21 @@ func (p *provisionRun) container(ctx context.Context) error {
 	for i, sl := range p.slots {
 		uuids[i] = sl.GPUUUID
 	}
-	cmd, err := createContainerCommand(leaseContainerSpec{LeaseNo: l.LeaseNo, Image: img, UUIDs: uuids, CPUs: cpus,
-		MemGB: mem, DiskGB: disk, Port: port, InitShell: init})
+	spec := leaseContainerSpec{LeaseNo: l.LeaseNo, Image: img, UUIDs: uuids, CPUs: cpus,
+		MemGB: mem, DiskGB: disk, Port: port, InitShell: init}
+	if p.resume {
+		err = p.resumeContainer(ctx, spec)
+	} else {
+		err = p.createContainer(ctx, spec)
+	}
 	if err != nil {
 		return err
-	}
-	out, err := runRemote(ctx, p.client, cmd, 3*cmdTimeout)
-	if err != nil || !strings.Contains(out, "@@created") {
-		return fmt.Errorf("创建租约容器失败: %v", errText(err))
 	}
 	hk, err := hostKeyCommand(l.LeaseNo)
 	if err != nil {
 		return err
 	}
-	out, err = runRemote(ctx, p.client, hk, cmdTimeout)
+	out, err := runRemote(ctx, p.client, hk, cmdTimeout)
 	if err != nil {
 		return fmt.Errorf("容器 sshd 未就绪: %w", err)
 	}
@@ -362,6 +365,18 @@ func (p *provisionRun) container(ctx context.Context) error {
 		// 同值重写(重试)RowsAffected=0, 属正常。
 	}
 	p.out.UpstreamPort, p.out.UpstreamHostKeyFP = port, fp
+	return nil
+}
+
+func (p *provisionRun) createContainer(ctx context.Context, spec leaseContainerSpec) error {
+	cmd, err := createContainerCommand(spec)
+	if err != nil {
+		return err
+	}
+	out, err := runRemote(ctx, p.client, cmd, 3*cmdTimeout)
+	if err != nil || !strings.Contains(out, "@@created") {
+		return fmt.Errorf("创建租约容器失败: %v", errText(err))
+	}
 	return nil
 }
 

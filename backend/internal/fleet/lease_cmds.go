@@ -236,13 +236,18 @@ func startContainerCommand(leaseNo string) (string, error) {
 	return "docker start " + c + " >/dev/null && echo @@started", nil
 }
 
+// isLeaseCommitRef ref 是否为该租约自己的提交镜像(格式白名单 + 租约号前缀)。
+func isLeaseCommitRef(leaseNo, ref string) bool {
+	return ValidLeaseNo(leaseNo) && commitRefRe.MatchString(ref) && strings.HasPrefix(ref, "omnis-commit/"+leaseNo+":")
+}
+
 // commitContainerCommand 原卡被占: 把原容器提交为本地镜像, 随后以新卡重建(挂载原数据卷)。
 func commitContainerCommand(leaseNo, ref string) (string, error) {
 	c, err := leaseContainer(leaseNo)
 	if err != nil {
 		return "", err
 	}
-	if !commitRefRe.MatchString(ref) || !strings.HasPrefix(ref, "omnis-commit/"+leaseNo+":") {
+	if !isLeaseCommitRef(leaseNo, ref) {
 		return "", fmt.Errorf("提交镜像名非法: %q", truncate(ref, 80))
 	}
 	return "docker commit " + c + " " + ref + " >/dev/null && echo @@committed", nil

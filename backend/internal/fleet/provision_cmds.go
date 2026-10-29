@@ -166,8 +166,11 @@ func createContainerCommand(sp leaseContainerSpec) (string, error) {
 	if err := checkLeaseRes(c, v, nw); err != nil {
 		return "", err
 	}
-	if err := checkImage(sp.Image); err != nil {
-		return "", err
+	// 镜像: 平台基础镜像(ref@sha256 固定摘要), 或 restart 换卡重建时本租约自己的提交镜像(commitRefOf 生成)。
+	if !isLeaseCommitRef(sp.LeaseNo, sp.Image) {
+		if err := checkImage(sp.Image); err != nil {
+			return "", err
+		}
 	}
 	if len(sp.UUIDs) == 0 {
 		return "", fmt.Errorf("租约无卡")

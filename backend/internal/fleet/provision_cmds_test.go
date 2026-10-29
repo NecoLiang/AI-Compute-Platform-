@@ -187,10 +187,20 @@ func TestCreateContainerCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, cmd, "--storage-opt")
 
+	// restart 换卡重建: 本租约自己的提交镜像(T-088)。
+	commit := sp
+	commit.Image = "omnis-commit/l-abcdefgh:1700000000"
+	cmd, err = createContainerCommand(commit)
+	require.NoError(t, err)
+	assert.Contains(t, cmd, "--entrypoint /bin/sh omnis-commit/l-abcdefgh:1700000000 -c '")
+	shSyntaxOK(t, cmd)
+
 	bad := []func(*leaseContainerSpec){
 		func(s *leaseContainerSpec) { s.LeaseNo = "l-ABCDEFGH" },
 		func(s *leaseContainerSpec) { s.LeaseNo = "l-abc;rm -" },
 		func(s *leaseContainerSpec) { s.Image = "ubuntu:22.04" },
+		func(s *leaseContainerSpec) { s.Image = "omnis-commit/l-zzzzzzzz:1700000000" }, // 别的租约的提交镜像
+		func(s *leaseContainerSpec) { s.Image = "omnis-commit/l-abcdefgh:17;rm -rf" },
 		func(s *leaseContainerSpec) { s.UUIDs = []string{"GPU-1-0"} },
 		func(s *leaseContainerSpec) { s.UUIDs = nil },
 		func(s *leaseContainerSpec) { s.Port = 22 },
