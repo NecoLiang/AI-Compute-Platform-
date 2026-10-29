@@ -277,6 +277,51 @@ func (s *Service) FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error) {
 	return true, s.repo.RevokeAccessByOrderTx(tx, o.ID)
 }
 
+// FailManagedRestartTx restart 续租的重新开通彻底失败(T-088): 退的是续租单而不是原订单。
+// 最近一次已落账且尚未开始使用(confirmed_at 为空)的 restart 续租单 completed → cancelled(lease_start/end 清空,
+// 由 payment 的 queueCancelledPaidRefunds 自动原路全额退款); 原订单 paid/provisioning → completed 并恢复续租前租期,
+// 吊销凭证。没有这样的续租单(不是续租触发的开通)或原订单已不在 paid/provisioning 时返回 false。
+func (s *Service) FailManagedRestartTx(tx *sqlx.Tx, parentID int64) (bool, error) {
+	o, err := s.lockOrderByIDTx(tx, parentID)
+	if err != nil || o == nil {
+		return false, err
+	}
+	if o.FulfillmentMode != FulfillmentManaged {
+		return false, fmt.Errorf("订单 %s 不是托管订单", o.OrderNo)
+	}
+	if o.Status != "paid" && o.Status != "provisioning" {
+		return false, nil
+	}
+	var r Renewal
+	err = tx.Get(&r, `SELECT r.*, p.order_no AS parent_order_no FROM order_renewals r
+		JOIN orders c ON c.id=r.order_id JOIN orders p ON p.id=r.parent_order_id
+		WHERE r.parent_order_id=? AND r.mode='restart' AND r.applied_at IS NOT NULL AND r.confirmed_at IS NULL
+		AND c.status='completed' ORDER BY r.order_id DESC LIMIT 1 FOR UPDATE`, parentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	res, err := tx.Exec(`UPDATE orders SET status='cancelled', lease_start_at=NULL, lease_end_at=NULL
+		WHERE id=? AND status='completed'`, r.OrderID)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, fmt.Errorf("续租单 #%d 状态已变化: %v", r.OrderID, err)
+	}
+	res, err = tx.Exec(`UPDATE orders SET status='completed', lease_start_at=?, lease_end_at=?
+		WHERE id=? AND fulfillment_mode='managed' AND status IN ('paid','provisioning')`, r.PreviousLeaseStartAt, r.LeaseEndAt, o.ID)
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, fmt.Errorf("订单 %s 状态已变化: %v", o.OrderNo, err)
+	}
+	return true, s.repo.RevokeAccessByOrderTx(tx, o.ID)
+}
+
 // ManagedOrderByID 托管订单只读查询(fleet 收尾通知、到期扫描用)。
 func (s *Service) ManagedOrderByID(orderID int64) (*Order, error) {
 	return s.repo.GetOrderByID(orderID)

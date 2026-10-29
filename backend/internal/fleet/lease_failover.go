@@ -63,6 +63,15 @@ func (o failoverOutcome) notify(s *Service, lastErr string) {
 		s.notify(o.supplierID, "托管租约开通失败",
 			fmt.Sprintf("租约 %s 在节点 #%d 开通多次失败(%s), 已改由其他节点交付。请检查该节点状态。", o.lease.LeaseNo, o.oldNode, truncate(lastErr, 200)),
 			o.oldNode)
+	case "restart_failed":
+		slog.Error("运营告警: restart 续租重新开通失败, 续租单已取消并将自动退款", "lease_no", o.lease.LeaseNo,
+			"order_no", o.order.OrderNo, "node_id", o.oldNode, "lease_state", o.lease.State, "error", lastErr)
+		s.notifyLink(o.order.BuyerID, "续租重新开通失败, 续租款将全额退回",
+			fmt.Sprintf("订单 %s 的续租重新开通失败, 续租单已取消, 续租款将原路全额退回。%s", o.order.OrderNo, restartFailNote(o.lease)),
+			"/console/buyer/orders/"+o.order.OrderNo)
+		s.notify(o.supplierID, "托管租约续租开通失败",
+			fmt.Sprintf("租约 %s(订单 %s)续租后在节点 #%d 重新开通失败(%s)。请检查该节点状态。",
+				o.lease.LeaseNo, o.order.OrderNo, o.oldNode, truncate(lastErr, 200)), o.oldNode)
 	case "failed":
 		slog.Error("运营告警: 托管开通彻底失败, 订单已取消并将自动退款", "lease_no", o.lease.LeaseNo, "order_no", o.order.OrderNo,
 			"node_id", o.oldNode, "error", lastErr)
@@ -73,6 +82,13 @@ func (o failoverOutcome) notify(s *Service, lastErr string) {
 			fmt.Sprintf("租约 %s(订单 %s)在节点 #%d 开通失败(%s), 订单已取消。请检查该节点状态。",
 				o.lease.LeaseNo, o.order.OrderNo, o.oldNode, truncate(lastErr, 200)), o.oldNode)
 	}
+}
+
+func restartFailNote(l *Lease) string {
+	if l.State == LeaseGrace && l.GraceUntil != nil {
+		return "原环境数据仍保留至 " + l.GraceUntil.Format("2006-01-02 15:04") + ", 期满清除。"
+	}
+	return ""
 }
 
 // provisionFailover 单个事务内完成换节点或失败善后。
@@ -112,6 +128,22 @@ func (s *Service) provisionFailover(pl LeaseProvisionPayload, taskNode int64, la
 		if err := s.lockNodeRow(tx, l.NodeID); err != nil {
 			return err
 		}
+		if pl.Resume {
+			// 宽限期内原节点恢复(T-088): 数据卷只在原节点, 不换节点、不清理现场; 续租单退款, 租约回到宽限期
+			// (grace_until 沿用续租前的值, 期满照常清除)。
+			moved, err := s.products.FailManagedRestartTx(tx, o.ID)
+			if err != nil {
+				return err
+			}
+			if !moved {
+				return fmt.Errorf("订单 %s 找不到待退款的 restart 续租单", o.OrderNo)
+			}
+			if err := s.backToGraceTx(tx, l, truncate("restart 恢复失败: "+lastErr, 200)); err != nil {
+				return err
+			}
+			out.action = "restart_failed"
+			return s.recomputeStockTx(tx, l.ProductID)
+		}
 		if err := s.releaseOldNodeTx(tx, l, lastErr); err != nil {
 			return err
 		}
@@ -130,7 +162,7 @@ func (s *Service) provisionFailover(pl LeaseProvisionPayload, taskNode int64, la
 					return fmt.Errorf("租约 %s 状态已变化", l.LeaseNo)
 				}
 				if _, err := s.repo.insertLeaseTask(tx, newNode, l.ID, KindProvision, prioProvision,
-					LeaseProvisionPayload{LeaseID: l.ID, Reallocated: true}); err != nil {
+					LeaseProvisionPayload{LeaseID: l.ID, Reallocated: true, Renewal: pl.Renewal}); err != nil {
 					return err
 				}
 				out.action, out.newNode = "reallocated", newNode
@@ -140,7 +172,12 @@ func (s *Service) provisionFailover(pl LeaseProvisionPayload, taskNode int64, la
 			}
 			// 无其他可用节点: 走失败分支。
 		}
-		moved, err := s.products.FailManagedOrderTx(tx, o.ID)
+		// restart 续租(宽限期后全新开通)失败退续租单, 原订单回到 completed; 否则原订单取消并全额退款。
+		fail, action := s.products.FailManagedOrderTx, "failed"
+		if pl.Renewal {
+			fail, action = s.products.FailManagedRestartTx, "restart_failed"
+		}
+		moved, err := fail(tx, o.ID)
 		if err != nil {
 			return err
 		}
@@ -151,7 +188,7 @@ func (s *Service) provisionFailover(pl LeaseProvisionPayload, taskNode int64, la
 		if err := s.mustTransition(tx, l, LeaseFailed, ", fail_reason=?", reason); err != nil {
 			return err
 		}
-		out.action = "failed"
+		out.action = action
 		return s.recomputeStockTx(tx, l.ProductID)
 	})
 	return out, err

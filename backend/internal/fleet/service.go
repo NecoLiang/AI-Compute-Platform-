@@ -28,6 +28,7 @@ type ProductStore interface {
 	// 订单侧(托管开通/失败善后), 全部在 fleet 的事务内调用。
 	LockManagedOrderTx(tx *sqlx.Tx, orderID int64) (*compute.Order, error)
 	FailManagedOrderTx(tx *sqlx.Tx, orderID int64) (bool, error)
+	FailManagedRestartTx(tx *sqlx.Tx, parentID int64) (bool, error)
 	BeginManagedProvisioningTx(tx *sqlx.Tx, orderID int64) (*compute.Order, error)
 	ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt time.Time, acc compute.ManagedAccess) (*time.Time, error)
 	// 网关鉴权与买家访问信息(T-085/T-086)。
