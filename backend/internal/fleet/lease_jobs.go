@@ -224,8 +224,8 @@ func (s *Service) enterGraceTx(tx *sqlx.Tx, l *Lease, o *compute.Order, reason s
 	if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotLeased, SlotReserved}, SlotDraining); err != nil {
 		return err
 	}
-	_, err = s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindStop, prioStop, cleanupMaxAttempts, LeaseTaskPayload{LeaseID: l.ID, Reason: reason})
-	return err
+	// 冻结中到期已入队过 stop 的(解冻转 grace), 不重复入队。
+	return s.ensureStopTx(tx, l, reason)
 }
 
 // expireSuspended 冻结中到期: 停容器、释放卡, 容器与数据卷保留作核查现场; 租约保持 suspended, 不进宽限计时,

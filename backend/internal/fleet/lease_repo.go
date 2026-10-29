@@ -67,7 +67,8 @@ func (r *Repository) getLeaseWhere(q sqlx.Queryer, where string, args ...any) (*
 }
 
 // transitionLease 守卫式迁移: 只有来源状态在迁移表内且当前状态匹配时才更新(RowsAffected=1)。
-// 每次迁移都刷新 access_changed_at(网关撤销游标), 进入终态时释放端口占用。
+// 每次迁移都刷新 access_changed_at(网关撤销游标), 进入终态时释放端口占用;
+// 进入 suspended 时记 suspended_at=NOW(), 迁往其他状态时清空(migration 032)。
 // extraSet 为附加的 "col=?" 片段(逗号开头), extraArgs 为其参数。
 func (r *Repository) transitionLease(tx *sqlx.Tx, id int64, to string, extraSet string, extraArgs ...any) (bool, error) {
 	from := leaseFrom[to]
@@ -77,6 +78,11 @@ func (r *Repository) transitionLease(tx *sqlx.Tx, id int64, to string, extraSet 
 	set := `state=?, access_changed_at=NOW()`
 	if containsStr(leaseTerminal, to) {
 		set += `, port_claim=NULL`
+	}
+	if to == LeaseSuspended {
+		set += `, suspended_at=NOW()`
+	} else {
+		set += `, suspended_at=NULL` // 冻结时刻只对 suspended 有意义(误冻结停机起点), 离开即清空
 	}
 	q, args, err := sqlx.In(`UPDATE leases SET `+set+extraSet+` WHERE id=? AND state IN (?)`,
 		append(append([]any{to}, extraArgs...), id, from)...)

@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -29,7 +30,16 @@ const cleanupMaxAttempts = 10
 // LeaseHooks 供 main 注入 compute.SetLeaseHooks。RenewTx 留空: 托管续租属 T-088。
 func (s *Service) LeaseHooks() compute.LeaseHooks {
 	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx,
-		Feasible: s.leaseFeasible}
+		Feasible: s.leaseFeasible, FreezeTx: s.freezeLeaseTx, UnfreezeTx: s.unfreezeLeaseTx, WrongFreeze: s.wrongFreeze}
+}
+
+// wrongFreeze 误冻结停机交给停机认定(T-105); 未注入时只记日志, 不自行开/关 lease_outages。
+func (s *Service) wrongFreeze(leaseID int64, frozenAt, unfrozenAt time.Time) {
+	if s.outage != nil {
+		s.outage.WrongFreeze(context.Background(), leaseID, frozenAt, unfrozenAt)
+		return
+	}
+	slog.Warn("误冻结停机(停机认定 T-105 未接入, 仅记录)", "lease_id", leaseID, "frozen_at", frozenAt, "unfrozen_at", unfrozenAt)
 }
 
 // leaseFeasible 只读可行性(GET /products/:id/availability): 与 reserveSlotsTx 相同的候选规则

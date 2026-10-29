@@ -34,6 +34,24 @@ type LeaseHooks struct {
 	// Feasible 只读可行性(GET /products/:id/availability): 是否存在一个节点能按 docs/26 §26.5.2 的候选规则
 	// 容纳 cards 张同机空闲卡。不加锁、不写库; 结论是快照, 成交以 ReserveTx 为准。
 	Feasible func(product *Product, cards int) (bool, error)
+	// FreezeTx 订单冻结(docs/25 §25.7.3): 在租租约 active/parked → suspended(记 suspended_at)并入队 kill_sessions;
+	// 尚未开通的租约不动(开通流水线发现订单 frozen 即放弃, 解冻时重新入队)。已 suspended 幂等。
+	FreezeTx func(tx *sqlx.Tx, order *Order) error
+	// UnfreezeTx 解冻: 按租约实况决定订单应回到的状态并完成租约侧动作(见 ManagedUnfreeze), 订单状态由 compute 改。
+	UnfreezeTx func(tx *sqlx.Tx, order *Order) (*ManagedUnfreeze, error)
+	// WrongFreeze 解冻提交后、运营认定为误冻结时调用: [frozenAt, unfrozenAt) 计入平台责任停机(T-105 接入点)。
+	WrongFreeze func(leaseID int64, frozenAt, unfrozenAt time.Time)
+}
+
+// ManagedUnfreeze 解冻的租约侧结论。
+//
+//	OrderStatus  pending_payment(租约 reserved, 未付款) / paid(未开通, 已重新入队开通) /
+//	             active(租约恢复 active) / completed(冻结期间租期已到, 订单完结、租约进宽限)
+//	SuspendedAt  租约冻结时刻(误冻结停机起点); 冻结时尚未在租则为 nil
+type ManagedUnfreeze struct {
+	OrderStatus string
+	LeaseID     int64
+	SuspendedAt *time.Time
 }
 
 // SetLeaseHooks 注入租约钩子(fleet.enabled=true 时由 main 调用)。

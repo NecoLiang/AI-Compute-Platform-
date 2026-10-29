@@ -1358,7 +1358,11 @@ func (s *Service) CancelOrder(orderNo string) error {
 // FreezeOrder 冻结订单(风控/违规)。冻结意味着买家不应再访问算力,
 // 因此必须同步吊销访问凭证 —— 与 C-06「订单到期/退款/冻结 → 凭证自动失效」一致。
 func (s *Service) FreezeOrder(orderNo string) error {
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return err
 	}
@@ -1395,6 +1399,14 @@ func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) (string, error) {
 	}
 	if renewal == nil {
 		if err := s.cancelPendingRenewalsTx(tx, order.ID); err != nil {
+			return "", err
+		}
+	}
+	if order.FulfillmentMode == FulfillmentManaged && order.Status != "frozen" {
+		// 托管: 租约 suspended + 断开会话(T-088)。fleet 未接入时订单冻结与凭证吊销照常生效, 只记告警。
+		if s.leaseHooks.FreezeTx == nil {
+			slog.Warn("托管订单冻结: 租约钩子未接入, 未暂停租约", "order_no", orderNo)
+		} else if err := s.leaseHooks.FreezeTx(tx, order); err != nil {
 			return "", err
 		}
 	}
