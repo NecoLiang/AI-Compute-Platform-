@@ -84,6 +84,7 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.PATCH("/admin/products/:id/offline", h.OfflineProduct)
 	r.GET("/admin/orders", h.AdminListOrders)
 	r.PATCH("/admin/orders/:id/status", h.AdminUpdateOrderStatus)
+	r.POST("/admin/orders/:id/unfreeze", h.AdminUnfreezeOrder)
 	r.POST("/admin/resource-syncs/active", h.ActiveResourceSync)
 }
 
@@ -813,6 +814,44 @@ func (h *Handler) AdminUpdateOrderStatus(c *gin.Context) {
 		return
 	}
 	response.Success(c, nil)
+}
+
+// AdminUnfreezeOrder POST /admin/orders/:id/unfreeze {"wrong_freeze":bool}(托管订单, T-088)。
+func (h *Handler) AdminUnfreezeOrder(c *gin.Context) {
+	var req struct {
+		WrongFreeze bool `json:"wrong_freeze"`
+	}
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.Error(c, errcode.ParamInvalid, err.Error())
+			return
+		}
+	}
+	idOrNo := c.Param("id")
+	var order *Order
+	var err error
+	if id, parseErr := strconv.ParseInt(idOrNo, 10, 64); parseErr == nil && id > 0 {
+		order, err = h.svc.GetOrderByID(id)
+	} else if validOrderNo(idOrNo) {
+		order, err = h.svc.GetOrder(idOrNo)
+	} else {
+		response.Error(c, errcode.ParamInvalid, "订单编号无效")
+		return
+	}
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	if order == nil {
+		response.Error(c, errcode.NotFound, "order not found")
+		return
+	}
+	out, err := h.svc.AdminUnfreezeOrder(c.GetInt64("user_id"), order.OrderNo, req.WrongFreeze, c.ClientIP())
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, out)
 }
 
 func productToJSON(p *Product) gin.H {
