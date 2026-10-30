@@ -95,11 +95,11 @@
 - `GET /orders?status&order_no&page&page_size`、`GET /orders/:orderNo`
 - 状态枚举：`pending_payment|paid|provisioning|active|completed|cancelled|refunding|refunded|frozen`
 - 详情响应含 `actions {can_confirm, can_renew, can_refund, can_view_credential}` —— **按钮显隐直接用这组字段，不要前端自行推断**
-- `POST /orders/:id/confirm`（签收）；`POST /orders/:id/renew` 暂未开放，返回 40900、`can_renew=false`；`POST /orders/:id/refund` ⬜（申请接口存在，真实资金退款仍依赖支付渠道）。
+- `POST /orders/:id/confirm`（签收）；续租 `GET /orders/:id/renewal-quote` + `POST /orders/:id/renew`（仅 `actions.can_renew=true` 时展示；有待支付续租单时 `can_renew=false`，用 `pending_renewal_order_no` 恢复支付；包夜订单返回 50000，契约见 [compute-api.md](compute-api.md#托管订单续租s2-t-088)）；`POST /orders/:id/refund` ⬜（申请接口存在，真实资金退款仍依赖支付渠道）。
 - 凭证：`GET /orders/:id/access-credential`（脱敏）、`POST .../reveal`（明文，二次确认后调用）
 - 🆕 订单详情可加「存证时间线」：复用 `/blockchain/verify?type=order|delivery&id=<orderNo>`
 - 支付：`POST /payment/pay` → 响应含 `pay_url`；`GET /payment/status/:order_no` ⬜（轮询支付结果，待接）
-- 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
+- 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。（S2 T-087/T-088）`lease_state=grace` 时提示「租期已结束，宽限期至 `grace_until`，可续租恢复（restart），逾期清除数据」；`suspended`（订单 `frozen`）时提示「订单已冻结，暂停登录，容器与数据保留，请联系客服」；`purging/purged` 时提示数据已清除。续租按钮同样只看 `actions.can_renew`，`mode`(extend/restart) 由报价接口返回。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
 
 ### `/console/buyer/invoices` 发票 ✅
 - `GET/PUT /invoices/title`、`GET /invoices/billable-orders`、`POST /invoices/apply`、`GET /invoices?status`、`GET /invoices/:invoice_no/download`(PDF 二进制)
@@ -171,13 +171,13 @@
 |---|---|---|
 | `/admin/reviews` | `GET /admin/audits/qualifications[?status=all]`、`POST .../:id/approve\|reject`、`GET .../:id/document`(文件)、`POST /admin/audits/products/:id/approve\|reject` | ✅ |
 | `/admin/products` | `GET /admin/products?status`、`PATCH /admin/products/:id/offline` | ✅ |
-| `/admin/orders` | `GET /admin/orders`（2026-09-22 起下发 `buyer_name`(企业名/手机号)、`product_gpu_model`、`product_type`，列表用可读名称替代 UID/#id）、`PATCH /admin/orders/:id/status`（改 frozen 会自动吊销凭证+违规上链存证） | ✅ |
+| `/admin/orders` | `GET /admin/orders`（2026-09-22 起下发 `buyer_name`(企业名/手机号)、`product_gpu_model`、`product_type`，列表用可读名称替代 UID/#id）、`PATCH /admin/orders/:id/status`（改 frozen 会自动吊销凭证+违规上链存证；托管订单同时租约 suspended + 断开会话）；托管 frozen 订单加「解冻」按钮 `POST /admin/orders/:id/unfreeze`，可选勾选「误冻结」`{wrong_freeze:true}`（仅托管订单，契约见 [compute-api.md](compute-api.md#托管订单冻结与解冻s2-t-088)） | ✅ |
 | `/admin/finance` | `GET /admin/payment/list`、`GET /admin/invoices?status`、`POST /admin/invoices/:id/issue`(FormData: pdf+tax_invoice_no)、`POST /admin/invoices/:id/reject`；`GET /admin/payment/reconcile` ⬜ | ✅ |
 | `/admin/tickets` | `GET /admin/tickets`、`POST /admin/tickets/:id/claim\|resolve\|close`；`GET /admin/tickets/:id` + `POST .../messages` ⬜（详情/回复待接） | ✅ |
 | `/admin/crm` | `GET /admin/leads`、`POST /admin/leads/:id/assign` | ✅ |
-| `/admin/risk` | `GET /admin/risk/alerts`、`POST .../:id/freeze\|dismiss` | ✅ |
+| `/admin/risk` | `GET /admin/risk/alerts`、`POST .../:id/freeze\|dismiss`；托管挖矿扫描（T-088）新增 `alert_type`：`mining_freeze`（已自动冻结，`status=processing`、`level=high`）、`mining_suspect`（仅告警，`status=pending`、`level=medium`）；`rule_detail` 是 JSON 字符串 `{lease_no,order_no,node_id,hits[]}`，前端解析展示。注意：对已被解冻的订单再点 freeze 会重新冻结，结案前先确认订单状态（见 [admin-api.md](admin-api.md)） | ✅ |
 | `/admin/users` | `GET /admin/users`、`PATCH /admin/users/:id/freeze` | ✅ |
-| `/admin/audit` | `GET /admin/audit-logs` | ✅ |
+| `/admin/audit` | `GET /admin/audit-logs`（T-088 新增 action：`mining_auto_freeze`、`unfreeze_order`、`lease.purged`、`lease.cleanup`；系统动作 `operator_id` 显示为 0） | ✅ |
 | `/admin/settings` | `GET/PUT /admin/config`；`GET/POST/PUT /admin/gpu-catalog` ⬜（型号库维护界面待接，字段见 gpu-catalog-api.md） | ✅ |
 | `/admin/cms` | `GET/POST /admin/cms/notices` | ✅ |
 | 节点总览（建议并入 `/admin/settings` 或新页）🆕 | `GET /admin/nodes?status`、`GET /admin/schedule-advice?order_no=`、`POST /admin/blockchain/requeue-failed`(存证死信补推) | 🆕 |
