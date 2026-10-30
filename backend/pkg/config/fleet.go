@@ -35,6 +35,20 @@ type FleetConfig struct {
 	Grace     FleetGrace
 	Outage    FleetOutage
 	Probe     FleetProbe
+	Mining    FleetMining
+}
+
+// FleetMining 挖矿特征扫描(docs/25 §25.7.3, Q-42)。平台维护的特征清单; 均有内置默认值, 配置即整体替换。
+//
+//	ProcessNames 矿工进程名(docker top 的 comm, 不区分大小写精确匹配) → 只告警
+//	PoolPorts    矿池常用端口(容器对外 TCP 连接的远端端口) → 只告警
+//	PoolAddrs    矿池地址清单(IP 或 CIDR; /proc/net/tcp 只有 IP, 不支持域名) → 外连命中即自动冻结
+//
+// stratum 参数(进程命令行含 stratum+tcp:// 等)命中同样自动冻结, 不需要配置。
+type FleetMining struct {
+	ProcessNames []string
+	PoolPorts    []int
+	PoolAddrs    []string
 }
 
 type BaseImage struct {
@@ -100,6 +114,11 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 			YeepayPartialRefundConfirmed: v.GetBool("fleet.outage.yeepay_partial_refund_confirmed"),
 		},
 		Probe: FleetProbe{MinPerfRatio: v.GetFloat64("fleet.probe.min_perf_ratio")},
+		Mining: FleetMining{
+			ProcessNames: cleanList(v.GetStringSlice("fleet.mining.process_names")),
+			PoolPorts:    v.GetIntSlice("fleet.mining.pool_ports"),
+			PoolAddrs:    cleanList(v.GetStringSlice("fleet.mining.pool_addrs")),
+		},
 	}
 	if err := v.UnmarshalKey("fleet.base_images", &f.BaseImages); err != nil {
 		return fmt.Errorf("fleet.base_images 格式错误(应为 [{name, ref}] 列表): %w", err)
@@ -162,6 +181,24 @@ func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
 	if gw.PublicPort <= 0 {
 		gw.PublicPort = 2222
 	}
+	if len(f.Mining.ProcessNames) == 0 {
+		f.Mining.ProcessNames = DefaultMinerProcessNames()
+	}
+	if len(f.Mining.PoolPorts) == 0 {
+		f.Mining.PoolPorts = DefaultMiningPoolPorts()
+	}
+}
+
+// DefaultMinerProcessNames 常见 GPU/CPU 矿工程序名(docker top 的 comm 最长 15 字符, 超长名按前 15 字符写)。
+func DefaultMinerProcessNames() []string {
+	return []string{"xmrig", "xmr-stak", "t-rex", "lolminer", "nbminer", "gminer", "miner", "phoenixminer",
+		"ethminer", "teamredminer", "bzminer", "miniz", "nanominer", "srbminer-multi", "ccminer", "cpuminer",
+		"cgminer", "bfgminer", "rigel", "onezerominer", "wildrig-multi", "kawpowminer", "z-enemy"}
+}
+
+// DefaultMiningPoolPorts 矿池常用 stratum 端口(只告警, 不据此冻结)。
+func DefaultMiningPoolPorts() []int {
+	return []int{3333, 3334, 3335, 4444, 5555, 5566, 6666, 7777, 8008, 8888, 9999, 14433, 14444, 45560, 45700}
 }
 
 // validateFleet 一次性列出全部缺失/非法项, 避免运维改一项重启一次。
@@ -179,6 +216,16 @@ func validateFleet(cfg *Config) error {
 	for _, c := range f.DenyCIDRs {
 		if _, err := netguard.ParseCIDROrIP(c); err != nil {
 			invalid = append(invalid, "fleet.deny_cidrs 含非法 CIDR/IP: "+c)
+		}
+	}
+	for _, c := range f.Mining.PoolAddrs {
+		if _, err := netguard.ParseCIDROrIP(c); err != nil {
+			invalid = append(invalid, "fleet.mining.pool_addrs 含非法 CIDR/IP(不支持域名): "+c)
+		}
+	}
+	for _, p := range f.Mining.PoolPorts {
+		if p <= 0 || p > 65535 {
+			invalid = append(invalid, fmt.Sprintf("fleet.mining.pool_ports 含非法端口: %d", p))
 		}
 	}
 	if len(f.BaseImages) == 0 {
