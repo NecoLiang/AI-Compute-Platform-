@@ -321,7 +321,7 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
 {"parent_order_no":"ORD20260908000000abcdef","mode":"extend","quantity":2,"duration":2,"pricing_mode":"hourly","min_duration":1,"max_duration":87600,"unit_price":3000,"total_amount":12000,"platform_fee":780,"fee_rate":650,"lease_end_at":"2026-09-08T12:00:00+08:00","renewed_until":"2026-09-08T14:00:00+08:00"}
 ```
 
-金额均为分，按**原订单的计费方式快照**（存量订单由 028 回填；快照缺失返回 `50000`，不回退商品当前展示方式）取该方式当前的价格行与平台费率报价，原订单金额不变；`min_duration/max_duration` 也取该方式。供给方已停用该计费方式时返回 `40900`「该计费方式已停用，请重新下单」，不会换算成其他方式；此时详情 `can_renew=false`。托管商品或包夜订单在托管履约模块接入前返回 `50000`。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
+金额均为分，按**原订单的计费方式快照**（存量订单由 028 回填；快照缺失返回 `50000`，不回退商品当前展示方式）取该方式当前的价格行与平台费率报价，原订单金额不变；`min_duration/max_duration` 也取该方式。供给方已停用该计费方式时返回 `40900`「该计费方式已停用，请重新下单」，不会换算成其他方式；此时详情 `can_renew=false`。托管订单的 extend/restart 口径见下文「托管订单续租（S2 T-088）」；包夜订单返回 `50000`。`extend` 要求当前租期与凭证有效，`renewed_until` 从原结束时间增加周期；商品售罄不影响已有资源续期。`restart` 表示租期已结束，按真实可用库存重新预留，`renewed_until=null`，重新交付和签收后才确定新租期。日/周/月按后端日历计算。
 
 ## POST /orders/:id/renew · 创建续租订单 ✅ buyer
 
@@ -487,4 +487,72 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 - 释放只发生一次（T-093）：关单定时任务、买家取消、运营关单（`PATCH /admin/orders/:id/status` → `cancelled`）、退款完成都先锁订单行再做带前置状态的守卫 UPDATE，只有真正迁移了状态的那一路释放卡槽；其余返回 40900（订单已不在可迁移状态）或空操作，库存按卡槽真实空闲重算，不做加减。运营关单改为同样的守卫迁移（原为无条件写状态）。托管订单误入人工 `stock_reserved` 归还路径返回 50000，不会改 `products.stock`。
 - **库存上报**（T-093）：托管商品的库存由平台按卡槽派生，节点 agent / 供给方对托管商品的资源同步（被动上报与主动同步）返回 40001「托管商品库存由平台按卡槽自动计算」，不写库存与快照。
 
-**续租**：托管订单 `GET /orders/:id/renewal-quote` 与 `POST /orders/:id/renew` 返回 50000「托管订单续租尚未接入(docs/25 §25.7.2, T-088), 暂不可续租」，不走人工续租路径。
+### 托管订单续租（S2 T-088）✅
+
+托管订单沿用 `GET /orders/:id/renewal-quote` 与 `POST /orders/:id/renew`，**请求、响应结构与人工订单完全相同**（见上文两节；报价按原订单计费方式快照）。不扣 `products.stock`，余量按卡槽判定；租约侧动作与订单在同一事务内完成。`mode` 由原订单 `lease_end_at` 是否已过决定：
+
+| `mode` | 条件 | 报价 / 下单校验 | 支付落账 |
+|---|---|---|---|
+| `extend` | 原订单 `active`、`lease_end_at` 未到，且租约 `active/parked`、`access_until` 未到 | 租约不满足 → 40900 `ErrRenewalConflict` | 原订单 `lease_end_at` 与交付 `access_expires_at` 改为 `renewed_until`；租约 `access_until=renewed_until`（同事务刷新撤销游标，网关按新时刻放行）。凭证、会话、容器不变 |
+| `restart` | 原订单 `lease_end_at` 已过（正常为 `completed`；到期扫描尚未处理的 `active` 订单因租约仍在租返回 40900） | 租约 `grace`：只能回**原节点**（数据卷在原节点），原节点须仍可调度且能凑齐卡数（本租约仍持有的卡 → 容器原卡 → 同机其他空闲卡），下单时同事务预留；租约 `purged`：按商品全部节点重新分配（同新下单规则），下单时预留；租约 `purging`：40900 | 原订单 → `paid`（`lease_start_at/lease_end_at` 清空，旧凭证吊销）；租约 → `pending` 并自动入队开通：宽限期内为原节点恢复（原卡齐全直接 `docker start`，换卡则提交镜像后重建，数据卷沿用），宽限期后为全新环境。开通自检通过后原订单 → `active`，租期按**本次续租子订单**的周期与快照从自检通过时刻重新起算，登录名（租约号）不变 |
+
+`renewed_until`：`extend` 为原结束时间加续租周期；`restart` 为 `null`。宽限期内 `restart` 报价/下单成功不代表保留期延长：未支付的续租单在原 `grace_until` 之后会暂缓清除，直到续租单超时关单。
+
+**错误**（在通用续租错误之外）
+| 场景 | code | message |
+|---|---|---|
+| extend：租约已不在租或 `access_until` 已过（含冻结中） | 40900 | 续租条件已变化或已有待支付续租订单，请刷新订单 |
+| restart：宽限期内原节点不可调度或凑不齐卡数 | 40900 | 原节点暂无足够空闲卡或暂不可调度, 宽限期内只能在原节点恢复(数据卷在原节点); 可稍后再试或重新下单 |
+| restart：宽限期后没有单台节点能凑齐卡数 | 40900 | 所选卡数暂无整机余量 |
+| restart：租约清除中（`purging`） | 40900 | 租约数据清除中, 请稍后再续租(清除完成后按全新环境开通) |
+| 包夜（`nightly`）订单 | 50000 | 包夜计费的下单与续租尚未接入(docs/26 §26.6, T-094/T-095), 暂不可下单或续租 |
+| 租约续租钩子未接入（服务端装配缺失） | 50000 | 托管订单续租尚未接入(docs/25 §25.7.2, T-088), 暂不可续租 |
+
+**支付与失败善后**
+- 收款时再次校验（extend：租约仍在租未到期；restart：预留卡槽仍完整）；不满足时不落账，款项按「订单已关闭或已失效, 款项原路退回」排队原路退款。
+- 未支付的 restart 续租单关闭/取消：退回下单时预留的卡槽（宽限期内预留的卡回到 `draining` 并确保容器停止，停止后释放；宽限期后直接释放）。
+- 续租退款（续租尚未开始使用）：extend 把租约 `access_until` 回退为原 `lease_end_at`；restart 开通完成前退款，宽限期内恢复的回到 `grace`（数据保留到原 `grace_until`），宽限期后的全新开通直接清除。续租已开始使用后退款 40900「租约 … 已…, 续租已开始使用, 请联系平台处理退款」。
+- restart 重新开通彻底失败：续租子订单 → `cancelled` 并自动全额原路退款，原订单回到 `completed`（恢复续租前租期）；宽限期内恢复的租约回到 `grace`，宽限期后的全新开通清除租约。买家收到「续租重新开通失败, 续租款将全额退回」。
+
+### 托管订单冻结与解冻（S2 T-088）✅
+
+**冻结**沿用 `PATCH /admin/orders/:id/status`（`status:"frozen"`）与 `POST /admin/risk/alerts/:id/freeze`（admin-api.md），挖矿特征扫描命中 stratum / 矿池地址时自动走同一路径。托管订单在冻结事务内额外：租约 `active/parked → suspended`、入队断开现有 SSH 会话、网关拒绝新登录；**容器不停、GPU 不释放**（保留核查现场）。冻结期间租期到期：停容器、释放 GPU、保留容器与数据卷，租约保持 `suspended`，不进宽限计时。详见 managed-rental-api.md「租约生命周期 · 冻结」。人工订单的冻结口径不变（冻结后只能关闭/退款）。
+
+#### POST /admin/orders/:id/unfreeze · 运营解冻托管订单 ✅ operator/admin
+
+`:id` 为订单 id 或订单号。请求体可省略；省略等价于 `{"wrong_freeze":false}`。
+
+```json
+{"wrong_freeze":true}
+```
+
+```json
+{"code":0,"message":"success","data":{"order_no":"ORD20261101103000123abc","status":"active","wrong_freeze":true},"request_id":"..."}
+```
+
+订单回到哪个状态由租约实况决定（不是简单恢复冻结前状态）：
+
+| 解冻时租约状态 | 订单 → `status` | 其他效果 |
+|---|---|---|
+| `reserved` | `pending_payment` | 按原支付期限继续付款 |
+| `pending` / `provisioning` | `paid` | 租约回到 `pending` 并重新入队开通（已有待领取的开通任务时不重复） |
+| `active/parked/suspended` 且 `access_until` 未到 | `active` | 租约 `suspended → active`；冻结时吊销的访问凭证恢复（凭证值不变，有效期仍为原值） |
+| `active/parked/suspended` 且 `access_until` 已过 | `completed` | 租约 → `grace`，**宽限期自解冻时刻起算**，可 restart 续租 |
+| `grace` / `purging` / `purged` | `completed` | 租约侧收尾照常 |
+
+- 任何分支都刷新撤销游标（网关丢弃冻结期间的缓存结果）；写审计 `action=unfreeze_order`、`target_type=order`、`before_value="frozen"`、`after_value={"status":"<目标状态>","wrong_freeze":<bool>}`；买家站内信「订单已解冻」。
+- `wrong_freeze=true`：核查结论为误冻结。若冻结时租约在租（有 `suspended_at`），提交后把 `[suspended_at, 解冻时刻)` 交给停机认定计入平台责任停机（T-105 接入点 `LeaseHooks.WrongFreeze`；未接入时只记服务日志，不影响解冻结果）。
+
+**错误**
+| 场景 | code | message |
+|---|---|---|
+| `:id` 既不是正整数也不是合法订单号 / 请求体不是合法 JSON | 40001 | 订单编号无效 / 绑定错误 |
+| 续租子订单 | 40001 | 续租单不支持单独解冻, 请处理其原订单 |
+| 人工订单 | 40001 | 仅托管订单支持解冻; 人工订单冻结后请关闭或退款 |
+| 订单不存在 | 40400 | order not found / 订单不存在 |
+| 订单不是 `frozen` | 40900 | 订单当前状态为 X, 不是冻结状态 |
+| 并发下订单状态已变化 | 40900 | 订单状态已变化, 请刷新后重试 |
+| 开通任务仍在执行 | 40900 | 该订单的开通任务仍在执行(将因订单冻结自行放弃), 请稍后再解冻 |
+| 租约 `failed/cancelled` | 40900 | 租约 X 已failed, 订单无法恢复, 请关闭订单或退款 |
+| 无运营身份 | 40300 | 无权操作订单 |
+| 托管租约钩子未接入（`fleet.enabled=false` 时即如此） | 50000 | 托管履约模块未启用: 租约开通(docs/25 S2)尚未接入, 托管商品暂不可下单 |
