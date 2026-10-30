@@ -101,6 +101,11 @@ func (s *Service) unfreezeLeaseTx(tx *sqlx.Tx, o *compute.Order) (*compute.Manag
 	default:
 		return nil, errcode.Newf(errcode.Conflict, "租约 %s 已%s, 订单无法恢复, 请关闭订单或退款", l.LeaseNo, l.State)
 	}
+	// 解冻恢复订单凭证(compute 同事务): 租约状态未迁移的分支(reserved/pending/active/parked/grace…)也要刷新撤销游标,
+	// 让网关丢弃冻结期间缓存的拒绝结果。状态迁移本身已刷新, 这里重复写同一时刻无副作用。
+	if err := s.repo.touchAccess(tx, l.ID); err != nil {
+		return nil, err
+	}
 	slog.Info("订单解冻(租约侧)", "lease_no", l.LeaseNo, "lease_state", l.State, "order_no", o.OrderNo, "order_to", plan.OrderStatus)
 	return plan, nil
 }

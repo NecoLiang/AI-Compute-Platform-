@@ -98,9 +98,12 @@ func TestFreezeBeforeProvisionThenUnfreezeRequeues(t *testing.T) {
 	require.NotNil(t, done)
 	require.Equal(t, TaskFailed, done.State)
 
+	e.db.MustExec(`UPDATE leases SET access_changed_at=NOW() - INTERVAL 1 HOUR WHERE id=?`, e.lease.ID)
 	out, err := e.comp.AdminUnfreezeOrder(10, e.order.OrderNo, false, "127.0.0.1")
 	require.NoError(t, err)
 	assert.Equal(t, "paid", out.Status)
+	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM leases WHERE id=? AND state='pending'
+		AND access_changed_at > NOW() - INTERVAL 1 MINUTE`, e.lease.ID), "租约状态未变也刷新撤销游标")
 	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE lease_id=? AND kind='provision' AND state='pending'`, e.lease.ID),
 		"解冻重新入队开通")
 

@@ -204,7 +204,9 @@ func (s *Service) AddBuyerKey(userID int64, name, publicKey, ip string) (*BuyerK
 }
 
 // DeleteBuyerKey 删除(吊销)公钥, 同一事务内刷新买家名下在租租约的撤销游标: 网关在下一次轮询(≤ 5s + 2s 滞后)
-// 清掉按该公钥缓存的放行。已建立的会话不受影响(网关插件无法切断已建立的管道, docs/25 §25.6.3 S2 口径)。
+// 清掉按该公钥缓存的放行。已建立的会话不受影响: 删钥只拦新登录, 不入队 kill_sessions(网关插件也无法切断已建立的管道,
+// docs/25 §25.6.3 S2 口径)。需立即断开现有会话只能由运营冻结订单; "删钥是否同时断开现有会话"
+// 为待业务负责人确认的口径(docs/api/managed-rental-api.md), 确认前保持不断开。
 func (s *Service) DeleteBuyerKey(userID, keyID int64, ip string) error {
 	tx, err := s.repo.db.Beginx()
 	if err != nil {

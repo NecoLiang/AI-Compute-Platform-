@@ -137,6 +137,9 @@ func TestBuyerKeysLifecycle(t *testing.T) {
 	require.NoError(t, e.s.DeleteBuyerKey(buyer, k.ID, "198.51.100.1"))
 	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM leases WHERE id=? AND access_changed_at > NOW() - INTERVAL 1 MINUTE`, e.lease.ID))
 	assert.Equal(t, errcode.NotFound, codeOf(e.s.DeleteBuyerKey(buyer, k.ID, "")), "already deleted")
+	// 删钥只拦新登录, 不断开已建立的会话(不入队 kill_sessions, 租约仍 active; 待业务负责人确认的默认口径)。
+	assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE lease_id=? AND kind='kill_sessions'`, e.lease.ID))
+	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM leases WHERE id=? AND state='active'`, e.lease.ID))
 	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM audit_logs WHERE action='buyer_ssh_key.revoke' AND target_id=?`, k.ID))
 	assert.Equal(t, maxBuyerKeys+1, countRows(t, e.db, `SELECT COUNT(*) FROM audit_logs WHERE action='buyer_ssh_key.add'`))
 	list, err = e.s.ListBuyerKeys(buyer)
