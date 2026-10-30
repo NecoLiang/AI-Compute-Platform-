@@ -22,6 +22,7 @@ import (
 //	                suspended 到期 → 卡槽 draining + stop(租约保持 suspended, 不进宽限计时);
 //	                grace 期满 → purging + purge(有待支付 restart 续租时暂缓)
 //	到期提醒   1min 到期前 24h/2h/30min 站内通知 + 容器内 wall; 进入宽限的站内通知(Redis 去重键 lease_no+档位)
+//	挖矿扫描   fleet.mining.interval(默认 10min) 见 mining_scan.go
 //	对账       5min 收尾任务补入队; 在租容器与节点实况对账, 节点重启后 防火墙 → docker start → 主机密钥 → 网关自检
 //
 // 多实例部署时以 Redis SET NX 做周期互斥(拿不到锁本轮跳过); 所有状态写入都是守卫式事务, 互斥只为省掉重复的节点操作。
@@ -86,8 +87,9 @@ func (s *Service) RunLeaseJobs(ctx context.Context) {
 		slog.Warn("fleet 未注入 Redis: 到期提醒(去重依赖 Redis)不执行, 周期任务不做多实例互斥")
 	}
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); s.jobLoop(ctx, "remind", remindInterval, s.RemindRound) }()
+	go func() { defer wg.Done(); s.jobLoop(ctx, "mining", s.miningInterval(), s.MiningScanRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "reconcile", reconcileInterval, s.ReconcileRound) }()
 	s.jobLoop(ctx, "expiry", expirySweepInterval, s.ExpiryRound)
 	wg.Wait()
@@ -482,34 +484,7 @@ func (s *Service) reconcileContainers(ctx context.Context) {
 		slog.Error("对账: 查询在租租约失败", "error", err)
 		return
 	}
-	byNode := map[int64][]Lease{}
-	var order []int64
-	for _, l := range leases {
-		if _, ok := byNode[l.NodeID]; !ok {
-			order = append(order, l.NodeID)
-		}
-		byNode[l.NodeID] = append(byNode[l.NodeID], l)
-	}
-	limit := s.cfg.ProbeConcurrency
-	if limit <= 0 {
-		limit = 32
-	}
-	sem := make(chan struct{}, limit)
-	var wg sync.WaitGroup
-	for _, nodeID := range order {
-		if ctx.Err() != nil {
-			break
-		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(nodeID int64, ls []Lease) {
-			defer func() { <-sem; wg.Done() }()
-			nctx, cancel := context.WithTimeout(ctx, reconcileNodeBudget)
-			defer cancel()
-			s.reconcileNode(nctx, nodeID, ls)
-		}(nodeID, byNode[nodeID])
-	}
-	wg.Wait()
+	s.forEachLeaseNode(ctx, leases, reconcileNodeBudget, s.reconcileNode)
 }
 
 func (s *Service) reconcileNode(ctx context.Context, nodeID int64, leases []Lease) {

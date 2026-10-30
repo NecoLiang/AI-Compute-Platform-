@@ -45,7 +45,9 @@ type FleetConfig struct {
 //	PoolAddrs    矿池地址清单(IP 或 CIDR; /proc/net/tcp 只有 IP, 不支持域名) → 外连命中即自动冻结
 //
 // stratum 参数(进程命令行含 stratum+tcp:// 等)命中同样自动冻结, 不需要配置。
+// Interval 扫描周期(fleet.mining.interval, 默认 10m; docs/25 原文 5min, 见 S2 实现口径)。
 type FleetMining struct {
+	Interval     time.Duration
 	ProcessNames []string
 	PoolPorts    []int
 	PoolAddrs    []string
@@ -115,6 +117,7 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 		},
 		Probe: FleetProbe{MinPerfRatio: v.GetFloat64("fleet.probe.min_perf_ratio")},
 		Mining: FleetMining{
+			Interval:     v.GetDuration("fleet.mining.interval"),
 			ProcessNames: cleanList(v.GetStringSlice("fleet.mining.process_names")),
 			PoolPorts:    v.GetIntSlice("fleet.mining.pool_ports"),
 			PoolAddrs:    cleanList(v.GetStringSlice("fleet.mining.pool_addrs")),
@@ -180,6 +183,9 @@ func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
 	}
 	if gw.PublicPort <= 0 {
 		gw.PublicPort = 2222
+	}
+	if f.Mining.Interval <= 0 {
+		f.Mining.Interval = 10 * time.Minute
 	}
 	if len(f.Mining.ProcessNames) == 0 {
 		f.Mining.ProcessNames = DefaultMinerProcessNames()

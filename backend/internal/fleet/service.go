@@ -38,6 +38,9 @@ type ProductStore interface {
 	// 到期(T-087): 托管订单 active → completed(守卫式, 同事务经 ReleaseTx 转 grace)。
 	CompleteExpiredManagedOrder(orderNo string) (bool, error)
 	HasPendingRestartRenewalTx(tx *sqlx.Tx, parentID int64) (bool, error)
+	// 挖矿特征自动冻结(T-088, Q-42): 走与运营冻结相同的订单冻结路径(租约 suspended + 断开会话 + 吊销凭证)。
+	FreezeOrderTx(tx *sqlx.Tx, orderNo string) (string, error)
+	AttestOrderFreeze(orderNo string)
 }
 
 // HealthRefresher scheduler 的商品健康度聚合(*scheduler.Service 实现)。
