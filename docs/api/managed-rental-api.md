@@ -4,7 +4,7 @@
 **设计**：`docs/25`（§25.4 节点接入、§25.8.1 节点状态机、§25.10 API 摘要）。本文件为正式接口契约。
 
 > **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）；S2（T-086）买家公钥、连接信息、会话记录（「买家连接」）与运营租约/会话检索（「运营接口」）。
-> 托管订单的下单、开通、取消退款口径见 [compute-api.md](compute-api.md)「托管订单（S2）」与 [payment-api.md](payment-api.md)「托管订单（S2）」。续租、冻结、到期清理（T-087/T-088）尚未接入。
+> 托管订单的下单、开通、取消退款口径见 [compute-api.md](compute-api.md)「托管订单（S2）」与 [payment-api.md](payment-api.md)「托管订单（S2）」。续租（extend/restart）、冻结/解冻的订单侧接口见 compute-api.md「托管订单续租」「托管订单冻结与解冻」；租约侧的到期、宽限、清除回执、冻结效果与挖矿特征扫描见本文「租约生命周期（S2 T-087/T-088）」。
 
 **开关**：所有接口仅在 `fleet.enabled=true` 时注册。关闭时（默认）这些路径未注册（HTTP 404），`POST /supplier/nodes` 传 `mgmt_mode:"ssh"` 返回 40001「托管履约未启用(fleet.enabled=false)」，托管商品不可提交审核与下单（40001），人工模式行为不变。
 
@@ -201,7 +201,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 → `{"code":0,"message":"success","data":{"id":3,"deleted":true},"request_id":"..."}`
 - 软删除（`revoked_at`），同一事务内刷新本人 `active/parked/suspended/grace` 租约的 `access_changed_at`：网关在下一次撤销轮询（≤ 5s 轮询 + 2s 滞后）清掉按该公钥缓存的放行，之后用该公钥登录被拒。
-- **已建立的 SSH 会话不会被断开**（sshpiperd v1.6.1 插件无法切断已建立的管道，见 docs/25 §25.6.3 S2 实现口径）。
+- **已建立的 SSH 会话不会被断开**，只拦截之后的新登录：删除公钥不入队 `kill_sessions`，租约状态不变（sshpiperd v1.6.1 插件无法切断已建立的管道，见 docs/25 §25.6.3 S2 实现口径）。需要立即踢掉在线会话时，只能由运营冻结订单（租约 `suspended` + 节点侧 `kill_sessions`，见「租约生命周期 · 冻结」）。「删除公钥是否应同时断开该公钥的在线会话」**待业务方决策**，在此之前按上述口径执行。
 - 写审计 `buyer_ssh_key.revoke`。40001 `id` 非法；40400 不存在 / 非本人 / 已删除。
 
 ### GET /orders/:id/access · 托管订单连接信息 ✅
@@ -241,6 +241,109 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 - `key_name`：本人登记该指纹时的名称（公钥删除后仍显示，便于核对）；密码登录或指纹未在本人名下登记为 `null`。
 - `ended_at=null` 表示会话进行中（或网关尚未上报结束）。`bytes_up/bytes_down` 在 S2 恒为 0（sshpiperd v1.6.1 插件拿不到字节数）。系统自检会话不记录。
+
+---
+
+## 租约生命周期（S2 T-087/T-088）✅
+
+本节没有新增 HTTP 接口，描述后台周期任务的行为与对外可见的落点（订单状态、`GET /orders/:id/access` 的 `lease_state/access_until/grace_until`、站内通知、`GET /admin/leases`、`GET /admin/audit-logs`、`GET /admin/risk/alerts`）。所有周期任务随 `fleet.enabled=true` 启动；多实例部署以 Redis `SET NX` 互斥（拿不到锁本轮跳过），状态写入全部是守卫式事务。
+
+| 任务 | 周期 | 作用 |
+|---|---|---|
+| 到期扫描 | 30s | 在租到期 → grace；冻结中到期 → 停容器释放卡；宽限期满 → 清除 |
+| 到期提醒 | 1min | 到期前 24h / 2h / 30min 站内通知 + 容器内 `wall`；进入宽限的站内通知（需 Redis，未配置时不发提醒） |
+| 挖矿特征扫描 | `fleet.mining.interval`，默认 10min | 见下文「挖矿特征扫描」 |
+| 对账 | 5min | 收尾任务补入队；在租容器与节点实况对账，节点重启后恢复 |
+
+### 到期与宽限
+
+- `active/parked` 且 `access_until` 已过：
+  - 订单 `active` → 订单 `completed`（compute 守卫式流转），同事务租约 → `grace`，卡槽 → `draining`，入队 `stop`（停容器、释放 GPU，容器与数据卷保留）。
+  - 订单非 `active`（冻结/退款中）→ 订单状态不动，租约侧照常 → `grace`；订单已 `cancelled/refunded` 而租约仍在租 → 直接清除（宽限 0）。
+- 宽限时长按订单计费方式快照取档：时/日计费 `fleet.grace.short`（默认 24h）；周/月计费 `fleet.grace.long`（默认 72h）；夜间计费 `fleet.grace.nightly`（默认 24h）。宽限截止写入 `leases.grace_until`，`GET /orders/:id/access` 返回为 `grace_until`。
+- 宽限期内可 `restart` 续租（compute-api.md「托管订单续租」），只能在原节点恢复（数据卷在原节点）。
+- `grace_until` 已过 → 租约 `purging` + 入队 `purge`；父订单有**待支付的 restart 续租单**时暂缓，续租单超时关单后下一轮再清除。
+- **冻结中到期**（`suspended` 且 `access_until` 已过）：停容器、释放 GPU（卡槽 → `draining`），容器与数据卷保留作核查现场；租约保持 `suspended`，**不进宽限计时**。运营解冻时转 `grace`，宽限自解冻时刻起算；运营退款则直接清除。
+- 订单取消/退款 → 租约不进宽限：尚未建容器的（`reserved/pending`）直接作废（`cancelled`，卡槽释放），其余（`provisioning/active/parked/suspended/grace`）→ `purging` 并清除。
+
+**站内通知**（`type=system`，`link=/console/buyer/orders/<order_no>`）：「租期即将结束」（24h/2h/30min 三档；租期不足 24h 只发后两档，不足 2h 只发 30min 档，每档每个到期时刻只发一次）；「租期已结束」（进入宽限时，写明数据卷保留截止时间）；「算力环境已清除」（清除完成）。
+
+### 清除与清除回执
+
+清除是**逻辑删除**：删除容器（含可写层）、数据卷、租约网络与本地提交镜像（如有），**不做介质级擦除**（不覆写磁盘块，不保证底层存储上的数据不可恢复）。清除完成后租约 → `purged`，`purged_at` 写入，`commit_image` 置空，卡槽 `draining → free`，同事务重算派生库存。
+
+任一步骤失败（退出码非 0 或输出无法确认）整条 `purge` 任务失败并按任务重试，租约停留在 `purging`；不会在资源未确认删除时标记 `purged`。
+
+清除回执写入 `audit_logs`：`action="lease.purged"`、`target_type="lease"`、`target_id=<lease id>`、`operator_id=null`（系统）、`before_value=null`、`after_value` 为下列 JSON。换节点 / 开通失败后清理旧节点残留时 `action="lease.cleanup"`，结构相同但不迁移租约状态。运营经 `GET /admin/audit-logs?action=lease.purged` 查看。
+
+```json
+{"lease_no":"l-4g7bq4xc","order_id":1024,"node_id":7,
+ "container_id":"3f1c0e2a9b8d7c6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e",
+ "container":"omnis-l-4g7bq4xc","volume":"omnis-l-4g7bq4xc-data","network":"omnis-l-4g7bq4xc-net",
+ "commit_image":"omnis-commit/l-4g7bq4xc:1793181261","upstream_port":40003,
+ "port_rules":"容器端口映射(-p)随容器删除; 节点级 DOCKER-USER 租约端口段规则为节点共用, 保留",
+ "steps":[
+  {"step":"container","target":"omnis-l-4g7bq4xc","exit_code":0,"outcome":"removed","id":"3f1c0e2a9b8d7c6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e"},
+  {"step":"volume","target":"omnis-l-4g7bq4xc-data","exit_code":0,"outcome":"removed"},
+  {"step":"network","target":"omnis-l-4g7bq4xc-net","exit_code":0,"outcome":"absent"},
+  {"step":"commit_image","target":"omnis-commit/l-4g7bq4xc:1793181261","exit_code":0,"outcome":"removed"}],
+ "reason":"宽限期满",
+ "erasure":"逻辑删除: 删除容器可写层、数据卷、租约网络与本地提交镜像, 不做介质级擦除",
+ "executor":"system","finished_at":"2026-11-30T10:00:31+08:00"}
+```
+
+- `container_id`、`commit_image`、`upstream_port`、`reason` 无值时省略；`steps[].id` 只在删除了容器且拿到 64 位容器 ID 时出现，`steps[].detail` 只在失败时出现。
+- `steps[].outcome`：`removed` 已删除 / `absent` 本就不存在 / `error`（出现即整条任务失败，不会写成功回执）。
+- `reason` 取值示例：`宽限期满`、`订单已refunded(到期扫描)`、`对账补入队`、`开通失败清理残留: ...`。
+
+### 冻结
+
+触发：运营 `PATCH /admin/orders/:id/status`（`frozen`）、`POST /admin/risk/alerts/:id/freeze`，或挖矿特征扫描自动冻结。三者走同一路径（compute 订单事务内调用租约钩子）：
+
+- 订单 → `frozen`，订单访问凭证吊销（交付状态 `revoked`）。
+- 租约 `active/parked` → `suspended`（记 `suspended_at`，刷新撤销游标，网关新登录立即被拒），入队 `kill_sessions`（优先级 1）断开现有会话。**容器不停、GPU 不释放**（保留核查现场；冻结期间仍计入供给方占用）。
+- 租约不在租（`reserved/pending/provisioning/grace/...`）：租约状态不动，只刷新撤销游标；开通中的流水线发现订单 `frozen` 即放弃。
+- 解冻见 compute-api.md「托管订单冻结与解冻」。
+
+### 挖矿特征扫描（docs/25 §25.7.3，Q-42 / Q-09）
+
+**对象**：`state=active` 且 `delivery_kind=container` 的租约，按节点分组并发（上限 `fleet.probe_concurrency`），每节点每轮时限 5min。裸金属（`bare_metal`）租约不扫描（买家持有 root，进程表与连接表不可信，由整机重装确认兜底）。`suspended` 等非 active 租约不扫描，因此已冻结的不会被重复冻结。
+
+**手段**：经节点管理 SSH 通道，对每个租约执行一条固定命令：宿主机 `docker top omnis-<lease_no> -eo pid,comm,args` 取进程表；以探针镜像 `docker run --rm --network container:omnis-<lease_no> --cap-drop ALL` 加入容器网络命名空间读取 `/proc/net/tcp` 与 `/proc/net/tcp6`。命令里只拼接通过格式校验的租约号与探针镜像引用，不含任何买家可控字符串；不在买家容器内执行任何命令。
+
+**信号与处置**：
+
+| `kind` | 判定 | 处置 |
+|---|---|---|
+| `stratum` | 任一进程命令行含 `stratum+tcp://`、`stratum+ssl://`、`stratum2+tcp://` 等（不区分大小写） | **自动冻结** |
+| `pool_addr` | 已建立 / 正在建立的外连目标落在 `fleet.mining.pool_addrs`（CIDR 或 IP；默认空） | **自动冻结** |
+| `process` | 进程名（`comm`，不区分大小写）在 `fleet.mining.process_names` | 只告警 |
+| `pool_port` | 外连目标端口在 `fleet.mining.pool_ports`（且目标不在矿池地址清单内） | 只告警 |
+
+- 外连只取 TCP 状态 `ESTABLISHED/SYN_SENT`；本地端口为容器内监听端口的入站连接（如网关 → sshd）、环回与未指定地址不计。
+- 一次扫描同时命中冻结类与告警类时按冻结处理，全部命中写入同一条告警。
+- 扫描失败（连不上节点、命令失败、输出不完整）或容器未运行：本轮不判定，只记日志，不影响租约。
+- 配置：`fleet.mining.interval`（默认 `10m`）；`fleet.mining.process_names`（未配置时取内置名单：xmrig、xmr-stak、t-rex、lolminer、nbminer、gminer、miner、phoenixminer、ethminer、teamredminer、bzminer、miniz、nanominer、srbminer-multi、ccminer、cpuminer、cgminer、bfgminer、rigel、onezerominer、wildrig-multi、kawpowminer、z-enemy）；`fleet.mining.pool_ports`（未配置时取 3333、3334、3335、4444、5555、5566、6666、7777、8008、8888、9999、14433、14444、45560、45700）；`fleet.mining.pool_addrs`（不支持域名，非法 CIDR/IP 或端口启动即报错）。
+
+**自动冻结**（单事务）：走上文「冻结」同一路径；写风控告警（`level=high`、`alert_type=mining_freeze`、`target_type=order`、`status=processing`、`resolution=auto_frozen`）；写审计 `action=mining_auto_freeze`、`target_type=order`、`operator_id=null`、`before_value`=冻结前订单状态、`after_value`=`"frozen; alert=<告警 id>; lease=<lease_no>; <kind>: <detail>; ..."`。提交后通知：
+- 买家站内信「订单已冻结」（`link=/console/buyer/orders/<order_no>`）；
+- 供给方站内信「在租环境已冻结」（`link=/console/supplier/nodes/<node_id>`）；
+- 运营：服务日志 ERROR「运营告警: 租约命中挖矿特征, 订单已自动冻结...」，并可在 `GET /admin/risk/alerts?status=processing` 查到该告警。
+
+运营核查后在 compute 侧解冻（`POST /admin/orders/:id/unfreeze`，误冻结传 `wrong_freeze:true`）或退款。
+
+**只告警**：写风控告警（`level=medium`、`alert_type=mining_suspect`、`target_type=order`、`status=pending`），服务日志 WARN「运营告警: 租约疑似挖矿(仅告警, 待人工核查)」；不冻结、不通知买家与供给方。**去重**：同一订单已有未结（`pending/processing`）的 `mining_suspect`/`mining_freeze` 告警，或 24h 内写过其中任一，则不再写。运营在告警上可人工冻结（`POST /admin/risk/alerts/:id/freeze`）或忽略（`/dismiss`）。
+
+两类告警的 `rule_detail` 均为 JSON 字符串：
+
+```json
+{"lease_no":"l-4g7bq4xc","order_no":"ORD20261101103000123abc","node_id":7,
+ "hits":[{"kind":"stratum","detail":"pid 4303 kworker: stratum+ssl://1.2.3.4:443","freeze":true},
+         {"kind":"process","detail":"pid 4302 进程名 xmrig","freeze":false},
+         {"kind":"pool_port","detail":"外连矿池常用端口 192.168.8.4:3333","freeze":false}]}
+```
+
+`hits` 冻结类在前，同 `kind+detail` 只出现一次；`stratum` 的 `detail` 截取匹配到的 URL（≤ 120 字符）。
 
 ---
 
@@ -413,7 +516,14 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 - 返回 `leases.access_changed_at` 在游标之后（按 `(access_changed_at, id)` 严格递增）且**早于当前 2 秒**的租约登录名，每页最多 1000 条；没有新行时 `cursor` 原样返回。空游标返回 `NOW()−2s` 处的起点，不回放历史。
 - 网关拿到 `logins` 即清掉这些登录名的放行缓存；`logins` 满 1000 条时立即用新游标再拉（单次轮询最多 20 页）。轮询失败 → 网关清空全部缓存。
-- `access_changed_at` 刷新时机（S2 现状）：租约每次状态迁移；买家删除公钥（刷新其名下 `active/parked/suspended/grace` 租约，T-086）。冻结吊销凭证、续租改 `access_until`、访问凭证重置时的刷新属 T-088（`Repository.touchAccess` 已备好）；在此之前这几类变化依赖缓存 TTL（≤ 30s）自然失效。
+- `access_changed_at` 刷新时机（S2 现状，与代码一致）：
+  - 租约每次状态迁移（含冻结 `active/parked→suspended`、到期 `→grace`、清除、restart 续租 `→pending`、开通 `→active`、换节点）；
+  - 买家删除公钥（刷新其名下 `active/parked/suspended/grace` 租约，T-086）；
+  - 冻结时租约不在租（状态不变，只吊销订单凭证）；
+  - 解冻（无论租约状态是否变化，T-088）；
+  - extend 续租支付生效（`access_until=renewed_until`）与退款回退（`access_until=lease_end_at`）。
+  - 访问凭证重置：**S2 没有凭证重置接口**（托管订单的密码凭证只在开通时生成、冻结时吊销、解冻时恢复），故无对应刷新点；日后新增重置接口时须同事务调用 `Repository.touchAccess`。
+- 游标只是加速失效的手段；网关放行缓存 TTL ≤ 30s 仍是兜底。
 - 游标格式非法 → 40001。
 
 ### POST /sessions · 会话事件上报
