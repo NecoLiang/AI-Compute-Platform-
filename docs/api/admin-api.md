@@ -50,6 +50,11 @@ curl -X PATCH http://localhost:8080/api/v1/admin/orders/ORD001/status \
   -H "Content-Type: application/json" \
   -d '{"status":"frozen"}'
 ```
+- 托管订单（v1.2）：冻结同事务暂停租约（`suspended`）并断开现有 SSH 会话，容器与 GPU 保留；冻结后不走"只能关闭/退款"，可用下面的解冻接口恢复。
+
+### POST /admin/orders/:id/unfreeze · 解冻托管订单（v1.2 S2 T-088）
+
+请求体可省略或 `{"wrong_freeze":true}`；响应 `{"order_no":"...","status":"active|paid|pending_payment|completed","wrong_freeze":false}`。订单回到的状态由租约实况决定，写审计 `unfreeze_order`。完整规则与错误码见 compute-api.md「托管订单冻结与解冻」。人工订单 40001。
 
 ---
 
@@ -71,16 +76,25 @@ curl "http://localhost:8080/api/v1/admin/risk/alerts?level=high&page=1&page_size
 
 **响应**
 ```json
-{"code":0,"data":{"list":[{
-  "id":1,"level":"high","alert_type":"suspected_mining",
-  "target_type":"order","target_id":32,"status":"pending"
-}],"total":1}}
+{"code":0,"message":"success","data":{"list":[{
+  "id":7,"level":"high","alert_type":"mining_freeze",
+  "target_type":"order","target_id":32,
+  "rule_detail":"{\"lease_no\":\"l-4g7bq4xc\",\"order_no\":\"ORD20261101103000123abc\",\"node_id\":7,\"hits\":[{\"kind\":\"stratum\",\"detail\":\"pid 4303 kworker: stratum+ssl://1.2.3.4:443\",\"freeze\":true}]}",
+  "status":"processing","created_at":"2026-11-01T10:30:00+08:00"
+}],"total":1,"page":1,"page_size":20},"request_id":"..."}
 ```
+
+- 查询参数只有 `level`（`high/medium/low`）与分页；按 `created_at` 倒序。`rule_detail` 是字符串（挖矿告警为 JSON 文本），无值时为空串；列表不返回 `resolution/operator_id`。
+- 托管租约挖矿特征扫描（v1.2 S2 T-088，`fleet.enabled=true`）写入两类告警，`target_type` 均为 `order`（详见 managed-rental-api.md「租约生命周期 · 挖矿特征扫描」）：
+  - `mining_freeze`（`level=high`）：命中 stratum 参数或矿池地址外连，订单**已自动冻结**，告警直接为 `processing`（`resolution=auto_frozen`），同事务写系统审计 `mining_auto_freeze`。
+  - `mining_suspect`（`level=medium`）：仅命中矿工进程名或矿池常用端口，`pending` 待人工核查（可冻结或标记误报）；同一订单有未结挖矿告警或 24h 内已写过时不重复写。
 
 ### POST /admin/risk/alerts/:id/freeze · 冻结处置
 ### POST /admin/risk/alerts/:id/dismiss · 标记误报
 
 冻结接口无请求体，按告警保存的 `target_type/target_id` 解析对象：`order` 冻结订单并吊销凭证；`user/account` 冻结账户并使已有会话失效。不能冻结当前操作人。对象/告警不存在返回 `40400`，无效类型返回 `40001`，状态冲突返回 `40900`。
+
+托管订单（`fulfillment_mode=managed`）冻结时同事务把在租租约转 `suspended` 并断开现有 SSH 会话（容器保留），解冻用 `POST /admin/orders/:id/unfreeze`（compute-api.md「托管订单冻结与解冻」）。对已是 `processing` 的告警（例如 `mining_freeze`）调用 `freeze` 会对目标再执行一次冻结后转 `resolved`：订单仍为 `frozen` 时幂等，订单已解冻则会被重新冻结，因此应先结案再解冻。
 
 目标冻结、审计与告警 `processing` 在同一 MySQL 事务提交；账户会话失效处理成功后才变为 `resolved`。会话失效处理失败返回 `50000`，保持 `processing`，允许重试冻结；数据库账户状态也会阻止已有令牌访问。重复冻结不会重复写冻结审计。`dismiss` 只允许 pending，重复 dismissed 幂等，不允许忽略 processing/resolved。
 
@@ -129,6 +143,15 @@ curl -X POST http://localhost:8080/api/v1/admin/nodes/7/suspend \
 curl "http://localhost:8080/api/v1/admin/audit-logs?page=1&page_size=20" \
   -H "Authorization: Bearer <token>"
 ```
+
+分页返回 `{id,operator_id,action,target_type,target_id,before_value,after_value,ip,created_at}`，按时间倒序，暂无过滤参数。系统动作（自动冻结、清除回执）库内 `operator_id` 为空，接口中显示为 `0`。v1.2 托管相关 `action`：
+
+| action | target_type | 说明 |
+|---|---|---|
+| `mining_auto_freeze` | `order` | 挖矿特征自动冻结；`before_value`=冻结前订单状态，`after_value`=`"frozen; alert=<告警id>; lease=<lease_no>; <kind>: <detail>; ..."` |
+| `unfreeze_order` | `order` | 运营解冻托管订单；`before_value="frozen"`，`after_value={"status":"<目标状态>","wrong_freeze":<bool>}` |
+| `lease.purged` | `lease` | 租约清除回执（JSON，结构见 managed-rental-api.md「清除与清除回执」） |
+| `lease.cleanup` | `lease` | 换节点 / 开通失败后旧节点残留清理回执（同上结构） |
 
 ### GET /admin/config · 系统配置
 ```json

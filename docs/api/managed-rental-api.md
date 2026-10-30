@@ -274,7 +274,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 任一步骤失败（退出码非 0 或输出无法确认）整条 `purge` 任务失败并按任务重试，租约停留在 `purging`；不会在资源未确认删除时标记 `purged`。
 
-清除回执写入 `audit_logs`：`action="lease.purged"`、`target_type="lease"`、`target_id=<lease id>`、`operator_id=null`（系统）、`before_value=null`、`after_value` 为下列 JSON。换节点 / 开通失败后清理旧节点残留时 `action="lease.cleanup"`，结构相同但不迁移租约状态。运营经 `GET /admin/audit-logs?action=lease.purged` 查看。
+清除回执写入 `audit_logs`：`action="lease.purged"`、`target_type="lease"`、`target_id=<lease id>`、库内 `operator_id` 为空（系统；`GET /admin/audit-logs` 显示为 `0`）、`before_value=null`、`after_value` 为下列 JSON。换节点 / 开通失败后清理旧节点残留时 `action="lease.cleanup"`，结构相同但不迁移租约状态。运营经 `GET /admin/audit-logs` 查看（按时间倒序分页；该接口目前不支持按 `action` 过滤，`after_value` 为 JSON 字符串）。
 
 ```json
 {"lease_no":"l-4g7bq4xc","order_id":1024,"node_id":7,
@@ -325,12 +325,14 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 - 扫描失败（连不上节点、命令失败、输出不完整）或容器未运行：本轮不判定，只记日志，不影响租约。
 - 配置：`fleet.mining.interval`（默认 `10m`）；`fleet.mining.process_names`（未配置时取内置名单：xmrig、xmr-stak、t-rex、lolminer、nbminer、gminer、miner、phoenixminer、ethminer、teamredminer、bzminer、miniz、nanominer、srbminer-multi、ccminer、cpuminer、cgminer、bfgminer、rigel、onezerominer、wildrig-multi、kawpowminer、z-enemy）；`fleet.mining.pool_ports`（未配置时取 3333、3334、3335、4444、5555、5566、6666、7777、8008、8888、9999、14433、14444、45560、45700）；`fleet.mining.pool_addrs`（不支持域名，非法 CIDR/IP 或端口启动即报错）。
 
-**自动冻结**（单事务）：走上文「冻结」同一路径；写风控告警（`level=high`、`alert_type=mining_freeze`、`target_type=order`、`status=processing`、`resolution=auto_frozen`）；写审计 `action=mining_auto_freeze`、`target_type=order`、`operator_id=null`、`before_value`=冻结前订单状态、`after_value`=`"frozen; alert=<告警 id>; lease=<lease_no>; <kind>: <detail>; ..."`。提交后通知：
+**自动冻结**（单事务）：走上文「冻结」同一路径；写风控告警（`level=high`、`alert_type=mining_freeze`、`target_type=order`、`status=processing`、`resolution=auto_frozen`）；写审计 `action=mining_auto_freeze`、`target_type=order`、`operator_id` 为空（系统）、`before_value`=冻结前订单状态、`after_value`=`"frozen; alert=<告警 id>; lease=<lease_no>; <kind>: <detail>; ..."`。提交后通知：
 - 买家站内信「订单已冻结」（`link=/console/buyer/orders/<order_no>`）；
 - 供给方站内信「在租环境已冻结」（`link=/console/supplier/nodes/<node_id>`）；
-- 运营：服务日志 ERROR「运营告警: 租约命中挖矿特征, 订单已自动冻结...」，并可在 `GET /admin/risk/alerts?status=processing` 查到该告警。
+- 运营：服务日志 ERROR「运营告警: 租约命中挖矿特征, 订单已自动冻结...」，并可在 `GET /admin/risk/alerts`（只支持 `level` 过滤，可传 `level=high`）查到该告警（`status=processing`；列表不返回 `resolution`）。
 
-运营核查后在 compute 侧解冻（`POST /admin/orders/:id/unfreeze`，误冻结传 `wrong_freeze:true`）或退款。
+运营核查后在 compute 侧解冻（`POST /admin/orders/:id/unfreeze`，误冻结传 `wrong_freeze:true`）或退款。告警本身的结案沿用现有风控接口：对 `processing` 的 `mining_freeze` 告警调用 `POST /admin/risk/alerts/:id/freeze`（订单已冻结时幂等，不重复写冻结审计）即转 `resolved`；`dismiss` 只接受 `pending`，不能用于自动冻结告警。**注意顺序**：该 `freeze` 调用会对订单再执行一次冻结，订单已解冻（`active`）后再调用会重新冻结订单，订单已 `completed` 时报错；因此应先在告警上结案、再解冻。S2 没有单独的「结案」接口，`processing` 告警可以保持原状不影响业务。
+
+订单不在可冻结状态（如退款中 `refunding`）时自动冻结失败：不写告警与审计，只记服务日志 ERROR「运营告警: 挖矿特征命中但自动冻结失败, 需人工处理」，下一轮扫描会再次尝试。
 
 **只告警**：写风控告警（`level=medium`、`alert_type=mining_suspect`、`target_type=order`、`status=pending`），服务日志 WARN「运营告警: 租约疑似挖矿(仅告警, 待人工核查)」；不冻结、不通知买家与供给方。**去重**：同一订单已有未结（`pending/processing`）的 `mining_suspect`/`mining_freeze` 告警，或 24h 内写过其中任一，则不再写。运营在告警上可人工冻结（`POST /admin/risk/alerts/:id/freeze`）或忽略（`/dismiss`）。
 
