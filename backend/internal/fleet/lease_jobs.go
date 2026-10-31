@@ -64,7 +64,7 @@ type OutageRecorder interface {
 // SetRedis 注入 Redis(main 调用, RunLeaseJobs 之前)。
 func (s *Service) SetRedis(rdb *redis.Client) { s.rdb = rdb }
 
-// SetOutageRecorder 注入停机认定实现(T-105); 未注入时观测只写日志。
+// SetOutageRecorder 覆盖停机认定实现(默认 outageBook, 测试注入记录器); 设为 nil 时观测只写日志。
 func (s *Service) SetOutageRecorder(r OutageRecorder) { s.outage = r }
 
 func (s *Service) observe(ctx context.Context, o LeaseObservation) {
@@ -87,8 +87,10 @@ func (s *Service) RunLeaseJobs(ctx context.Context) {
 		slog.Warn("fleet 未注入 Redis: 到期提醒(去重依赖 Redis)不执行, 周期任务不做多实例互斥")
 	}
 	var wg sync.WaitGroup
-	wg.Add(3)
+	wg.Add(5)
 	go func() { defer wg.Done(); s.jobLoop(ctx, "remind", remindInterval, s.RemindRound) }()
+	go func() { defer wg.Done(); s.jobLoop(ctx, "outage", outageInterval, s.OutageRound) }()
+	go func() { defer wg.Done(); s.jobLoop(ctx, "credit", creditInterval, s.CreditRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "mining", s.miningInterval(), s.MiningScanRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "reconcile", reconcileInterval, s.ReconcileRound) }()
 	s.jobLoop(ctx, "expiry", expirySweepInterval, s.ExpiryRound)
@@ -538,7 +540,11 @@ func (s *Service) reconcileNode(ctx context.Context, nodeID int64, leases []Leas
 			switch {
 			case err != nil:
 				slog.Error("运营告警: 在租容器重启失败", "lease_no", l.LeaseNo, "node_id", nodeID, "error", err)
-				down(l, OutageContainerDown, "容器已停止且重启失败: "+err.Error())
+				cause := OutageContainerDown
+				if errors.Is(err, errGatewayDown) {
+					cause = OutageGatewayDown // 容器已起但网关不可达/指纹不符: 平台责任(docs/25 §25.7.6)
+				}
+				down(l, cause, "容器已停止且重启失败: "+err.Error())
 			case restarted:
 				slog.Info("在租容器已重启并通过网关自检", "lease_no", l.LeaseNo, "node_id", nodeID)
 				up(l)
@@ -548,6 +554,9 @@ func (s *Service) reconcileNode(ctx context.Context, nodeID int64, leases []Leas
 		}
 	}
 }
+
+// errGatewayDown 自检失败的原因是访问网关本身不可用(未接入/连不上/主机指纹不符), 停机记平台责任 gateway_down。
+var errGatewayDown = errors.New("访问网关不可用")
 
 // errLeaseMoved 重启过程中租约已不在租(到期/冻结/清除), 放弃重启。
 var errLeaseMoved = errors.New("租约已不在租")
@@ -606,10 +615,15 @@ func (s *Service) verifyRestarted(ctx context.Context, client Runner, l *Lease) 
 		return fmt.Errorf("容器 sshd 主机密钥与开通时不一致(%s), 不恢复访问", fp)
 	}
 	if s.gateway == nil {
-		return fmt.Errorf("访问网关(cmd/accessgw)未接入, 无法经网关自检")
+		return fmt.Errorf("%w: 访问网关(cmd/accessgw)未接入, 无法经网关自检", errGatewayDown)
 	}
 	got, err := s.gateway.RecheckLease(ctx, l.LeaseNo)
 	if err != nil {
+		var de *gatewayDialError
+		var he *gatewayHostKeyError
+		if errors.As(err, &de) || errors.As(err, &he) {
+			return fmt.Errorf("%w: 经网关自检登录失败: %v", errGatewayDown, err)
+		}
 		return fmt.Errorf("经网关自检登录失败: %w", err)
 	}
 	slots, err := s.repo.leaseSlotsOnNode(s.repo.db, l.ID, l.NodeID)

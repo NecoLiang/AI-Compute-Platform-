@@ -185,6 +185,12 @@ func (r *Repository) setResourceAlert(q sqlx.Execer, leaseID int64, alert string
 	return affected(q.Exec(`UPDATE leases SET resource_alert=? WHERE id=? AND NOT (resource_alert <=> ?)`, alert, leaseID, alert))
 }
 
+// clearProbeAlert 探活侧恢复: 只清探活写入的卡异常, 不清容器对账写入的告警(带 reconcileAlertTag, 由对账恢复时清除)。
+func (r *Repository) clearProbeAlert(q sqlx.Execer, leaseID int64) (bool, error) {
+	return affected(q.Exec(`UPDATE leases SET resource_alert=NULL WHERE id=? AND resource_alert IS NOT NULL
+		AND resource_alert NOT LIKE ?`, leaseID, reconcileAlertTag+"%"))
+}
+
 // leaseSlotsOnNode 租约在指定节点上的卡槽(换节点后原节点可能仍有 draining 残留, 开通只看当前节点)。
 func (r *Repository) leaseSlotsOnNode(q sqlx.Queryer, leaseID, nodeID int64) ([]Slot, error) {
 	var list []Slot

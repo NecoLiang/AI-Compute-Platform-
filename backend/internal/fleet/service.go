@@ -79,7 +79,8 @@ type Service struct {
 	notifier  Notifier
 	gateway   GatewaySelfTester
 	rdb       *redis.Client  // 到期提醒去重与周期任务多实例互斥(T-087); nil 时不发到期提醒
-	outage    OutageRecorder // 停机认定(T-105); nil 时只记日志
+	outage    OutageRecorder // 停机认定(T-105); NewService 注入 outageBook, 测试可覆盖
+	refunder  OutageRefunder // 停机退费(T-106); nil 时退费补偿返回 50000
 	cfg       config.FleetConfig
 	gw        config.AccessGWConfig
 	gwEgress  []string
@@ -110,6 +111,7 @@ func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.A
 	}
 	s.registerExecutor(KindProvision, taskExecutor{timeout: provisionTimeout, run: s.runProvisionTask, onDead: s.onProvisionDead})
 	s.registerLeaseExecutors()
+	s.outage = outageBook{s: s}
 	return s
 }
 

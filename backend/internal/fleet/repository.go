@@ -426,7 +426,7 @@ func (r *Repository) freeSlotStats(q sqlx.Queryer, productID int64) (free, maxNo
 	err = sqlx.Select(q, &rows, `SELECT COUNT(s.id) AS free_cards, n.total_cards, COALESCE(n.disk_quota_supported,0)=1 AS quota,
 		COALESCE(p.delivery_mode,'') AS delivery_mode
 		FROM gpu_slots s JOIN supplier_nodes n ON n.id=s.node_id JOIN products p ON p.id=n.product_id
-		WHERE n.product_id=? AND n.mgmt_mode='ssh' AND n.verify_status='verified' AND n.schedulable=1
+		WHERE n.product_id=? AND n.mgmt_mode='ssh' AND n.verify_status='verified' AND n.schedulable=1 AND n.dispatch_hold=0
 		  AND n.status='online' AND s.state='free'
 		GROUP BY n.id, n.total_cards, n.disk_quota_supported, p.delivery_mode`, productID)
 	if err != nil {

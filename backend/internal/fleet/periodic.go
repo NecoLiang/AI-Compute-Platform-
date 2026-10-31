@@ -357,7 +357,11 @@ func (s *Service) syncResourceAlerts(nodeID int64, alerts map[int64][]string) {
 	}
 	for _, id := range ids {
 		msg := strings.Join(alerts[id], "; ")
-		changed, err := s.repo.setResourceAlert(s.repo.db, id, msg)
+		set := s.repo.setResourceAlert
+		if msg == "" {
+			set = func(q sqlx.Execer, id int64, _ string) (bool, error) { return s.repo.clearProbeAlert(q, id) }
+		}
+		changed, err := set(s.repo.db, id, msg)
 		if err != nil {
 			slog.Error("fleet 写租约资源告警失败", "lease_id", id, "error", err)
 			continue

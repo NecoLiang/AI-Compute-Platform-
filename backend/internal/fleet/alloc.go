@@ -88,7 +88,7 @@ func (r *Repository) allocCandidates(q sqlx.Queryer, productID int64, k int, who
 	err := sqlx.Select(q, &list, `SELECT n.id AS node_id, COUNT(s.id) AS free_cards, n.total_cards,
 		(SELECT COUNT(*) FROM node_heartbeats h WHERE h.node_id=n.id AND h.created_at > NOW() - INTERVAL 24 HOUR) AS stability
 		FROM supplier_nodes n JOIN gpu_slots s ON s.node_id=n.id AND s.state='free'
-		WHERE n.product_id=? AND n.mgmt_mode='ssh' AND n.verify_status='verified' AND n.schedulable=1
+		WHERE n.product_id=? AND n.mgmt_mode='ssh' AND n.verify_status='verified' AND n.schedulable=1 AND n.dispatch_hold=0
 		  AND n.status='online' AND n.id<>?
 		  AND (? = 1 AND n.total_cards = ? OR ? = 0 AND (n.disk_quota_supported = 1 OR n.total_cards = ?))
 		GROUP BY n.id, n.total_cards HAVING free_cards >= ?`,
@@ -132,7 +132,7 @@ func (r *Repository) reserveSlotsTx(tx *sqlx.Tx, productID int64, k int, wholeMa
 		// 单卡路径走主键, 不先串行到节点行上会出现二级索引/主键交叉死锁。持锁后复核节点仍可分配。
 		var eligible int
 		if err := tx.Get(&eligible, `SELECT COUNT(*) FROM supplier_nodes WHERE id=? AND product_id=? AND mgmt_mode='ssh'
-			AND verify_status='verified' AND schedulable=1 AND status='online' FOR UPDATE`, c.NodeID, productID); err != nil {
+			AND verify_status='verified' AND schedulable=1 AND dispatch_hold=0 AND status='online' FOR UPDATE`, c.NodeID, productID); err != nil {
 			return 0, nil, err
 		}
 		if eligible == 0 {
