@@ -45,6 +45,11 @@ func TestCrossBareMetalRejectsModelDeploy(t *testing.T) {
 	require.NoError(t, e.db.Get(&n, `SELECT COUNT(*) FROM node_tasks WHERE kind IN ('deploy_model','stop_model')`))
 	assert.Zero(t, n)
 
+	// 连接信息标明整机, 前端据此隐藏一键部署入口、提示登录宿主机。
+	a, err := e.s.OrderAccess(21, e.order.OrderNo)
+	require.NoError(t, err)
+	assert.Equal(t, "bare_metal", a.DeliveryKind)
+
 	// 运行期兜底: 整机租约不给出容器配额/网络。
 	_, err = e.s.AttachModelDeploy(md).LeaseRuntime(ctx, e.lease.ID)
 	require.Error(t, err)

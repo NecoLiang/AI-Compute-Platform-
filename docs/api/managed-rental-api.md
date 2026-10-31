@@ -223,13 +223,14 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ```json
 {"code":0,"message":"success","data":{
   "gateway_host":"gw.omnisline.com","gateway_port":2222,
-  "login":"l-4g7bq4xc","lease_state":"active",
+  "login":"l-4g7bq4xc","lease_state":"active","delivery_kind":"container",
   "access_until":"2026-11-28T10:00:00+08:00","grace_until":null,
   "auth_methods":["publickey","password"]},
  "request_id":"..."}
 ```
 
 - `gateway_host/port` 来自 `accessgw.public_host/public_port`；`login` 即租约号，换节点/续租不变。**不返回节点地址与容器端口。**
+- `delivery_kind`：`container`（按卡，登录进租约容器）/ `bare_metal`（整机）。前端据此切换整机文案并隐藏「一键部署」入口（整机提交部署返回 40001，见 model-deploy-api.md）。
 - 整机订单（T-089）登录方式相同（`ssh -p <gateway_port> <login>@<gateway_host>`），落地为宿主机账户 `omnis-<login>`，`sudo` 免密；整机无宽限，`grace_until` 恒为 `null`，到期即断开，**家目录与买家写入的数据随节点重装清除，须在到期前自行导出**。
 - 能否登录以 `lease_state=active` 且未过 `access_until` 为准；其他状态（`pending/provisioning/parked/suspended/grace/...`）照常返回本结构，前端据 `lease_state` 提示。
 - **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单「该订单为人工交付, 没有网关连接信息」；40400 订单尚无租约。

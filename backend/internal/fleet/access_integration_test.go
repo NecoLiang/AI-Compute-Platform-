@@ -166,6 +166,7 @@ func TestOrderAccessAndSessions(t *testing.T) {
 	assert.Equal(t, 2222, a.GatewayPort)
 	assert.Equal(t, e.lease.LeaseNo, a.Login)
 	assert.Equal(t, LeaseActive, a.LeaseState)
+	assert.Equal(t, "container", a.DeliveryKind)
 	require.NotNil(t, a.AccessUntil)
 	assert.True(t, a.AccessUntil.After(time.Now()))
 	assert.Equal(t, []string{"publickey", "password"}, a.AuthMethods)

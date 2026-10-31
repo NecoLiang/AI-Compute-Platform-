@@ -240,13 +240,15 @@ func (s *Service) DeleteBuyerKey(userID, keyID int64, ip string) error {
 
 // OrderAccess GET /orders/:id/access 的连接信息。不含节点地址与容器端口。
 type OrderAccess struct {
-	GatewayHost string     `json:"gateway_host"`
-	GatewayPort int        `json:"gateway_port"`
-	Login       string     `json:"login"`
-	LeaseState  string     `json:"lease_state"`
-	AccessUntil *time.Time `json:"access_until"`
-	GraceUntil  *time.Time `json:"grace_until"`
-	AuthMethods []string   `json:"auth_methods"`
+	GatewayHost string `json:"gateway_host"`
+	GatewayPort int    `json:"gateway_port"`
+	Login       string `json:"login"`
+	LeaseState  string `json:"lease_state"`
+	// DeliveryKind container=按卡容器(经网关登录进租约容器) / bare_metal=整机(经网关登录宿主机账户 omnis-<lease_no>; 不支持一键部署)。
+	DeliveryKind string     `json:"delivery_kind"`
+	AccessUntil  *time.Time `json:"access_until"`
+	GraceUntil   *time.Time `json:"grace_until"`
+	AuthMethods  []string   `json:"auth_methods"`
 }
 
 // buyerManagedLease 买家本人托管订单的租约。不存在 40400, 非本人 40300(先于履约模式判断, 不泄露他人订单类型),
@@ -282,7 +284,8 @@ func (s *Service) OrderAccess(userID int64, orderNo string) (*OrderAccess, error
 		return nil, err
 	}
 	return &OrderAccess{GatewayHost: s.gw.PublicHost, GatewayPort: s.gw.PublicPort, Login: l.LeaseNo, LeaseState: l.State,
-		AccessUntil: l.AccessUntil, GraceUntil: l.GraceUntil, AuthMethods: []string{authMethodPubkey, authMethodPasswd}}, nil
+		DeliveryKind: l.DeliveryKind,
+		AccessUntil:  l.AccessUntil, GraceUntil: l.GraceUntil, AuthMethods: []string{authMethodPubkey, authMethodPasswd}}, nil
 }
 
 // AccessSession access_sessions 一行(买家与运营共用; buyer_id 仅运营检索返回)。
