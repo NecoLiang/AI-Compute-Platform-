@@ -402,7 +402,8 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | `container_down` | 对账：容器缺失 / 非运行态 / 重启失败 / 读不到容器列表 | 对账观测时刻 | 对账确认容器在跑 | supplier |
 | `gateway_down` | ① 对账重启容器后经访问网关自检时，网关未接入、连不上或网关主机指纹不符；② 网关心跳失联：网关每 5s 经验签调用主服务内部接口，最后一次请求早于 3 分钟（主服务启动后 3 分钟内、从未收到网关请求时不认定） | ① 对账观测时刻；② 最后一次网关请求时间 | 网关恢复上报，且（容器租约）对账确认容器在跑 | platform |
 | `wrong_freeze` | 运营解冻时认定误冻结（`POST /admin/orders/:id/unfreeze` `wrong_freeze:true`） | 冻结时刻 `suspended_at` | 解冻时刻（直接记已结束的一段） | platform |
-| `provision_delay` / `night_unpark_failed` | 包夜计费未开放（T-094/T-095），S2 不产生 | — | — | — |
+| `provision_delay` | 包夜首晚开通晚于应开通时刻（max(首晚窗口开始, 支付时刻)）≥ `min_minutes`；或某晚从未尝试开通即过窗口（S4 T-095） | 应开通时刻 | 开通自检通过（不超过本晚窗口结束） | platform |
+| `night_unpark_failed` | 包夜开窗失败：宿主机进程占用本晚卡到 应开通时刻+10min（整晚），或开窗晚于应开通时刻 ≥ `min_minutes`（延迟段）（S4 T-095）。其他开窗失败按原因记 `node_offline/container_down/gateway_down` | 应开通时刻 | 开窗成功 / 本晚窗口结束 | supplier |
 
 - **容器租约**的停机须等对账（5min）确认容器在跑才结束（「恢复在线且自检通过」），因此结束时刻最多晚约 5min（偏向买家）；整机租约在硬原因消失的那轮扫描即结束。
 - **买家原因不计**：停机期间租约被冻结（`suspended`），本段在 `suspended_at` 结束，冻结期只有运营认定误冻结才计入；租约到期/清除时进行中的停机在 `min(当前, access_until)` 结束。买家自己导致的容器退出（OOM 等）由对账自动重启，重启成功不产生停机。
@@ -487,7 +488,8 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
  "request_id":"..."}
 ```
 
-- `liability_amount` 为 `null`：所属订单租期无法换算（如包夜），服务日志 ERROR「运营告警: 停机责任金额无法计算(需人工核定)」。
+- 包夜订单租期按 晚数 × 窗口时长 换算（白天不计）；补偿默认顺延为补加一晚，见 compute-api.md「包夜订单（S4）」。
+- `liability_amount` 为 `null`：所属订单租期无法换算（快照缺失等数据异常），服务日志 ERROR「运营告警: 停机责任金额无法计算(需人工核定)」。
 - 供给方信用查看与覆盖见 admin-api.md「供给方信用（S2 T-105）」。
 
 ### GET /admin/access-sessions?lease_no=&ip=&page=&page_size= · 会话检索 ✅（S2 T-086）

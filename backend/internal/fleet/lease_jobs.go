@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -89,13 +90,14 @@ func (s *Service) RunLeaseJobs(ctx context.Context) {
 		slog.Warn("fleet 未注入 Redis: 到期提醒(去重依赖 Redis)不执行, 周期任务不做多实例互斥")
 	}
 	var wg sync.WaitGroup
-	wg.Add(6)
+	wg.Add(7)
 	go func() { defer wg.Done(); s.jobLoop(ctx, "remind", remindInterval, s.RemindRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "outage", outageInterval, s.OutageRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "credit", creditInterval, s.CreditRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "mining", s.miningInterval(), s.MiningScanRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "reconcile", reconcileInterval, s.ReconcileRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "settle", settleInterval, s.SettleRound) }()
+	go func() { defer wg.Done(); s.jobLoop(ctx, "nightly", nightlyInterval, s.NightlyRound) }()
 	if s.modelDeploy != nil { // 一键部署健康检测(60s)与采样清理(每日), 未接入时不启动
 		wg.Add(2)
 		go func() {
@@ -291,6 +293,11 @@ func (s *Service) expireSuspended() {
 
 // ensureStopTx 租约当前节点上没有未结束的 stop 时入队一条。
 func (s *Service) ensureStopTx(tx *sqlx.Tx, l *Lease, reason string) error {
+	return s.ensureStopPayloadTx(tx, l, LeaseTaskPayload{LeaseID: l.ID, Reason: reason})
+}
+
+// ensureStopPayloadTx 同 ensureStopTx, 指定任务参数(包夜窗口结束带 Nightly)。
+func (s *Service) ensureStopPayloadTx(tx *sqlx.Tx, l *Lease, pl LeaseTaskPayload) error {
 	live, err := s.repo.liveLeaseTasks(tx, l.ID, KindStop)
 	if err != nil {
 		return err
@@ -300,7 +307,7 @@ func (s *Service) ensureStopTx(tx *sqlx.Tx, l *Lease, reason string) error {
 			return nil
 		}
 	}
-	_, err = s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindStop, prioStop, cleanupMaxAttempts, LeaseTaskPayload{LeaseID: l.ID, Reason: reason})
+	_, err = s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindStop, prioStop, cleanupMaxAttempts, pl)
 	return err
 }
 
@@ -463,7 +470,7 @@ func (s *Service) requeueStuckCleanup() {
 	var stops []int64
 	if err := s.repo.db.Select(&stops, `SELECT DISTINCT l.id FROM leases l
 		JOIN gpu_slots g ON g.lease_id=l.id AND g.node_id=l.node_id AND g.state='draining'
-		WHERE (l.state='grace' OR (l.state='suspended' AND l.access_until<=NOW()))
+		WHERE l.state IN ('grace','parked','suspended')
 		AND NOT EXISTS (SELECT 1 FROM node_tasks t WHERE t.lease_id=l.id AND t.node_id=l.node_id AND t.kind='stop'
 			AND t.state IN ('pending','running','dead'))
 		LIMIT ?`, sweepBatch); err != nil {
@@ -472,11 +479,22 @@ func (s *Service) requeueStuckCleanup() {
 	for _, id := range stops {
 		err := s.inTx(func(tx *sqlx.Tx) error {
 			l, err := s.repo.lockLease(tx, id)
-			if err != nil || l == nil || !stopApplies(l, time.Now()) {
+			if err != nil || l == nil {
 				return err
 			}
+			pl := LeaseTaskPayload{LeaseID: l.ID, Reason: "对账补入队"}
+			if l.State == LeaseSuspended && !stopApplies(l, time.Now()) {
+				// 冻结未到期却有 draining 卡: 只可能是包夜窗口结束(S4 T-095)。
+				plan, err := s.repo.leaseNightPlan(tx, l.ID)
+				if err != nil || plan == nil {
+					return err
+				}
+				pl.Nightly = true
+			} else if !stopApplies(l, time.Now()) {
+				return nil
+			}
 			slog.Warn("对账: 补入队 stop", "lease_no", l.LeaseNo)
-			return s.ensureStopTx(tx, l, "对账补入队")
+			return s.ensureStopPayloadTx(tx, l, pl)
 		})
 		if err != nil {
 			slog.Error("对账: 补入队 stop 失败", "lease_id", id, "error", err)
@@ -626,6 +644,13 @@ func (s *Service) restartLeaseContainer(ctx context.Context, client Runner, n *N
 }
 
 func (s *Service) verifyRestarted(ctx context.Context, client Runner, l *Lease) error {
+	return s.verifyContainer(ctx, client, l, SlotLeased, LeaseActive, LeaseSuspended)
+}
+
+// verifyContainer 容器启动后自检: sshd 主机密钥与开通时一致、经网关系统身份登录、容器内可见 GPU 与租约在本节点上
+// 处于 slotState 的卡槽一致; 最后复核租约仍在本节点且处于 okStates 之一, 否则 errLeaseMoved。
+// 对账重启用 leased + active/suspended; 包夜开窗(S4 T-095)用 reserved + parked(开窗事务提交前租约仍是 parked)。
+func (s *Service) verifyContainer(ctx context.Context, client Runner, l *Lease, slotState string, okStates ...string) error {
 	hk, err := hostKeyCommand(l.LeaseNo)
 	if err != nil {
 		return err
@@ -659,7 +684,7 @@ func (s *Service) verifyRestarted(ctx context.Context, client Runner, l *Lease) 
 	}
 	var want []string
 	for _, sl := range slots {
-		if sl.State == SlotLeased {
+		if sl.State == slotState {
 			want = append(want, sl.GPUUUID)
 		}
 	}
@@ -672,7 +697,7 @@ func (s *Service) verifyRestarted(ctx context.Context, client Runner, l *Lease) 
 	if err != nil {
 		return err
 	}
-	if cur == nil || (cur.State != LeaseActive && cur.State != LeaseSuspended) || cur.NodeID != l.NodeID {
+	if cur == nil || !slices.Contains(okStates, cur.State) || cur.NodeID != l.NodeID {
 		return errLeaseMoved
 	}
 	return nil

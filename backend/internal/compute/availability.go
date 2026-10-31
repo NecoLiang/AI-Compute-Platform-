@@ -26,10 +26,10 @@ const (
 
 // 不可下单原因(available=false 时的 reason)。
 const (
-	reasonNightlyNotOpen = "包夜预订尚未开放(夜间日历与每晚开停机待接入), 暂不可下单"
-	reasonSoldOut        = "商品已售罄"
-	reasonNodesOffline   = "供应方算力节点已全部离线, 该商品暂不可下单"
-	reasonNoWholeNode    = "所选卡数暂无整机余量"
+	reasonNoNightCards = "所选夜晚暂无同机空闲卡(同一组卡须每晚都未被预订)"
+	reasonSoldOut      = "商品已售罄"
+	reasonNodesOffline = "供应方算力节点已全部离线, 该商品暂不可下单"
+	reasonNoWholeNode  = "所选卡数暂无整机余量"
 )
 
 // 租期起算规则(lease_preview.start_rule)。
@@ -38,6 +38,8 @@ const (
 	LeaseStartOnActivation = "on_activation"
 	// LeaseStartOnBuyerConfirm 人工: 买家签收交付时起算, 下单前无法给出具体时间, start_at/end_at 为 null。
 	LeaseStartOnBuyerConfirm = "on_buyer_confirm"
+	// LeaseStartNightWindow 包夜: 首晚窗口开始起算; 当晚(窗口已开始)订单以实际开通时刻起算, 终点固定(docs/26 §26.6.5)。
+	LeaseStartNightWindow = "night_window"
 )
 
 // AvailabilityReq 查询参数。Cards 即下单 quantity(零租=卡数; 其他类型=份数/台数)。
@@ -131,22 +133,39 @@ func (s *Service) ProductAvailability(ctx context.Context, userID, productID int
 	}
 
 	q, err := QuoteOrder(p, req.PricingMode, req.Cards, req.Duration, int64(policy.FeeRate))
-	if errors.Is(err, errNightlyNotWired) {
-		return &Availability{Available: false, Reason: reasonNightlyNotOpen}, nil
-	}
 	if err != nil {
 		return nil, err
+	}
+	// 包夜: night_start_date 缺省取可订的第一晚, 校验口径与下单一致(ParseNightStartDate)。
+	var night *nightSpan
+	now := time.Now()
+	if q.Price.PricingMode == PricingNightly {
+		w, err := NightOrderWindow(p)
+		if err != nil {
+			return nil, err
+		}
+		ds := req.NightStartDate
+		if ds == "" {
+			ds = FirstBookableNight(now, w).Format("2006-01-02")
+		}
+		start, err := ParseNightStartDate(ds, q.Duration, w, now)
+		if err != nil {
+			return nil, err
+		}
+		night = &nightSpan{Start: start, Nights: q.Duration, Window: w}
 	}
 	out := &Availability{
 		Quote: &AvailabilityQuote{PricingMode: q.Price.PricingMode, UnitPrice: q.Price.UnitPrice, Quantity: q.Quantity,
 			Duration: q.Duration, TotalAmount: q.TotalAmount, PlatformFee: q.PlatformFee, FeeRate: q.FeeRateBp},
 	}
 	managed := p.FulfillmentMode == FulfillmentManaged
-	if out.LeasePreview, err = leasePreview(managed, q, time.Now()); err != nil {
+	if night != nil {
+		out.LeasePreview = nightLeasePreview(night.Start, night.Nights, night.Window, now)
+	} else if out.LeasePreview, err = leasePreview(managed, q, now); err != nil {
 		return nil, err
 	}
 
-	reason, err := s.orderBlocker(p, q.Quantity, managed, policy)
+	reason, err := s.orderBlocker(p, q.Quantity, managed, policy, night)
 	if err != nil {
 		return nil, err
 	}
@@ -172,8 +191,16 @@ func leasePreview(managed bool, q OrderQuote, now time.Time) (*LeasePreview, err
 	return lp, nil
 }
 
+// nightSpan 包夜订单的起始夜晚、晚数与商品窗口。
+type nightSpan struct {
+	Start  time.Time
+	Nights int
+	Window NightWindow
+}
+
 // orderBlocker 返回当前不可下单的原因(空串=可下单)。口径与 PlaceOrder 的前置校验一致, 但只读。
-func (s *Service) orderBlocker(p *Product, qty int, managed bool, policy trading.Config) (string, error) {
+// night 非 nil 时按包夜预订判定(同一组卡每晚都无预订)。
+func (s *Service) orderBlocker(p *Product, qty int, managed bool, policy trading.Config, night *nightSpan) (string, error) {
 	if !policy.TradingEnabled {
 		return trading.ErrDisabled.Error(), nil
 	}
@@ -200,6 +227,19 @@ func (s *Service) orderBlocker(p *Product, qty int, managed bool, policy trading
 	}
 	if !s.leaseWired() || s.leaseHooks.Feasible == nil {
 		return errManagedLeaseNotWired.Error(), nil
+	}
+	if night != nil {
+		if s.leaseHooks.NightFeasible == nil {
+			return errNightlyHooksNotWired.Error(), nil
+		}
+		ok, err := s.leaseHooks.NightFeasible(p, qty, night.Start, night.Nights)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return reasonNoNightCards, nil
+		}
+		return "", nil
 	}
 	ok, err := s.leaseHooks.Feasible(p, qty)
 	if err != nil {

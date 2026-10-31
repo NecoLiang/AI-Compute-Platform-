@@ -35,6 +35,10 @@ type LeaseHooks struct {
 	// Feasible 只读可行性(GET /products/:id/availability): 是否存在一个节点能按 docs/26 §26.5.2 的候选规则
 	// 容纳 cards 张同机空闲卡。不加锁、不写库; 结论是快照, 成交以 ReserveTx 为准。
 	Feasible func(product *Product, cards int) (bool, error)
+	// NightFeasible 包夜只读可行性(docs/26 §26.6.3): 是否存在一个节点有 cards 张卡在 [start, start+nights) 每晚都无预订。
+	NightFeasible func(product *Product, cards int, start time.Time, nights int) (bool, error)
+	// NightCalendar 夜间日历(§26.9): 自 from 起 days 晚, 每晚单节点最多可订卡数(cards>0 时只统计能容纳 cards 的节点)。
+	NightCalendar func(product *Product, cards int, from time.Time, days int) ([]int, error)
 	// FreezeTx 订单冻结(docs/25 §25.7.3): 在租租约 active/parked → suspended(记 suspended_at)并入队 kill_sessions;
 	// 尚未开通的租约不动(开通流水线发现订单 frozen 即放弃, 解冻时重新入队)。已 suspended 幂等。
 	FreezeTx func(tx *sqlx.Tx, order *Order) error
@@ -196,9 +200,21 @@ func (s *Service) ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt 
 	if pricingMode == PricingPerpetual {
 		return nil, fmt.Errorf("托管订单不支持买断计费")
 	}
-	start := selftestAt.Truncate(time.Second)
-	end, err := LeaseEndAt(start, pricingMode, leaseOrder.Duration, OrderNightWindow(o))
-	if err != nil {
+	selftest := selftestAt.Truncate(time.Second)
+	start := selftest
+	var end time.Time
+	if pricingMode == PricingNightly {
+		// 包夜(docs/26 §26.6.2/26.6.5): 终点固定 = 末晚窗口结束; 起点 = max(自检通过, 首晚窗口开始)——
+		// 预开通(窗口前 10 分钟)自检早于窗口, 租期仍从窗口开始算; 当晚订单以实际开通时刻起算。
+		win := OrderNightWindow(o)
+		if win == nil || o.NightStartDate == nil {
+			return nil, fmt.Errorf("包夜订单 %s 缺少起始夜晚或夜间窗口快照, 无法计算租期", o.OrderNo)
+		}
+		if ws := NightStartAt(*o.NightStartDate, *win); start.Before(ws) {
+			start = ws
+		}
+		end = NightlyLeaseEnd(NightDate(*o.NightStartDate), leaseOrder.Duration, *win)
+	} else if end, err = LeaseEndAt(start, pricingMode, leaseOrder.Duration, OrderNightWindow(o)); err != nil {
 		return nil, err
 	}
 
@@ -228,7 +244,7 @@ func (s *Service) ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt 
 		ON DUPLICATE KEY UPDATE credential_encrypted=VALUES(credential_encrypted), access_key=VALUES(access_key),
 		access_value_encrypted=VALUES(access_value_encrypted), access_status='delivered',
 		access_expires_at=VALUES(access_expires_at), selftest_passed_at=VALUES(selftest_passed_at), revoked_at=NULL,
-		confirmed_by_buyer=0, buyer_confirmed_at=NULL`, o.ID, credEnc, accessKey, accessEnc, end, start); err != nil {
+		confirmed_by_buyer=0, buyer_confirmed_at=NULL`, o.ID, credEnc, accessKey, accessEnc, end, selftest); err != nil {
 		return nil, err
 	}
 	res, err := tx.Exec(`UPDATE orders SET status='active', lease_start_at=?, lease_end_at=?

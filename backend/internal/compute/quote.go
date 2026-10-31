@@ -22,7 +22,7 @@ type OrderQuote struct {
 // 保证"看到的价"与"实付的价"出自同一段代码。不读库、不校验库存与卡槽余量(那是成交可行性, 不是价格)。
 //
 //   - 计费方式: PriceFor(省略取展示主价方式); 未开放/已停用 → 40001「该商品未开放X计费」
-//   - 包夜: 夜间预订防重与每晚开停机(T-094/T-095)未接入 → errNightlyNotWired(50000)
+//   - 包夜: 仅夜间窗口 + 平台托管 + 分卡容器商品(Q-44, NightOrderWindow); 起订日期由调用方校验(ParseNightStartDate)
 //   - 托管商品不支持买断
 //   - 数量/租期: validateOrderParams(托管分卡商品卡数须在可选卡数内; 其他商品起订量/上限; 租期上下限)
 //   - 金额: CalcOrderAmount(int64 分, 溢出检查), 费率 feeRateBp 为万分比
@@ -38,7 +38,9 @@ func QuoteOrder(p *Product, pricingMode string, quantity, duration int, feeRateB
 		return OrderQuote{}, err
 	}
 	if price.PricingMode == PricingNightly {
-		return OrderQuote{}, errNightlyNotWired
+		if _, err := NightOrderWindow(p); err != nil {
+			return OrderQuote{}, err
+		}
 	}
 	if p.FulfillmentMode == FulfillmentManaged && price.PricingMode == PricingPerpetual {
 		return OrderQuote{}, fmt.Errorf("托管商品不支持买断计费")

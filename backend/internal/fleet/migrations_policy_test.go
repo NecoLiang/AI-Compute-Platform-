@@ -10,7 +10,6 @@ import (
 )
 
 // v1.2 迁移回退口径: 027 起的 down 一律 SIGNAL 拒绝(业务/资金/安全闸门数据须经审计归档), 仅 031(可重新采集的探活遥测)直接删除。
-// 036 预留给 S4 包夜, 本分支不得出现。
 func TestDownMigrationPolicy(t *testing.T) {
 	files, err := filepath.Glob("../../migrations/*.down.sql")
 	if err != nil {
@@ -25,9 +24,6 @@ func TestDownMigrationPolicy(t *testing.T) {
 			continue
 		}
 		n, _ := strconv.Atoi(m[1])
-		if n == 36 {
-			t.Errorf("%s: 036 预留给 S4 包夜, 本分支不得占用", f)
-		}
 		if n < 27 || n == 31 {
 			continue
 		}

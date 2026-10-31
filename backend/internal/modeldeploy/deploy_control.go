@@ -167,6 +167,47 @@ func (s *Service) Restart(ctx context.Context, buyerID int64, orderNo, deployNo 
 	return s.viewByID(cur.ID)
 }
 
+// ResumeNightlyForLeaseTx 包夜开窗(unpark)时由 fleet 在租约 parked→active 的同一事务内调用(docs/27 §27.6, S4 T-095):
+// 该租约因包夜窗口结束而停止(stop_reason=nightly)且 auto_resume=1 的部署 → pending 并入队部署。
+// 同租约已有未终止部署(uk_lease_active)时跳过该条(只记事件), 不影响开窗。未接入运行期时直接返回。
+func (s *Service) ResumeNightlyForLeaseTx(ctx context.Context, tx *sqlx.Tx, leaseID int64) (int, error) {
+	if s == nil || s.rt == nil {
+		return 0, nil
+	}
+	list := []Deployment{}
+	if err := tx.Select(&list, "SELECT "+deploymentColumns+` FROM model_deployments WHERE lease_id=? AND state=?
+		AND stop_reason=? AND auto_resume=1 ORDER BY id FOR UPDATE`, leaseID, DepStopped, StopNightly); err != nil {
+		return 0, err
+	}
+	resumed := 0
+	for i := range list {
+		d := &list[i]
+		ok, err := setState(tx, d.ID, DepPending, []string{DepStopped},
+			`lease_active_claim=lease_id, fail_reason=NULL, stop_reason=NULL, stopped_at=NULL, health='unknown',
+			health_reason=NULL, monitor_state=NULL, next_restart_at=NULL, container_name=NULL`)
+		if isDupKey(err, "uk_lease_active") {
+			if err := insertEvent(tx, d.ID, EvResume, "", "包夜开窗: 同租约已有未终止部署, 未自动恢复"); err != nil {
+				return resumed, err
+			}
+			continue
+		}
+		if err != nil {
+			return resumed, err
+		}
+		if !ok {
+			continue
+		}
+		if err := insertEvent(tx, d.ID, EvResume, StopNightly, "包夜开窗自动恢复"); err != nil {
+			return resumed, err
+		}
+		if err := s.enqueueDeploy(ctx, tx, d.NodeID, d.LeaseID, d.ID); err != nil {
+			return resumed, err
+		}
+		resumed++
+	}
+	return resumed, nil
+}
+
 // StopForLeaseTx 租约到期/冻结/清除时由 fleet 在其自身状态迁移事务内调用: 该租约所有可停止的部署 → stopping 并入队停止。
 // 未接入运行期(rt=nil)时无部署可言, 直接返回。
 func (s *Service) StopForLeaseTx(ctx context.Context, tx *sqlx.Tx, leaseID int64, reason string) error {

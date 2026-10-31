@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -52,8 +53,8 @@ type OrderOutages struct {
 // orderTerm 订单实付与租期秒数(按计费方式快照换算)。
 func orderTerm(q sqlx.Queryer, orderID int64) (amount int64, termSecs int64, err error) {
 	var o compute.Order
-	if err := sqlx.Get(q, &o, `SELECT id, order_no, total_amount, duration, pricing_mode, lease_start_at
-		FROM orders WHERE id=?`, orderID); err != nil {
+	if err := sqlx.Get(q, &o, `SELECT id, order_no, total_amount, duration, pricing_mode, lease_start_at,
+		night_start_min, night_end_min FROM orders WHERE id=?`, orderID); err != nil {
 		return 0, 0, err
 	}
 	if o.LeaseStart == nil {
@@ -62,6 +63,14 @@ func orderTerm(q sqlx.Queryer, orderID int64) (amount int64, termSecs int64, err
 	mode, err := compute.OrderPricingMode(&o)
 	if err != nil {
 		return 0, 0, err
+	}
+	if mode == compute.PricingNightly {
+		// 包夜租期 = 晚数 × 窗口时长(白天不计入, S4 T-095)。
+		w := compute.OrderNightWindow(&o)
+		if w == nil {
+			return 0, 0, fmt.Errorf("包夜订单 %s 缺少夜间窗口快照", o.OrderNo)
+		}
+		return o.TotalAmount, int64(time.Duration(o.Duration) * w.Length() / time.Second), nil
 	}
 	end, err := compute.LeaseEndAt(*o.LeaseStart, mode, o.Duration, nil)
 	if err != nil {

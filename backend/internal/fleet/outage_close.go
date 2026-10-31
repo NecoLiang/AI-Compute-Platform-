@@ -98,7 +98,16 @@ func (s *Service) settleOutageTx(tx *sqlx.Tx, ord *compute.Order, l *Lease, id i
 		liab = nil
 	}
 	now := time.Now()
-	if l.OutageRemedy == "extend" && extendable(ord, l, now) {
+	extend := l.OutageRemedy == "extend" && extendable(ord, l, now)
+	var nightExtend *nightExtension
+	if extend {
+		// 包夜(S4): 顺延 = 补加一晚(同卡同窗口); 末晚之后那晚卡已被别人订走 → 改为退费。
+		if nightExtend, err = s.planNightExtensionTx(tx, l, &o); err != nil {
+			return err
+		}
+		extend = nightExtend == nil || nightExtend.ok
+	}
+	if extend {
 		ok, err := affected(tx.Exec(`UPDATE lease_outages SET seconds=?, minutes=?, counted=1, liability_amount=?,
 			remedy='extend', remedy_applied_at=NOW() WHERE id=? AND counted IS NULL`, secs, secs/60, liab, id))
 		if err != nil {
@@ -106,6 +115,13 @@ func (s *Service) settleOutageTx(tx *sqlx.Tx, ord *compute.Order, l *Lease, id i
 		}
 		if !ok {
 			return fmt.Errorf("停机段 %d 结算守卫未命中", id)
+		}
+		if nightExtend != nil {
+			if err := s.applyNightExtensionTx(tx, ord, l, nightExtend); err != nil {
+				return err
+			}
+			slog.Info("停机补偿: 包夜补加一晚", "lease_no", l.LeaseNo, "outage_id", id, "night", nightExtend.describe(), "liable", o.Liable)
+			return nil
 		}
 		if err := s.extendForOutageTx(tx, ord, l, time.Duration(secs)*time.Second); err != nil {
 			return err

@@ -98,15 +98,21 @@ type StopOutcome struct {
 	FreedSlots int64    `json:"freed_slots"`
 }
 
-// stopApplies 租约是否仍需要停容器: grace(到期)、suspended 且已到期(冻结中到期, 停容器释放卡但保留现场)。
+// stopApplies 租约是否仍需要停容器: grace(到期)、parked(包夜窗口结束)、suspended 且已到期(冻结中到期,
+// 停容器释放卡但保留现场)。
 func stopApplies(l *Lease, now time.Time) bool {
 	switch l.State {
-	case LeaseGrace:
+	case LeaseGrace, LeaseParked:
 		return true
 	case LeaseSuspended:
 		return l.AccessUntil != nil && !l.AccessUntil.After(now)
 	}
 	return false
+}
+
+// stopNeeded stop 任务是否仍需执行: stopApplies, 或包夜窗口结束时租约处于冻结中(S4 T-095)。
+func stopNeeded(l *Lease, pl LeaseTaskPayload, now time.Time) bool {
+	return stopApplies(l, now) || (pl.Nightly && l.State == LeaseSuspended)
 }
 
 func (s *Service) runStopTask(ctx context.Context, t *Task) (any, error) {
@@ -121,7 +127,7 @@ func (s *Service) runStopTask(ctx context.Context, t *Task) (any, error) {
 	if l == nil {
 		return nil, errTaskAborted{"租约不存在"}
 	}
-	if l.NodeID != t.NodeID || !stopApplies(l, time.Now()) {
+	if l.NodeID != t.NodeID || !stopNeeded(l, pl, time.Now()) {
 		return nil, errTaskAborted{fmt.Sprintf("租约 %s 当前状态 %s(节点 #%d), 无需停止", l.LeaseNo, l.State, l.NodeID)}
 	}
 	client, err := s.dialLeaseNode(ctx, t.NodeID)
@@ -163,7 +169,7 @@ func (s *Service) runStopTask(ctx context.Context, t *Task) (any, error) {
 		if err != nil {
 			return err
 		}
-		if cur == nil || cur.NodeID != t.NodeID || !stopApplies(cur, time.Now()) {
+		if cur == nil || cur.NodeID != t.NodeID || !stopNeeded(cur, pl, time.Now()) {
 			// 停容器期间租约已恢复(续租)等: 卡槽归属由恢复路径处理, 这里不动。
 			return nil
 		}

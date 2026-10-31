@@ -154,10 +154,26 @@ func wallCommand(leaseNo string, minutes int) (string, error) {
 	if minutes < 1 || minutes > 100000 {
 		return "", fmt.Errorf("提醒分钟数非法: %d", minutes)
 	}
-	msg := fmt.Sprintf("[omnisline] lease expires in %d minutes; renew in console to keep this environment.", minutes)
+	return wallMessageCommand(c, fmt.Sprintf("[omnisline] lease expires in %d minutes; renew in console to keep this environment.", minutes)), nil
+}
+
+// nightWallCommand 包夜窗口结束前的容器内广播(S4 T-095): 窗口结束容器停止, 数据保留, 下一晚自动恢复。
+func nightWallCommand(leaseNo string, minutes int) (string, error) {
+	c, err := leaseContainer(leaseNo)
+	if err != nil {
+		return "", err
+	}
+	if minutes < 1 || minutes > 1440 {
+		return "", fmt.Errorf("提醒分钟数非法: %d", minutes)
+	}
+	return wallMessageCommand(c, fmt.Sprintf("[omnisline] nightly window ends in %d minutes; the container will stop (data kept) and resume at the next booked night.", minutes)), nil
+}
+
+// wallMessageCommand 容器在跑时 wall 广播平台固定模板消息(调用方保证消息不含引号与 shell 元字符)。
+func wallMessageCommand(c, msg string) string {
 	return "if [ \"$(docker inspect --type container -f '{{.State.Running}}' " + c + " 2>/dev/null)\" = true ]; then " +
 		"docker exec " + c + " sh -c 'command -v wall >/dev/null 2>&1 && echo \"" + msg + "\" | wall'; echo @@sent; " +
-		"else echo @@notrunning; fi", nil
+		"else echo @@notrunning; fi"
 }
 
 // ===== purge 各步骤(每步单独执行, 回执记录每步退出码) =====

@@ -526,8 +526,10 @@ func (p *provisionRun) activate() error {
 	s, l := p.s, p.l
 	var order *compute.Order
 	var end *time.Time
+	var delayOutage int64
 	err := s.inTx(func(tx *sqlx.Tx) error {
 		var err error
+		delayOutage = 0
 		end, err = s.products.ActivateManagedOrderTx(tx, l.OrderID, time.Now(),
 			compute.ManagedAccess{GatewayHost: s.gw.PublicHost, GatewayPort: s.gw.PublicPort, Login: l.LeaseNo})
 		if err != nil || end == nil {
@@ -539,6 +541,10 @@ func (p *provisionRun) activate() error {
 		}
 		if cur == nil {
 			return fmt.Errorf("租约 %s 不存在", l.LeaseNo)
+		}
+		// 锁序: 订单 → 租约 → 节点行 → 卡槽(包夜首晚停机补偿顺延会追加预订, 须先持节点行锁)。
+		if err := s.lockNodeRow(tx, cur.NodeID); err != nil {
+			return err
 		}
 		if err := s.mustTransition(tx, cur, LeaseActive, ", access_until=?, provisioned_at=NOW(), grace_until=NULL", *end); err != nil {
 			return err
@@ -554,10 +560,22 @@ func (p *provisionRun) activate() error {
 			return err
 		}
 		order, err = s.products.LockManagedOrderTx(tx, l.OrderID)
+		if err != nil || order == nil {
+			return err
+		}
+		// 包夜首晚(S4 T-095): 本晚记为已开窗; 晚于应开通时刻 ≥ min_minutes 记 provision_delay(平台责任)。
+		plan, err := s.repo.leaseNightPlan(tx, l.ID)
+		if err != nil || plan == nil {
+			return err
+		}
+		delayOutage, err = s.recordProvisionDelayTx(tx, order, cur, plan, time.Now())
 		return err
 	})
 	if err != nil {
 		return err
+	}
+	if delayOutage > 0 {
+		s.afterSettle(context.Background(), delayOutage)
 	}
 	if end == nil {
 		p.out.Abandoned = true

@@ -101,6 +101,14 @@ func (s *Service) stopDeploymentsTx(tx *sqlx.Tx, leaseID int64, reason string) e
 	return s.modelDeploy.StopForLeaseTx(context.Background(), tx, leaseID, reason)
 }
 
+// resumeNightlyDeploymentsTx 包夜开窗同事务恢复因窗口结束停止且 auto_resume=1 的部署(未接入一键部署时无操作)。
+func (s *Service) resumeNightlyDeploymentsTx(tx *sqlx.Tx, leaseID int64) (int, error) {
+	if s.modelDeploy == nil {
+		return 0, nil
+	}
+	return s.modelDeploy.ResumeNightlyForLeaseTx(context.Background(), tx, leaseID)
+}
+
 type deployRuntime struct{ s *Service }
 
 type runnerShell struct{ r Runner }

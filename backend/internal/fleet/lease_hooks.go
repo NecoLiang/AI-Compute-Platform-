@@ -30,7 +30,8 @@ const cleanupMaxAttempts = 10
 // LeaseHooks 供 main 注入 compute.SetLeaseHooks。
 func (s *Service) LeaseHooks() compute.LeaseHooks {
 	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx, RenewTx: s.renewLeaseTx,
-		Feasible: s.leaseFeasible, FreezeTx: s.freezeLeaseTx, UnfreezeTx: s.unfreezeLeaseTx, WrongFreeze: s.wrongFreeze}
+		Feasible: s.leaseFeasible, FreezeTx: s.freezeLeaseTx, UnfreezeTx: s.unfreezeLeaseTx, WrongFreeze: s.wrongFreeze,
+		NightFeasible: s.nightFeasible, NightCalendar: s.nightCalendar}
 }
 
 // wrongFreeze 误冻结停机交给停机认定(T-105); 未注入时只记日志, 不自行开/关 lease_outages。
@@ -68,6 +69,9 @@ func (s *Service) reserveLeaseTx(tx *sqlx.Tx, o *compute.Order, p *compute.Produ
 	if err := s.repo.insertLease(tx, l); err != nil {
 		return err
 	}
+	if o.PricingMode != nil && *o.PricingMode == compute.PricingNightly {
+		return s.reserveNightLeaseTx(tx, o, p, l)
+	}
 	nodeID, _, err := s.repo.reserveSlotsTx(tx, p.ID, o.Quantity, kind == "bare_metal", l.ID, 0)
 	if err != nil {
 		return err
@@ -101,6 +105,8 @@ type LeaseTaskPayload struct {
 	CleanupOnly   bool   `json:"cleanup_only,omitempty"`
 	ContainerName string `json:"container_name,omitempty"`
 	VolumeName    string `json:"volume_name,omitempty"`
+	// Nightly=true: 包夜窗口结束停容器(S4 T-095)。冻结中(suspended)的包夜租约同样要停, 把卡还给供给方白天自用。
+	Nightly bool `json:"nightly,omitempty"`
 }
 
 // onLeasePaidTx 收款确认: 租约 reserved → pending, 入队 provision(优先级 3)。
@@ -118,6 +124,15 @@ func (s *Service) onLeasePaidTx(tx *sqlx.Tx, o *compute.Order) error {
 	}
 	if !ok {
 		return fmt.Errorf("托管订单 %s 的租约状态为 %s, 无法进入开通", o.OrderNo, l.State)
+	}
+	plan, err := s.repo.leaseNightPlan(tx, l.ID)
+	if err != nil {
+		return err
+	}
+	if plan != nil {
+		// 包夜(S4 T-095): 卡槽到首晚窗口开始前 10 分钟才认领, 开通任务由包夜任务按时入队。
+		l.State = LeasePending
+		return s.nightPaidTx(tx, l, plan)
 	}
 	_, err = s.repo.insertLeaseTask(tx, l.NodeID, l.ID, KindProvision, prioProvision, LeaseProvisionPayload{LeaseID: l.ID})
 	return err
@@ -156,6 +171,16 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 	}
 	// 锁顺序: 订单 → 租约 → 节点行 → 卡槽 → 商品行(见 reserveSlotsTx)。
 	if err := s.lockNodeRow(tx, l.NodeID); err != nil {
+		return err
+	}
+	// 包夜预订(§26.6.3): 关单/取消删除全部; 退款/到期只删尚未开始的晚(已开始的晚保留作履约记录)。
+	switch l.State {
+	case LeaseReserved, LeasePending:
+		err = s.releaseNightsTx(tx, l.ID, true)
+	case LeaseProvisioning, LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace:
+		err = s.releaseNightsTx(tx, l.ID, false)
+	}
+	if err != nil {
 		return err
 	}
 	switch l.State {
