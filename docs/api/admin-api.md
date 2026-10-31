@@ -129,6 +129,38 @@ curl -X POST http://localhost:8080/api/v1/admin/nodes/7/suspend \
 ### GET /admin/lease-outages · 停机检索（S2 T-105）
 `?lease_no=&order_no=&cause=&supplier_id=&open=1&refund_pending=1&page=&page_size=`；含认定原文 `detail` 与责任金额 `liability_amount`（分）。契约见 [managed-rental-api.md](managed-rental-api.md#运营接口)。
 
+### POST /admin/supplier-breach-refunds · 供给方违约未使用部分退款（S2 T-106）
+docs/25 §25.7.6「供给方约束」的运营发起路径（买家自助申请未实现）。
+
+```json
+{"order_no":"ORD20261101103000123abc","reason":"供给方节点连续离线 3 小时"}
+```
+
+- `order_no` 为托管**原订单号**（续租单号返回 40001「订单无租约(续租单请使用原订单号)」）；`reason` 必填。
+- 门槛：当前所属订单（原订单或已生效的续租单）期内**供给方责任**停机累计 ≥ 租期 × `fleet.outage.refund_ratio`，或单次 ≥ `refund_single_hours` 小时（与 Q-47 退费门槛同参数，平台责任停机不计；进行中的停机按已持续时长计）。
+- 执行：进行中的停机先在当前时刻结束并按租约补偿方式结算；然后同一事务内把访问期限（租约 `access_until`、订单 `lease_end_at`、交付 `access_expires_at`）截断到当前时刻，登记 `payment_refunds(kind='supplier_breach', source_id=租约 ID)`，金额 = `floor(所属订单实付 × 剩余访问秒数 ÷ 所属订单租期秒数)`，封顶为该支付尚未登记部分退款的余额；写审计 `lease.supplier_breach_refund`。提交后立即向易宝发起退款，提交失败由定时任务继续推进。之后租约照常进入宽限 → 清除 → 租期末分账，违约退款全额计入供给方责任。
+- 一个租约至多一次（`UNIQUE(kind, source_id)`）。
+
+返回：`{"order_no","refund_order_no","lease_no","refund_id","amount","access_until"}`（`refund_order_no` 为退款所在订单，续租后为当前续租单）。
+
+| 场景 | code |
+|---|---|
+| `order_no` / `reason` 缺失；订单无租约 | 40001 |
+| 订单不存在或不是托管订单 | 40400 |
+| 租约不在租期内；未达违约门槛；存在待处理或已预付的后续续租；没有可退的未使用金额；已发起过违约退款 | 40900 |
+| 部分退款通道未打开（`fleet.outage.yeepay_partial_refund_confirmed=false` 或未接入） | 50000 |
+
+### GET /admin/payment/partial-refunds · 部分退款列表（S2 T-106）
+`?status=pending|processing|success|failed&order_no=&page=&page_size=`（`page_size` ≤ 100），按 id 倒序，分页信封 `{list,total,page,page_size}`。`list[]`：
+
+```json
+{"id":7,"payment_id":12,"order_no":"ORD…","refund_request_id":"P…","amount":7800,"kind":"outage_compensation",
+ "source_id":31,"reason":"算力订单停机补偿退费","status":"success","yeepay_refund_no":"…","last_error":null,
+ "created_at":"…","updated_at":"…"}
+```
+
+`kind`/`source_id`/状态机见 payment-api.md「租期末结算与部分退款」。`status` 非法返回 40001。`failed` 行会在 1 小时后自动换新请求号重提，无需人工操作；长期 `failed` 需人工核对易宝侧。
+
 ### 供给方信用（S2 T-105）
 
 沿用 `credit_scores`（每个托管供给方一行）。计分口径与停调度规则见 [managed-rental-api.md](managed-rental-api.md#供给方信用与停调度)；后台每 10min 重算，供给方责任停机结算后即时重算。阈值 `fleet.credit.stop_below`（默认 60）。

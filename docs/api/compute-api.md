@@ -584,10 +584,10 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 | `refund_requested_at` | 买家申请过退费的时间（退费通道未就绪时只记录意向，补偿仍按顺延执行） |
 | `can_change_remedy` | 租约在租（`active/parked/suspended`）且 `access_until` 未到 |
 | `refund_eligible` | 达到退费门槛（Q-47）：**当前所属订单**（原订单或已生效的续租单）期内停机累计 ≥ 租期 × `refund_ratio`，或单次停机 ≥ `refund_single_hours` 小时；进行中的停机按已持续时长计入 |
-| `refund_available` | 退费通道已就绪（T-106 退费实现已接入且 `fleet.outage.yeepay_partial_refund_confirmed=true`）。S2 当前恒为 `false` |
+| `refund_available` | 退费通道已就绪（T-106 退费实现已接入且 `fleet.outage.yeepay_partial_refund_confirmed=true`）。开关默认 `false`，易宝部分退款能力书面确认前恒为 `false` |
 | `term_minutes` / `term_outage_minutes` / `longest_outage_minutes` | 门槛计算口径：当前所属订单租期分钟数、期内计入停机分钟、期内最长一段 |
 | `extended_minutes` | 已顺延的总分钟数 |
-| `pending_refund_amount` | 待退费金额合计（分），`remedy=refund` 且尚未退款的停机段 |
+| `pending_refund_amount` | 待退费金额合计（分），`remedy=refund` 且尚未退款成功的停机段（含已提交易宝处理中） |
 | `items[]` | 按开始时间倒序。`ongoing=true` 为进行中（`ended_at=null`，`minutes` 为已持续分钟）；`counted=false` 为不足 `fleet.outage.min_minutes`（默认 5）或与其他段完全重叠，不补偿；`counted=null` 为尚未结算 |
 | `items[].remedy` | `extend` 已顺延（`remedy_applied_at` 为顺延时刻）/ `refund` 待退费（`remedy_amount` 为金额，分；`remedy_applied_at` 为空表示尚未退款） |
 
@@ -606,9 +606,14 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 | 缺少 `remedy` 或不是 `extend/refund` | 40001 | remedy 必填(extend 或 refund) / remedy 只能是 extend 或 refund |
 | 租期已结束（租约不在租或 `access_until` 已过） | 40900 | 租期已结束, 不能再修改补偿方式; 未补偿的停机将按比例退费 |
 | `refund` 未达门槛 | 40900 | 未达到退费条件(本期累计停机 ≥ 租期的 10% 或单次停机 ≥ 2 小时), 只能顺延补偿 |
-| `refund` 达门槛但退费通道未就绪（S2 现状） | 50000 | 易宝部分退款能力未确认，暂只支持顺延补偿（同时记录 `refund_requested_at`，补偿方式保持 `extend`） |
+| `refund` 达门槛但退费通道未就绪（开关为 `false` 时） | 50000 | 易宝部分退款能力未确认，暂只支持顺延补偿（同时记录 `refund_requested_at`，补偿方式保持 `extend`） |
 | 并发下租约状态已变化 | 40900 | 租约状态已变化, 请刷新后重试 |
 
 - `extend` 随时可选（租期内），并清除 `refund_requested_at`。
 - 顺延的效果：租约 `access_until`、订单 `lease_end_at`、交付 `access_expires_at` 同一事务后移停机时长（刷新撤销游标，网关按新时刻放行）；已下单未支付的 `extend` 续租单的起点与 `renewed_until` 一并后移（支付时仍能对上原订单结束时间）。
 - 租期结束后才结束的停机段（含冻结中到期）无法顺延，统一转为待退费（`remedy=refund`），由 T-106 退费流程处理。
+
+**退费的真实执行（S2 T-106）**：开关 `fleet.outage.yeepay_partial_refund_confirmed=true` 时（且 `fleet.enabled=true`、易宝已配置，否则服务启动失败），`remedy=refund` 的停机段结束即按 `remedy_amount` 从**该停机所属订单**（续租后为续租单）的支付经易宝原路部分退款：资金在待分账账户中，退款直接退回买家，不涉及分账归还。退款成功（同步结果 / 查询 / 异步通知）时写 `remedy_applied_at`；失败 1 小时后自动换新请求号重试；同一停机段至多一笔退款（幂等）。`remedy_amount=0`（停机极短向下取整为 0）直接视为已补偿。结算任务每分钟兜底提交未登记的待退费停机段。退款记录与分账扣减口径见 payment-api.md「租期末结算与部分退款」。
+- 开关为 `false`（默认）时：选 `refund` 仍返回 `50000` 并只记录意向；租期结束后的待退费停机段不会退款，**该订单整条续租链不会进入分账**（资金留在易宝待分账账户），结算任务按订单发运营告警，需人工处理或打开开关。
+- 先前只记录了 `refund_requested_at`（补偿按顺延执行）的买家，开关打开后**不会自动改为退费**，需买家重新选择 `refund`（已顺延的段不改）。
+- 租期末结算：租约进入清除（`purging/purged`）且所有停机段补偿落地、部分退款全部成功后，根订单写 `settle_ready_at` 并开始分账；此后续租报价 / 下单返回 `40900`（「续租条件已变化…」，需重新下单）。宽限期内仍可 restart 续租。

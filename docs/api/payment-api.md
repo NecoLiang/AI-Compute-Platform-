@@ -59,6 +59,8 @@ curl "http://localhost:8080/api/v1/payment/settlements?order_no=ORD20260713001" 
   -H "Authorization: Bearer <token>"
 ```
 
+记录（含 `GET /supplier/settlements`）新增两个字段（迁移 037，托管订单才非 0）：`refund_deduction` 已成功部分退款从本行扣减的金额（分；收款时锁定的应结 = `amount + refund_deduction`），`platform_compensation` 仅供给方行，平台责任退款超出平台费而从本行扣下、由平台另行补偿的金额（分）。托管订单的 `amount` 在租期末分账前按部分退款重算，口径见下文「租期末结算与部分退款」。
+
 ---
 
 ## 金额说明
@@ -112,4 +114,56 @@ platformFee = totalAmount × feeRate / 10000  (feeRate默认500=5%)
 
 - **收款确认触发开通**：回调确认收款（payment → `paid`、订单 → `paid`）的**同一事务**内调用托管收款钩子：租约 `reserved → pending` 并入队开通任务。钩子未接入（`fleet.enabled=false` 却存在托管订单）时确认收款整体失败回滚并报错「托管订单 … 收款钩子未接入(fleet 未启用), 无法确认收款」，不会出现"已收款但不开通"。续租子订单不走此钩子，而走续租落账（T-088，同一事务）：收款前校验租约条件（extend 租约仍在租未到期；restart 预留卡槽仍完整），不满足时不落账、款项排队原路退回；落账时 extend 顺延租约 `access_until`，restart 原订单 → `paid`、租约 → `pending` 并自动重新开通。详见 compute-api.md「托管订单续租（S2 T-088）」。
 - **开通失败自动退款**：开通彻底失败时订单 → `cancelled` 且 `lease_start_at=null`，沿用既有「已付但租期未开始即关闭 → 自动排队原路全额退款」逻辑（`refund_status='pending'`，原因「订单已关闭, 款项原路退回」），不新增退款路径；已有 `processing/success` 分账的订单不自动退。
-- **分账时点**：托管订单激活（`active`）**不触发分账**，须等租期末结算写入 `orders.settle_ready_at` 后才发起（T-106 未实现前托管订单不会分账，应结记录照常在收款时生成）。续租子订单看母单的 `settle_ready_at`。
+- **分账时点**：托管订单激活（`active`）**不触发分账**，须等租期末结算写入 `orders.settle_ready_at` 后才发起（T-106，见下节）；应结记录照常在收款时生成。续租子订单看母单的 `settle_ready_at`。
+
+### 租期末结算与部分退款（S2 T-106，docs/24 D-10、docs/25 §25.7.6）
+
+**settle_ready_at 写入时点**（fleet 结算任务每分钟一轮，守卫式 `UPDATE … WHERE settle_ready_at IS NULL AND status='completed' AND fulfillment_mode='managed'`，只写根订单）：
+
+1. 根订单 `completed`，且其租约已进入 `purging/purged`（或 `failed/cancelled`）。**宽限期（grace）内不写**：宽限期内仍可 restart 续租把订单重新打开；`settle_ready_at` 写入后续租报价 / 下单一律 `40900`（`ErrRenewalConflict`，需重新下单）。两者都在根订单行锁下判断，互斥。
+2. 续租单全部 `completed/cancelled/refunded`（无待支付 / 退款中的续租）。
+3. 租约每段停机都已结束且补偿已落地（`ended_at`、`remedy_applied_at` 均非空）。待退费停机由结算任务兜底提交退款；退费通道未打开时不写并发运营告警（资金继续留在易宝待分账账户）。
+4. 链上订单（根 + 续租）的 `payment_refunds` 全部 `success`（已全额退款的支付除外）。
+
+续租子订单不单独写，沿用根订单的值；写入后由 payment 定时任务按订单逐笔分账。
+
+**部分退款 `payment_refunds`**（迁移 027 建表、037 扩展；托管订单专用，全额退款仍走 `payments.refund_status`）：
+
+| 字段 | 说明 |
+|---|---|
+| `kind` | `outage_compensation`（停机补偿，`source_id`=`lease_outages.id`）/ `supplier_breach`（供给方违约未使用部分，`source_id`=`leases.id`） |
+| `order_no` / `payment_id` | 停机所属订单（续租后为续租单）及其已收款支付 |
+| `amount` | 分；同一支付所有行（任意状态）累计不得超过实付 |
+| `status` | `pending`（已登记，待清算入账后提交）→ `processing`（已向易宝提交，请求号已落库）→ `success` / `failed` |
+| `refund_request_id` | 易宝退款请求号（前缀 `P`）；`failed` 重提时换新请求号 |
+
+- **幂等**：`UNIQUE(kind, source_id)`；同一停机段 / 同一租约至多一行，重复调用、并发调用都只调用一次易宝。所有部分退款路径先锁订单族（母单 → 续租单），再锁 `payment_refunds` → `payments` → `settlements`。
+- **结果落地**：同步返回 / 定时查询（`processing` 按请求号查）/ 异步通知（`POST /payment/yeepay/notify/refund`，按 `refund_request_id` 路由到部分退款）三路共用一个幂等落地函数。`SUCCESS` 时同事务写 `lease_outages.remedy_applied_at`；`FAILED/CANCEL` 记 `failed` + 运营告警，1 小时后自动换新请求号重提。
+- **开关**：仅当 `fleet.enabled=true` 且 `fleet.outage.yeepay_partial_refund_confirmed=true`（易宝部分退款能力已书面确认）时 main 打开通道；易宝未接入时启动失败（不降级为"假装可退"）。未打开时不登记、不提交，选退费返回 `50000`；已在 `processing` 的仍会查询落地。
+- **登记条件**：根订单为托管且 `settle_ready_at IS NULL`、支付 `paid` 且未进入全额退款、本订单无 `processing/success` 分账。已进入分账后不能再部分退款。
+- **全额退款扣除已成功部分退款**：之后的全额退款金额 = 实付 − 已成功部分退款；有 `processing` 部分退款时全额退款等待；`pending/failed` 的部分退款在全额退款成功后作废（记 `failed`，原因「订单已全额退款, 本笔不再提交」）。
+
+**分账金额（托管订单）**。记收款时锁定的平台行为 `platBase`、供给方行为 `supBase`（`platBase + supBase = 实付 paid`），已成功部分退款中供给方责任（含违约退款）合计 S、平台责任合计 P：
+
+```
+platDed1 = floor(S × platBase ÷ paid)          // 供给方责任退款按锁定比例分摊(保守口径: 佣金同比例减少)
+supDed1  = S − platDed1
+fromPlat = min(P, platBase − platDed1)         // 平台责任先从平台费里扣
+overflow = P − fromPlat                         // 平台费不够扣的部分
+平台应结 = platBase − platDed1 − fromPlat
+供给方应结 = supBase − supDed1 − overflow;  platform_compensation = overflow
+```
+
+`overflow` 是平台责任却从待分账资金里退给了买家、因而从供给方应结里扣下的钱，记在供给方行 `platform_compensation`，由平台另行补偿给供给方（记账，不走易宝二清）。`settlements.refund_deduction` 记本行被扣减的金额（锁定应结 = `amount + refund_deduction`）。重算在分账事务内用守卫式 UPDATE 完成，并校验 **不变量：部分退款(成功)合计 + 两行应结 = 实付**，不成立时不分账并报错。两行合计为 0（实付已全部部分退款）时两行置 `cancelled`，不调用分账。
+
+示例（实付 72000、平台费 7200、供给方 64800，单位分）：
+
+| 场景 | 退款 | 平台应结 | 供给方应结 | 平台补偿 | 校验 |
+|---|---|---|---|---|---|
+| 无停机 | 0 | 7200 | 64800 | 0 | 0+7200+64800=72000 |
+| 供给方责任停机 13 分钟（2h 租期，按实付×秒数÷租期秒数=7800） | 7800 | 7200−780=6420 | 64800−7020=57780 | 0 | 7800+6420+57780=72000 |
+| 供给方 3000 + 平台责任 5000、4000 | 12000 | 7200−300−6900=0 | 64800−2700−2100=60000 | 2100 | 12000+0+60000=72000 |
+
+**发票**：可开票金额 = 订单金额 − 已成功部分退款；存在未成功的部分退款时该订单暂不可开票；已开票后再发生部分退款的，按既有红冲流程处理（不自动红冲）。
+
+运营查看：`GET /admin/payment/partial-refunds`（见 admin-api.md）。
