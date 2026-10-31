@@ -421,6 +421,24 @@ func splitEligible(orderStatus string, parentStatus *string) bool {
 	return parentStatus == nil || *parentStatus == "active" || *parentStatus == "completed"
 }
 
+func isManagedFamily(order, parent *compute.Order) bool {
+	root := order
+	if parent != nil {
+		root = parent
+	}
+	return root.FulfillmentMode == compute.FulfillmentManaged
+}
+
+// splitRowsOpen 两行应结都还未发起分账(pending/failed)。
+func splitRowsOpen(rows []Settlement) bool {
+	for _, r := range rows {
+		if r.Status != "pending" && r.Status != "failed" {
+			return false
+		}
+	}
+	return true
+}
+
 func managedSettleBlocked(order, parent *compute.Order) bool {
 	root := order
 	if parent != nil {
@@ -466,6 +484,17 @@ func (s *Service) trySplit(orderNo string) error {
 	if err := tx.Select(&rows, "SELECT * FROM settlements WHERE order_no=? FOR UPDATE", orderNo); err != nil {
 		return err
 	}
+	managed := isManagedFamily(order, parent)
+	if managed {
+		// 托管订单: 按已成功的部分退款重算两行应结(T-106); 有未终结的部分退款时本轮不分账。
+		if !splitRowsOpen(rows) {
+			return nil
+		}
+		ok, err := adjustManagedSplitTx(tx, &pay, rows)
+		if err != nil || !ok {
+			return err
+		}
+	}
 	var supplier *Settlement
 	var total int64
 	for i := range rows {
@@ -474,11 +503,19 @@ func (s *Service) trySplit(orderNo string) error {
 			supplier = &rows[i]
 		}
 	}
-	if supplier == nil || len(rows) != 2 || total != pay.Amount {
+	if supplier == nil || len(rows) != 2 || (!managed && total != pay.Amount) {
 		return fmt.Errorf("订单 %s 应结记录与支付金额不一致", orderNo)
 	}
 	if supplier.Status != "pending" && supplier.Status != "failed" {
 		return nil
+	}
+	if managed && total == 0 {
+		// 实付已通过部分退款全部退回买家: 无可分资金, 两行应结关闭。
+		if _, err := tx.Exec(`UPDATE settlements SET status='cancelled', fail_reason='实付已全部部分退款'
+			WHERE order_no=? AND status IN ('pending','failed')`, orderNo); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if supplier.Amount <= 0 {
 		return fmt.Errorf("订单 %s 供给方应结金额无效", orderNo)
