@@ -16,6 +16,15 @@ func (h *Handler) OrderOutages(c *gin.Context) {
 	response.Success(c, r)
 }
 
+func (h *Handler) OrderNights(c *gin.Context) {
+	r, err := h.svc.OrderNights(c.GetInt64("user_id"), c.Param("id"))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.Success(c, r)
+}
+
 func (h *Handler) SetOutageRemedy(c *gin.Context) {
 	var req struct {
 		Remedy string `json:"remedy" binding:"required"`

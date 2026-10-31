@@ -296,6 +296,7 @@ func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
 	r.GET("/orders/:id/access", h.OrderAccess)
 	r.GET("/orders/:id/sessions", h.OrderSessions)
 	r.GET("/orders/:id/outages", h.OrderOutages)
+	r.GET("/orders/:id/nights", h.OrderNights)
 	r.PUT("/orders/:id/outage-remedy", h.SetOutageRemedy)
 }
 

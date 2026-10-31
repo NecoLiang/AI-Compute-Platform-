@@ -307,6 +307,8 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
     "unit_price":2520000,"total_amount":20160000,"platform_fee":1008000,
     "payment_expires_at":null,"lease_start_at":"2026-07-11T02:00:00Z",
     "lease_end_at":"2026-08-11T02:00:00Z","compliance_agreed":true,
+    "fulfillment_mode":"managed","pricing_mode":"monthly",
+    "night_start_date":null,"night_start_min":null,"night_end_min":null,
     "created_at":"2026-07-11T01:30:00Z","updated_at":"2026-07-11T02:00:00Z"},
   "product":{"id":1,"product_type":"card_rental","gpu_model":"NVIDIA H100","card_count":8,
     "machine_count":null,"total_pflops_approx":null,"power_capacity_kw":null,"rack_count":null,
@@ -320,6 +322,8 @@ curl http://localhost:8080/api/v1/orders/ORD20260713001 \
   "actions":{"can_confirm":false,"can_renew":true,"can_refund":true,"can_view_credential":true}
 },"request_id":"req_xxx"}
 ```
+
+`order.fulfillment_mode`（`managed`/`manual`，旧订单无值按 `manual`）、`order.pricing_mode`（订单计费方式快照，缺失为空串）、`order.night_start_date`（包夜首晚日期，序列化为该日 00:00 的时间串，如 `"2026-11-03T00:00:00+08:00"`）、`order.night_start_min`/`order.night_end_min`（包夜窗口快照，自 00:00 起的分钟数）与订单列表行同名同义；非包夜订单三个 `night_*` 字段为 `null`。包夜订单的 `duration` 为购买晚数，每晚明细见 managed-rental-api.md「GET /orders/:id/nights」。
 
 `product.pricing_mode` 与 `product.min_duration` 取**订单**的计费方式快照及该方式当前的最短租期（快照缺失时 `pricing_mode` 为空串、`can_renew=false`，不回退商品展示方式），用于续租表单；其余 `product` 字段为商品当前资料。`delivery` 和 `supplier.credit` 没有记录时为 `null`。详情不返回 `buyer_id`、`supplier_id`、密文、`access_key` 或凭证明文；凭证仍通过独立的 access-credential 接口查看。当前数据库没有订单事件表和商品快照，因此此接口不伪造区块链时间线，`product` / `supplier` 是当前关联资料。
 
@@ -618,7 +622,7 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
   "can_change_remedy":true,"refund_eligible":false,"refund_available":false,
   "term_minutes":120,"term_outage_minutes":10,"longest_outage_minutes":10,
   "refund_ratio":0.1,"refund_single_hours":2,
-  "extended_minutes":10,"pending_refund_amount":0,
+  "extended_minutes":10,"extended_nights":null,"pending_refund_amount":0,
   "items":[{"id":31,"cause":"node_offline","liable":"supplier",
     "started_at":"2026-11-01T10:20:00+08:00","ended_at":"2026-11-01T10:30:00+08:00","ongoing":false,
     "minutes":10,"counted":true,"remedy":"extend","remedy_applied_at":"2026-11-01T10:30:02+08:00","remedy_amount":null}]},
@@ -633,7 +637,8 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 | `refund_eligible` | 达到退费门槛（Q-47）：**当前所属订单**（原订单或已生效的续租单）期内停机累计 ≥ 租期 × `refund_ratio`，或单次停机 ≥ `refund_single_hours` 小时；进行中的停机按已持续时长计入 |
 | `refund_available` | 退费通道已就绪（T-106 退费实现已接入且 `fleet.outage.yeepay_partial_refund_confirmed=true`）。开关默认 `false`，易宝部分退款能力书面确认前恒为 `false` |
 | `term_minutes` / `term_outage_minutes` / `longest_outage_minutes` | 门槛计算口径：当前所属订单租期分钟数、期内计入停机分钟、期内最长一段 |
-| `extended_minutes` | 已顺延的总分钟数 |
+| `extended_minutes` | 已以顺延方式补偿的停机总分钟数（时/日/周/月订单即租期后移的分钟数；包夜订单是被补偿的停机分钟，实际补偿为补加整晚，见 `extended_nights`） |
+| `extended_nights` | 包夜订单已补加的晚数（排在原购买最后一晚之后的夜晚，含已过去的）；非包夜订单为 `null` |
 | `pending_refund_amount` | 待退费金额合计（分），`remedy=refund` 且尚未退款成功的停机段（含已提交易宝处理中） |
 | `items[]` | 按开始时间倒序。`ongoing=true` 为进行中（`ended_at=null`，`minutes` 为已持续分钟）；`counted=false` 为不足 `fleet.outage.min_minutes`（默认 5）或与其他段完全重叠，不补偿；`counted=null` 为尚未结算 |
 | `items[].remedy` | `extend` 已顺延（`remedy_applied_at` 为顺延时刻）/ `refund` 待退费（`remedy_amount` 为金额，分；`remedy_applied_at` 为空表示尚未退款） |

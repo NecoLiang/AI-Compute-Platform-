@@ -256,6 +256,44 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 - `key_name`：本人登记该指纹时的名称（公钥删除后仍显示，便于核对）；密码登录或指纹未在本人名下登记为 `null`。
 - `ended_at=null` 表示会话进行中（或网关尚未上报结束）。`bytes_up/bytes_down` 在 S2 恒为 0（sshpiperd v1.6.1 插件拿不到字节数）。系统自检会话不记录。
 
+### GET /orders/:id/nights · 包夜订单每晚记录 ✅
+
+仅本人**包夜**托管订单（`pricing_mode=nightly`）。`:id` 为订单号。
+
+```json
+{"code":0,"message":"success","data":{
+  "order_no":"ORD20261101103000123abc","lease_no":"l-4g7bq4xc","lease_state":"parked",
+  "night_start_min":1320,"night_end_min":480,
+  "purchased_nights":3,"extended_nights":1,
+  "next_window_start":"2026-11-03T22:00:00+08:00",
+  "nights":[
+   {"night_date":"2026-11-01","window_start":"2026-11-01T22:00:00+08:00","window_end":"2026-11-02T08:00:00+08:00",
+    "state":"ended","fail_cause":null,"compensation":false,"unparked_at":"2026-11-01T22:00:41+08:00","outage_id":null},
+   {"night_date":"2026-11-02","window_start":"2026-11-02T22:00:00+08:00","window_end":"2026-11-03T08:00:00+08:00",
+    "state":"failed","fail_cause":"node_offline","compensation":false,"unparked_at":null,"outage_id":57},
+   {"night_date":"2026-11-03","window_start":"2026-11-03T22:00:00+08:00","window_end":"2026-11-04T08:00:00+08:00",
+    "state":"booked","fail_cause":null,"compensation":false,"unparked_at":null,"outage_id":null},
+   {"night_date":"2026-11-04","window_start":"2026-11-04T22:00:00+08:00","window_end":"2026-11-05T08:00:00+08:00",
+    "state":"booked","fail_cause":null,"compensation":true,"unparked_at":null,"outage_id":null}]},
+ "request_id":"..."}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `night_start_min` / `night_end_min` | 订单快照的夜间窗口（自 00:00 起的分钟数；`end < start` 表示跨零点） |
+| `purchased_nights` | 购买晚数（= 订单 `duration`） |
+| `extended_nights` | 停机补偿补加的晚数（与 `GET /orders/:id/outages` 的 `extended_nights` 同口径） |
+| `next_window_start` | 最早一个**窗口尚未结束**且状态为 `booked/active` 的夜晚的窗口开始时刻；当前正处于某晚窗口内时即该晚开始（≤ 当前时刻）；没有剩余夜晚时为 `null` |
+| `nights[]` | 按 `night_date` 升序，含已过去的晚与补偿晚 |
+| `nights[].night_date` | 窗口开始那天的日期 `YYYY-MM-DD`（跨零点窗口的结束在次日） |
+| `nights[].state` | `booked` 已预订未开窗 / `active` 本晚已开窗（容器已启动） / `ended` 本晚窗口已结束 / `failed` 本晚判定失败 |
+| `nights[].fail_cause` | `failed` 晚为计入停机的原因（`night_unpark_failed`/`node_offline`/`container_down`/`gateway_down`/`provision_delay`）；`booked` 晚非空表示本晚开窗重试中、最近一次失败的原因；其余为 `null` |
+| `nights[].compensation` | `true` = 停机补偿补加的一晚（`night_date` ≥ 首晚 + 购买晚数），不额外收费 |
+| `nights[].unparked_at` | 本晚实际开窗（容器启动）时刻；未开窗为 `null` |
+| `nights[].outage_id` | 本晚失败记入的停机段 id（对应 `GET /orders/:id/outages` 的 `items[].id`）；无为 `null` |
+
+- **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单；40400 订单尚无租约；40001「该订单不是包夜订单, 没有每晚记录」。
+
 ---
 
 ## 租约生命周期（S2 T-087/T-088）✅

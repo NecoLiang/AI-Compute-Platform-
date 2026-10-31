@@ -31,21 +31,23 @@ type BuyerOutage struct {
 
 // OrderOutages GET /orders/:id/outages。
 type OrderOutages struct {
-	OrderNo            string        `json:"order_no"`
-	LeaseNo            string        `json:"lease_no"`
-	LeaseState         string        `json:"lease_state"`
-	AccessUntil        *time.Time    `json:"access_until"`
-	Remedy             string        `json:"remedy"`
-	RefundRequestedAt  *time.Time    `json:"refund_requested_at"`
-	CanChangeRemedy    bool          `json:"can_change_remedy"`
-	RefundEligible     bool          `json:"refund_eligible"`
-	RefundAvailable    bool          `json:"refund_available"`
-	TermMinutes        int           `json:"term_minutes"`
-	TermOutageMinutes  int           `json:"term_outage_minutes"`
-	LongestMinutes     int           `json:"longest_outage_minutes"`
-	RefundRatio        float64       `json:"refund_ratio"`
-	RefundSingleHours  int           `json:"refund_single_hours"`
-	ExtendedMinutes    int           `json:"extended_minutes"`
+	OrderNo           string     `json:"order_no"`
+	LeaseNo           string     `json:"lease_no"`
+	LeaseState        string     `json:"lease_state"`
+	AccessUntil       *time.Time `json:"access_until"`
+	Remedy            string     `json:"remedy"`
+	RefundRequestedAt *time.Time `json:"refund_requested_at"`
+	CanChangeRemedy   bool       `json:"can_change_remedy"`
+	RefundEligible    bool       `json:"refund_eligible"`
+	RefundAvailable   bool       `json:"refund_available"`
+	TermMinutes       int        `json:"term_minutes"`
+	TermOutageMinutes int        `json:"term_outage_minutes"`
+	LongestMinutes    int        `json:"longest_outage_minutes"`
+	RefundRatio       float64    `json:"refund_ratio"`
+	RefundSingleHours int        `json:"refund_single_hours"`
+	ExtendedMinutes   int        `json:"extended_minutes"`
+	// ExtendedNights 包夜订单因停机顺延补加的晚数(非包夜为 null); 包夜的 extended_minutes 是被补偿的停机分钟, 不是加时。
+	ExtendedNights     *int          `json:"extended_nights"`
 	PendingRefundTotal int64         `json:"pending_refund_amount"`
 	Items              []BuyerOutage `json:"items"`
 }
@@ -145,6 +147,9 @@ func (s *Service) orderOutages(o *compute.Order, l *Lease) (*OrderOutages, error
 	}
 	r.TermOutageMinutes = int(termSecs / 60)
 	r.LongestMinutes = int(longest / 60)
+	if r.ExtendedNights, err = s.extendedNights(l.ID); err != nil {
+		return nil, err
+	}
 	r.RefundEligible = term > 0 && (float64(termSecs) >= s.cfg.Outage.RefundRatio*float64(term) ||
 		longest >= int64(s.cfg.Outage.RefundSingleHours)*3600)
 	return r, nil

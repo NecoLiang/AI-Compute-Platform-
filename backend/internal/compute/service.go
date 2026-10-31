@@ -230,6 +230,12 @@ type BuyerOrderDetailOrder struct {
 	ComplianceAgreed bool       `json:"compliance_agreed"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
+	// 下单快照(与订单列表行同名同类型): 履约模式、计费方式; 包夜订单另有首晚日期与夜间窗口(分钟), 其他订单为 null。
+	FulfillmentMode string     `json:"fulfillment_mode"`
+	PricingMode     string     `json:"pricing_mode"`
+	NightStartDate  *time.Time `json:"night_start_date"`
+	NightStartMin   *int       `json:"night_start_min"`
+	NightEndMin     *int       `json:"night_end_min"`
 }
 
 type BuyerOrderDetailProduct struct {
@@ -1509,6 +1515,8 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			UnitPrice: order.UnitPrice, TotalAmount: order.TotalAmount, PlatformFee: order.PlatformFee,
 			PaymentExpiresAt: order.PaymentExpires, LeaseStartAt: order.LeaseStart, LeaseEndAt: order.LeaseEnd,
 			ComplianceAgreed: order.ComplianceAgreed, CreatedAt: order.CreatedAt, UpdatedAt: order.UpdatedAt,
+			FulfillmentMode: fulfillmentOrManual(order.FulfillmentMode), PricingMode: orderMode,
+			NightStartDate: order.NightStartDate, NightStartMin: order.NightStartMin, NightEndMin: order.NightEndMin,
 		},
 		Product: BuyerOrderDetailProduct{
 			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel, MinDuration: orderMinDuration,

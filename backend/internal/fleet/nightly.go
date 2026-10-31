@@ -11,6 +11,7 @@ import (
 
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/modeldeploy"
+	"tokenfactory/pkg/errcode"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -971,4 +972,93 @@ func (s *Service) applyNightExtensionTx(tx *sqlx.Tx, ord *compute.Order, l *Leas
 		return err
 	}
 	return s.recomputeStockTx(tx, l.ProductID)
+}
+
+// ===== 买家查看每晚履约(GET /orders/:id/nights) =====
+
+// BuyerNight 包夜订单的一晚。compensation=true 表示停机顺延补加的一晚(不在原购买晚数内)。
+type BuyerNight struct {
+	NightDate    string     `json:"night_date"`
+	WindowStart  time.Time  `json:"window_start"`
+	WindowEnd    time.Time  `json:"window_end"`
+	State        string     `json:"state"`
+	FailCause    *string    `json:"fail_cause"`
+	Compensation bool       `json:"compensation"`
+	UnparkedAt   *time.Time `json:"unparked_at"`
+	OutageID     *int64     `json:"outage_id"`
+}
+
+// OrderNights 包夜订单每晚记录。next_window_start: 最早一个尚未结束窗口(booked/active)的开始时刻,
+// 正处于某晚窗口内时即该晚开始(≤ 当前时刻); 没有则为 null。
+type OrderNights struct {
+	OrderNo         string       `json:"order_no"`
+	LeaseNo         string       `json:"lease_no"`
+	LeaseState      string       `json:"lease_state"`
+	NightStartMin   int          `json:"night_start_min"`
+	NightEndMin     int          `json:"night_end_min"`
+	PurchasedNights int          `json:"purchased_nights"`
+	ExtendedNights  int          `json:"extended_nights"`
+	NextWindowStart *time.Time   `json:"next_window_start"`
+	Nights          []BuyerNight `json:"nights"`
+}
+
+var errNotNightlyOrder = errcode.New(errcode.ParamInvalid, "该订单不是包夜订单, 没有每晚记录")
+
+// OrderNights 买家查看本人包夜订单的每晚状态。非包夜托管订单 40001; 人工订单/无租约 40400; 他人订单 40300。
+func (s *Service) OrderNights(userID int64, orderNo string) (*OrderNights, error) {
+	o, l, err := s.buyerManagedLease(userID, orderNo)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := s.repo.leaseNightPlan(s.repo.db, l.ID)
+	if err != nil {
+		return nil, err
+	}
+	if plan == nil {
+		return nil, errNotNightlyOrder
+	}
+	var rows []struct {
+		NightDate  time.Time  `db:"night_date"`
+		State      string     `db:"state"`
+		FailCause  *string    `db:"fail_cause"`
+		UnparkedAt *time.Time `db:"unparked_at"`
+		OutageID   *int64     `db:"outage_id"`
+	}
+	if err := s.repo.db.Select(&rows, `SELECT night_date, state, fail_cause, unparked_at, outage_id FROM lease_nights
+		WHERE lease_id=? ORDER BY night_date`, l.ID); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	purchasedEnd := plan.Start.AddDate(0, 0, plan.Nights)
+	r := &OrderNights{OrderNo: o.OrderNo, LeaseNo: l.LeaseNo, LeaseState: l.State, NightStartMin: plan.Window.StartMin,
+		NightEndMin: plan.Window.EndMin, PurchasedNights: plan.Nights, Nights: make([]BuyerNight, 0, len(rows))}
+	for _, x := range rows {
+		d := compute.NightDate(x.NightDate)
+		n := BuyerNight{NightDate: d.Format(dateLayout), WindowStart: compute.NightStartAt(d, plan.Window),
+			WindowEnd: compute.NightEndAt(d, plan.Window), State: x.State, FailCause: x.FailCause,
+			Compensation: !d.Before(purchasedEnd), UnparkedAt: x.UnparkedAt, OutageID: x.OutageID}
+		if n.Compensation {
+			r.ExtendedNights++
+		}
+		if r.NextWindowStart == nil && (x.State == "booked" || x.State == "active") && n.WindowEnd.After(now) {
+			ws := n.WindowStart
+			r.NextWindowStart = &ws
+		}
+		r.Nights = append(r.Nights, n)
+	}
+	return r, nil
+}
+
+// extendedNights 包夜订单已补加的晚数(原购买晚数之后的夜晚); 非包夜返回 nil。
+func (s *Service) extendedNights(leaseID int64) (*int, error) {
+	plan, err := s.repo.leaseNightPlan(s.repo.db, leaseID)
+	if err != nil || plan == nil {
+		return nil, err
+	}
+	var n int
+	if err := s.repo.db.Get(&n, `SELECT COUNT(*) FROM lease_nights WHERE lease_id=? AND night_date>=?`,
+		leaseID, plan.Start.AddDate(0, 0, plan.Nights).Format(dateLayout)); err != nil {
+		return nil, err
+	}
+	return &n, nil
 }

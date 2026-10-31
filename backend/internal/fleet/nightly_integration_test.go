@@ -526,3 +526,68 @@ func TestNightlyRefundMidSeriesReleasesFutureNights(t *testing.T) {
 	require.NoError(t, err, "释放的次晚可再订")
 	assert.Equal(t, 2, countRows(t, e.db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=(SELECT id FROM leases WHERE order_id=?)`, o2.ID))
 }
+
+// 买家每晚记录(GET /orders/:id/nights)、停机补加晚数(extended_nights)与订单详情的包夜快照字段。
+func TestNightlyBuyerNightsViewAndOrderDetail(t *testing.T) {
+	e, w := newNightEnv(t)
+	e.outcome(t, runOne(t, e.s))
+	d := compute.NightDateOf(time.Now(), w)
+
+	v, err := e.s.OrderNights(21, e.order.OrderNo)
+	require.NoError(t, err)
+	assert.Equal(t, 2, v.PurchasedNights)
+	assert.Equal(t, 0, v.ExtendedNights)
+	assert.Equal(t, w.StartMin, v.NightStartMin)
+	require.Len(t, v.Nights, 2)
+	assert.Equal(t, d.Format(dateLayout), v.Nights[0].NightDate)
+	assert.Equal(t, "active", v.Nights[0].State)
+	assert.NotNil(t, v.Nights[0].UnparkedAt)
+	assert.Equal(t, "booked", v.Nights[1].State)
+	assert.False(t, v.Nights[1].Compensation)
+	require.NotNil(t, v.NextWindowStart)
+	assert.True(t, v.NextWindowStart.Equal(compute.NightStartAt(d, w)), "正处于本晚窗口内: 取本晚开始")
+
+	// 补加一晚(停机顺延的数据面效果): 原购买晚数之后的夜晚标 compensation, 停机接口给 extended_nights。
+	e.db.MustExec(`INSERT INTO lease_nights (lease_id, night_date) VALUES (?, ?)`, e.lease.ID, d.AddDate(0, 0, 2).Format(dateLayout))
+	v, err = e.s.OrderNights(21, e.order.OrderNo)
+	require.NoError(t, err)
+	require.Len(t, v.Nights, 3)
+	assert.True(t, v.Nights[2].Compensation)
+	assert.Equal(t, 1, v.ExtendedNights)
+	out, err := e.s.OrderOutages(21, e.order.OrderNo)
+	require.NoError(t, err)
+	require.NotNil(t, out.ExtendedNights)
+	assert.Equal(t, 1, *out.ExtendedNights)
+
+	// 他人订单 40300。
+	_, err = e.s.OrderNights(22, e.order.OrderNo)
+	assert.Equal(t, errcode.Forbidden, errcode.CodeOf(err, 0))
+
+	// 订单详情带履约模式、计费方式与夜间窗口快照。
+	det, err := e.comp.GetBuyerOrderDetail(21, e.order.OrderNo)
+	require.NoError(t, err)
+	assert.Equal(t, compute.FulfillmentManaged, det.Order.FulfillmentMode)
+	assert.Equal(t, compute.PricingNightly, det.Order.PricingMode)
+	require.NotNil(t, det.Order.NightStartDate)
+	assert.Equal(t, d.Format(dateLayout), det.Order.NightStartDate.In(shanghai()).Format(dateLayout))
+	require.NotNil(t, det.Order.NightStartMin)
+	require.NotNil(t, det.Order.NightEndMin)
+	assert.Equal(t, w.StartMin, *det.Order.NightStartMin)
+	assert.Equal(t, w.EndMin, *det.Order.NightEndMin)
+}
+
+// 非包夜托管订单查每晚记录 40001; 停机接口 extended_nights 为 null; 订单详情夜间字段为 null。
+func TestNonNightlyOrderNightsRejected(t *testing.T) {
+	e := activeProvEnv(t)
+	_, err := e.s.OrderNights(21, e.order.OrderNo)
+	assert.Equal(t, errcode.ParamInvalid, errcode.CodeOf(err, 0))
+	out, err := e.s.OrderOutages(21, e.order.OrderNo)
+	require.NoError(t, err)
+	assert.Nil(t, out.ExtendedNights)
+	det, err := e.comp.GetBuyerOrderDetail(21, e.order.OrderNo)
+	require.NoError(t, err)
+	assert.Equal(t, compute.FulfillmentManaged, det.Order.FulfillmentMode)
+	assert.Equal(t, compute.PricingHourly, det.Order.PricingMode)
+	assert.Nil(t, det.Order.NightStartDate)
+	assert.Nil(t, det.Order.NightStartMin)
+}
