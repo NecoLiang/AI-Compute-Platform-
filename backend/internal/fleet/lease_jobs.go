@@ -29,6 +29,7 @@ import (
 
 const (
 	expirySweepInterval = 30 * time.Second
+	settleInterval      = time.Minute
 	remindInterval      = time.Minute
 	reconcileInterval   = 5 * time.Minute
 	sweepBatch          = 200
@@ -87,12 +88,13 @@ func (s *Service) RunLeaseJobs(ctx context.Context) {
 		slog.Warn("fleet 未注入 Redis: 到期提醒(去重依赖 Redis)不执行, 周期任务不做多实例互斥")
 	}
 	var wg sync.WaitGroup
-	wg.Add(5)
+	wg.Add(6)
 	go func() { defer wg.Done(); s.jobLoop(ctx, "remind", remindInterval, s.RemindRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "outage", outageInterval, s.OutageRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "credit", creditInterval, s.CreditRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "mining", s.miningInterval(), s.MiningScanRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "reconcile", reconcileInterval, s.ReconcileRound) }()
+	go func() { defer wg.Done(); s.jobLoop(ctx, "settle", settleInterval, s.SettleRound) }()
 	s.jobLoop(ctx, "expiry", expirySweepInterval, s.ExpiryRound)
 	wg.Wait()
 }

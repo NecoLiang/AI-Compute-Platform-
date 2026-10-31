@@ -78,6 +78,10 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int, ev st
 		return nil, err
 	}
 	managed := parent.FulfillmentMode == FulfillmentManaged
+	if managed && parent.SettleReadyAt != nil {
+		// 已到租期末结算(T-106, 整条续租链进入一次分账): 不能再续租复活, 需重新下单。
+		return nil, ErrRenewalConflict
+	}
 	if parent.LeaseEnd == nil || parent.StockReserved == nil || (parent.Status != "active" && parent.Status != "completed") {
 		return nil, ErrRenewalConflict
 	}
