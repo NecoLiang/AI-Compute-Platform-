@@ -408,7 +408,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 - **容器租约**的停机须等对账（5min）确认容器在跑才结束（「恢复在线且自检通过」），因此结束时刻最多晚约 5min（偏向买家）；整机租约在硬原因消失的那轮扫描即结束。
 - **买家原因不计**：停机期间租约被冻结（`suspended`），本段在 `suspended_at` 结束，冻结期只有运营认定误冻结才计入；租约到期/清除时进行中的停机在 `min(当前, access_until)` 结束。买家自己导致的容器退出（OOM 等）由对账自动重启，重启成功不产生停机。
 - **结算**（同一事务，幂等，`counted` 非空即已结算）：
-  - 有效秒数 `seconds` = 本段扣除与同租约其他已结束段的重叠；原始时长 < `fleet.outage.min_minutes`（默认 5）或有效秒数为 0 → `counted=0`，不补偿（`remedy_applied_at` 照写，视为已处理）。
+  - 有效秒数 `seconds` = 本段扣除与同租约其他已结束段的重叠；包夜租约另只计落在已购夜晚窗口内的部分（白天停放期不计，例如跨天的误冻结段；停机开始也不早于本晚开通时刻）；原始时长 < `fleet.outage.min_minutes`（默认 5）或有效秒数为 0 → `counted=0`，不补偿（`remedy_applied_at` 照写，视为已处理）。
   - 责任金额 `liability_amount`（分）= floor(所属订单实付 × `seconds` ÷ 该订单租期秒数)，不超过实付；所属订单 = 停机开始时刻已生效的续租单或原订单。由 `liable` 方承担（D-9/D-10，分账侧扣减见 T-106）。
   - 租约补偿方式 `outage_remedy=extend` 且仍在租期内 → `remedy=extend`：租约 `access_until`、订单 `lease_end_at`、交付 `access_expires_at`、待支付 `extend` 续租单起止同事务后移 `seconds`；`remedy_applied_at`=结算时刻。
   - 否则（买家已选退费，或租期已结束）→ `remedy=refund`、`remedy_amount=liability_amount`，`remedy_applied_at` 留空，等 T-106 退款后写入。
