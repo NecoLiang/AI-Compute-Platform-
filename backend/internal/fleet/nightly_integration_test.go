@@ -443,3 +443,23 @@ func TestNightlyRenewalRejectedWithClearMessage(t *testing.T) {
 	assert.Contains(t, err.Error(), "包夜订单暂不支持续租")
 	assert.Equal(t, LeaseActive, e.leaseNow(t).State)
 }
+
+// 包夜租约的跨白天停机段(如误冻结 [白天, 窗口内))只计窗口内部分: 租期 = 晚数 × 窗口时长, 白天计入会超额补偿。
+func TestNightlyWrongFreezeCountsOnlyWindowSeconds(t *testing.T) {
+	e, w := newNightEnv(t)
+	e.outcome(t, runOne(t, e.s))
+	d := compute.NightDateOf(time.Now(), w)
+	ws := compute.NightStartAt(d, w)
+	rec := outageBook{s: e.s}
+	rec.WrongFreeze(context.Background(), e.lease.ID, ws.Add(-3*time.Hour), ws.Add(20*time.Minute))
+	var secs int
+	require.NoError(t, e.db.Get(&secs, `SELECT seconds FROM lease_outages WHERE lease_id=? AND cause='wrong_freeze'`, e.lease.ID))
+	assert.Equal(t, 20*60, secs, "窗口开始前的 3 小时白天不计")
+
+	// 整段落在白天: 不计入。
+	rec.WrongFreeze(context.Background(), e.lease.ID, ws.Add(-10*time.Hour), ws.Add(-9*time.Hour))
+	var counted int
+	require.NoError(t, e.db.Get(&counted, `SELECT counted FROM lease_outages WHERE lease_id=? AND cause='wrong_freeze'
+		AND started_at=?`, e.lease.ID, ws.Add(-10*time.Hour)))
+	assert.Equal(t, 0, counted)
+}

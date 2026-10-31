@@ -196,36 +196,104 @@ func (s *Service) extendForOutageTx(tx *sqlx.Tx, ord *compute.Order, l *Lease, d
 }
 
 // effectiveSeconds 本段扣除与同租约其他已结束段重叠部分后的秒数(同一时段多原因只计一次)。
+// 包夜租约只计落在已购夜晚窗口内的部分(白天停放期不是租期, 例如跨天的误冻结段), 与 orderTerm 的「晚数 × 窗口时长」口径一致。
 func (s *Service) effectiveSeconds(q sqlx.Queryer, o *Outage) (int, error) {
-	var others []struct {
-		S time.Time `db:"started_at"`
-		E time.Time `db:"ended_at"`
+	base, err := s.outageBaseIntervals(q, o)
+	if err != nil {
+		return 0, err
 	}
+	var others []span
 	if err := sqlx.Select(q, &others, `SELECT started_at, ended_at FROM lease_outages
 		WHERE lease_id=? AND id<>? AND ended_at IS NOT NULL AND started_at<? AND ended_at>?`,
 		o.LeaseID, o.ID, *o.EndedAt, o.StartedAt); err != nil {
 		return 0, err
 	}
-	sort.Slice(others, func(i, j int) bool { return others[i].S.Before(others[j].S) })
-	total := o.EndedAt.Sub(o.StartedAt)
-	cursor := o.StartedAt
-	for _, x := range others {
-		st, en := x.S, x.E
-		if st.Before(cursor) {
-			st = cursor
-		}
-		if en.After(*o.EndedAt) {
-			en = *o.EndedAt
-		}
-		if en.After(st) {
-			total -= en.Sub(st)
-			cursor = en
-		}
+	var total time.Duration
+	for _, b := range base {
+		total += b.E.Sub(b.S) - overlapUnion(b, others)
 	}
 	if total < 0 {
 		total = 0
 	}
 	return int(total / time.Second), nil
+}
+
+// span 半开区间 [S, E)。
+type span struct {
+	S time.Time `db:"started_at"`
+	E time.Time `db:"ended_at"`
+}
+
+// overlapUnion b 与 others 并集的重叠时长。
+func overlapUnion(b span, others []span) time.Duration {
+	cl := make([]span, 0, len(others))
+	for _, x := range others {
+		st, en := x.S, x.E
+		if st.Before(b.S) {
+			st = b.S
+		}
+		if en.After(b.E) {
+			en = b.E
+		}
+		if en.After(st) {
+			cl = append(cl, span{st, en})
+		}
+	}
+	sort.Slice(cl, func(i, j int) bool { return cl[i].S.Before(cl[j].S) })
+	var d time.Duration
+	cursor := b.S
+	for _, x := range cl {
+		st := x.S
+		if st.Before(cursor) {
+			st = cursor
+		}
+		if x.E.After(st) {
+			d += x.E.Sub(st)
+			cursor = x.E
+		}
+	}
+	return d
+}
+
+// outageBaseIntervals 停机段中计入租期的区间: 非包夜 = 整段; 包夜 = 与本租约各晚窗口的交集。
+func (s *Service) outageBaseIntervals(q sqlx.Queryer, o *Outage) ([]span, error) {
+	whole := []span{{o.StartedAt, *o.EndedAt}}
+	var w struct {
+		Start *int `db:"night_start_min"`
+		End   *int `db:"night_end_min"`
+	}
+	if err := sqlx.Get(q, &w, `SELECT o.night_start_min, o.night_end_min FROM leases l JOIN orders o ON o.id=l.order_id
+		WHERE l.id=?`, o.LeaseID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return whole, nil
+		}
+		return nil, err
+	}
+	if w.Start == nil || w.End == nil {
+		return whole, nil
+	}
+	var nights []time.Time
+	if err := sqlx.Select(q, &nights, `SELECT night_date FROM lease_nights WHERE lease_id=? ORDER BY night_date`, o.LeaseID); err != nil {
+		return nil, err
+	}
+	if len(nights) == 0 {
+		return whole, nil
+	}
+	win := compute.NightWindow{StartMin: *w.Start, EndMin: *w.End}
+	var out []span
+	for _, d := range nights {
+		st, en := compute.NightStartAt(d, win), compute.NightEndAt(d, win)
+		if st.Before(o.StartedAt) {
+			st = o.StartedAt
+		}
+		if en.After(*o.EndedAt) {
+			en = *o.EndedAt
+		}
+		if en.After(st) {
+			out = append(out, span{st, en})
+		}
+	}
+	return out, nil
 }
 
 // liabilityAmount floor(订单实付 × secs ÷ 订单租期秒数), 不超过实付。租期按订单计费方式快照换算。
