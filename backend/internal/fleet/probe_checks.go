@@ -3,8 +3,10 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // P4–P8: 只读检查, 不触碰在租资源。
@@ -70,6 +72,7 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P6", false, err.Error())
 	} else {
 		p.inv.TopoGroups = topo
+		p.topoLinks, _ = ParseTopoMatrix(out, len(gpus)) // 与 ParseTopo 同一表头解析, 此处不会失败
 		groups := map[string]bool{}
 		for _, g := range topo {
 			groups[g] = true
@@ -77,13 +80,25 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P6", true, fmt.Sprintf("%d 个拓扑分组", len(groups)))
 	}
 
-	p.health(ctx, "-24h", "P7")
+	p.health(ctx, 24*time.Hour, "P7")
 	p.host(ctx)
+	p.modelCache(ctx)
+}
+
+// modelCache 模型缓存目录所在文件系统容量(一键部署 F4 输入, 不是检查项, 不影响探活结论)。
+func (p *probeRun) modelCache(ctx context.Context) {
+	df, note := p.readCacheDF(ctx, 30*time.Second)
+	if note != "" {
+		slog.Warn("fleet 完整探活读取模型缓存目录容量失败", "node_id", p.n.ID, "detail", note)
+	}
+	if err := p.s.recordCacheDF(p.n.ID, p.gen, cacheSourceFull, df, note, time.Now()); err != nil {
+		slog.Error("fleet 记录模型缓存目录容量失败", "node_id", p.n.ID, "error", err)
+	}
 }
 
 // health P7: ECC 不可纠正错误、退役页/行重映射、Xid; 有问题的卡记入 inv.Faulty(不计入可售)。
 // window 为 Xid 扫描时间窗, 结论写入 checkID(P13 压测后复用为 "-10min" 复扫时不写检查项)。
-func (p *probeRun) health(ctx context.Context, window, checkID string) {
+func (p *probeRun) health(ctx context.Context, window time.Duration, checkID string) {
 	if p.inv.Faulty == nil {
 		p.inv.Faulty = map[int]string{}
 	}
@@ -105,9 +120,14 @@ func (p *probeRun) health(ctx context.Context, window, checkID string) {
 		notes = append(notes, "行重映射输出无法解析")
 		remap = map[string]RemapRow{}
 	}
-	cmd, _ := xidCommand(window)
-	xout, _ := p.run(ctx, cmd) // grep 无匹配时退出码非 0, 以解析结果为准
-	xid := ParseXid(xout)
+	since, window := xidSince(window)
+	cmd, _ := xidCommand(since)
+	xout, _ := p.run(ctx, cmd) // 以解析结果为准(错误输出带 @@err 前缀)
+	xidAt := time.Now()
+	xid := ParseXid(xout, window)
+	if err := p.s.recordXidScan(p.n.ID, p.gen, xid, xidAt); err != nil {
+		slog.Error("fleet 记录 Xid 扫描失败", "node_id", p.n.ID, "error", err)
+	}
 	if !xid.Known {
 		notes = append(notes, "Xid 未知: "+xid.Note)
 	}

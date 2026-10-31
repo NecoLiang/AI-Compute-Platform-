@@ -1,8 +1,10 @@
 package fleet
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,26 +119,189 @@ func TestParseECCAndRemap(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// xidHead 真实节点上 xidCommand 输出的头部(@@now 对应 2026-10-28T10:00:00+08:00)。
+const xidHead = "@@id uid=0 groups=root\n@@now 1793152800\n"
+
 func TestParseXid(t *testing.T) {
-	out := "@@id uid=0 groups=root\n" +
+	out := xidHead + "@@src journal\n@@first 2026-10-27T08:00:01+0800\n" +
 		"2026-10-28T09:12:01+0800 gpu-node-01 kernel: NVRM: Xid (PCI:0000:9a:00): 79, pid=0, name=, GPU has fallen off the bus.\n" +
 		"2026-10-28T09:20:44+0800 gpu-node-01 kernel: NVRM: Xid (PCI:0000:18:00): 13, pid=48211, name=python3, Graphics SM Warp Exception on (GPC 1, TPC 0, SM 0)\n"
-	x := ParseXid(out)
+	x := ParseXid(out, time.Hour)
 	require.True(t, x.Known)
+	assert.Equal(t, "journal", x.Source)
 	assert.Equal(t, 2, x.Events)
 	assert.Equal(t, []int{79}, x.FatalXidsFor("00000000:9A:00.0"))
 	assert.Empty(t, x.FatalXidsFor("00000000:18:00.0"), "Xid 13 是应用错误, 不判卡故障")
+	now := time.Unix(1793152800, 0)
+	assert.True(t, x.NodeNow.Equal(now))
+	assert.True(t, x.CoverFrom.Equal(now.Add(-time.Hour)), "日志从昨天开始, 时间窗完整覆盖")
+	require.Len(t, x.List, 2)
+	assert.True(t, x.List[0].At.Equal(time.Date(2026, 10, 28, 1, 12, 1, 0, time.UTC)))
+	assert.Equal(t, "0000:9a:00", x.List[0].Bus)
 
-	clean := ParseXid("@@id uid=1001 groups=omnis docker adm\n")
+	clean := ParseXid("@@id uid=1001 groups=omnis docker adm\n@@now 1793152800\n@@src journal\n@@first 2026-10-27T08:00:01+08:00\n", time.Hour)
 	assert.True(t, clean.Known)
 	assert.Zero(t, clean.Events)
 
-	noPerm := ParseXid("@@id uid=1001 groups=omnis docker\nHint: You are currently not seeing messages from other users and the system.\n      Users in groups 'adm', 'systemd-journal' can see all messages.\n")
+	// journalctl 对非特权用户把提示写到 stderr, 经 @@err 前缀送回。
+	noPerm := ParseXid("@@id uid=1001 groups=omnis docker adm\n@@now 1793152800\n@@src journal\n@@first \n"+
+		"@@err Hint: You are currently not seeing messages from other users and the system.\n"+
+		"@@err       Users in groups 'adm', 'systemd-journal' can see all messages.\n", time.Hour)
 	assert.False(t, noPerm.Known)
-	assert.Contains(t, noPerm.Note, "未知")
+	assert.Contains(t, noPerm.Note, "无权限")
 
-	unprivileged := ParseXid("@@id uid=1001 groups=omnis docker\n")
+	unprivileged := ParseXid("@@id uid=1001 groups=omnis docker\n@@now 1793152800\n@@src journal\n", time.Hour)
 	assert.False(t, unprivileged.Known)
+
+	// 旧格式(无 @@src)视为输出不完整。
+	assert.False(t, ParseXid("@@id uid=0 groups=root\n", time.Hour).Known)
+}
+
+func TestParseXidDmesgFallback(t *testing.T) {
+	// dmesg --time-format iso 不能按时间过滤: 窗口外的旧事件由 ParseXid 丢弃; 环形缓冲最早消息晚于窗口起点时覆盖起点后移。
+	out := xidHead + "@@src dmesg\n@@first 2026-10-28T09:30:00,000000+08:00\n" +
+		"2026-10-28T08:10:00,111111+08:00 NVRM: Xid (PCI:0000:18:00): 48, pid=0, name=, An uncorrectable double bit error (DBE) has been detected on GPU in the framebuffer at partition 6, subpartition 0.\n" +
+		"2026-10-28T09:45:12,654321+08:00 NVRM: Xid (PCI:0000:18:00): 94, pid=4122, name=python3, Contained: SM (0x1). RST: No, D-RST: No\n"
+	x := ParseXid(out, time.Hour)
+	require.True(t, x.Known)
+	assert.Equal(t, "dmesg", x.Source)
+	assert.Equal(t, 1, x.Events, "08:10 的事件在 1 小时窗口外")
+	assert.Empty(t, x.FatalXidsFor("0000:18:00"), "Xid 94 为 RESTART_APP, 不判卡故障")
+	assert.True(t, x.CoverFrom.Equal(time.Date(2026, 10, 28, 1, 30, 0, 0, time.UTC)))
+	assert.True(t, x.List[0].At.Equal(time.Date(2026, 10, 28, 1, 45, 12, 654321000, time.UTC)))
+
+	restricted := ParseXid(xidHead+"@@src dmesg\n@@first \n@@err dmesg: read kernel buffer failed: Operation not permitted\n", time.Hour)
+	assert.False(t, restricted.Known)
+	assert.Contains(t, restricted.Note, "无权限")
+
+	// 首条消息时间读不到: 不能确认过去的日志完整, 覆盖起点 = 扫描时刻。
+	noFirst := ParseXid(xidHead+"@@src dmesg\n@@first \n", time.Hour)
+	assert.True(t, noFirst.Known)
+	assert.True(t, noFirst.CoverFrom.Equal(noFirst.NodeNow))
+}
+
+func TestParseXidTruncated(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(xidHead + "@@src journal\n@@first 2026-10-27T08:00:01+0800\n")
+	start := time.Date(2026, 10, 28, 9, 0, 0, 0, time.FixedZone("CST", 8*3600))
+	for i := 0; i <= xidLineCap; i++ {
+		ts := start.Add(time.Duration(i) * time.Second).Format("2006-01-02T15:04:05-0700")
+		fmt.Fprintf(&b, "%s gpu-node-01 kernel: NVRM: Xid (PCI:0000:18:00): 31, pid=1, name=x, MMU Fault\n", ts)
+	}
+	x := ParseXid(b.String(), time.Hour)
+	require.True(t, x.Known)
+	assert.Equal(t, xidLineCap, x.Events)
+	assert.True(t, x.CoverFrom.Equal(start.Add(time.Second)), "截断后只能确认最早保留事件之后")
+}
+
+func TestParseXidMissingTools(t *testing.T) {
+	x := ParseXid(xidHead+"@@src dmesg\n@@first \n@@err sh: 1: dmesg: not found\n", time.Hour)
+	assert.False(t, x.Known)
+	assert.Contains(t, x.Note, "dmesg: not found")
+}
+
+func TestFatalXidsCatalog(t *testing.T) {
+	for _, n := range []int{46, 48, 62, 64, 74, 79, 95, 109, 119, 120, 136, 140, 143, 155, 156, 158} {
+		assert.True(t, FatalXids[n], "Xid %d", n)
+	}
+	for _, n := range []int{13, 31, 43, 61, 63, 92, 94} {
+		assert.False(t, FatalXids[n], "Xid %d", n)
+	}
+}
+
+func TestXidSince(t *testing.T) {
+	s, w := xidSince(30 * time.Second)
+	assert.Equal(t, "-2min", s)
+	assert.Equal(t, 2*time.Minute, w)
+	s, w = xidSince(61*time.Minute + time.Second)
+	assert.Equal(t, "-62min", s)
+	assert.Equal(t, 62*time.Minute, w)
+	s, w = xidSince(20 * time.Hour)
+	assert.Equal(t, "-20h", s)
+	assert.Equal(t, 20*time.Hour, w)
+	s, _ = xidSince(72 * time.Hour)
+	assert.Equal(t, "-24h", s)
+	for _, d := range []time.Duration{0, time.Minute, 999 * time.Minute, 1000 * time.Minute, 48 * time.Hour} {
+		s, _ := xidSince(d)
+		_, err := xidCommand(s)
+		assert.NoError(t, err, s)
+	}
+}
+
+func TestParseTelemetry(t *testing.T) {
+	// H100 SXM 实际格式(nounits); 第二张卡在跑负载, 第三张为不支持 ECC/功耗的消费卡读数。
+	out := "GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 1, 81559, 31, 69.37, 0x0000000000000001, 0, 0, 0, 0\n" +
+		"GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d, 74210, 81559, 62, 512.80, 0x0000000000000004, 0, 12, 97, 61\n" +
+		"GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 412, 24564, 38, [N/A], [Not Supported], [N/A], [N/A], 3, [N/A]\n"
+	g, err := ParseTelemetry(out)
+	require.NoError(t, err)
+	require.Len(t, g, 3)
+	assert.Equal(t, int64(1), *g[0].VRAMUsedMiB)
+	assert.Equal(t, int64(81559), *g[0].VRAMTotalMiB)
+	assert.Equal(t, 31, *g[0].TempC)
+	assert.InDelta(t, 69.37, *g[0].PowerW, 1e-9)
+	assert.Equal(t, uint64(1), *g[0].ThrottleReasons)
+	assert.Equal(t, int64(12), *g[1].ECCCorrected)
+	assert.Nil(t, g[2].PowerW)
+	assert.Nil(t, g[2].ThrottleReasons)
+	assert.Nil(t, g[2].ECCUncorrected)
+	assert.Nil(t, g[2].ECCCorrected)
+	assert.Equal(t, 97, *g[1].UtilGPU)
+	assert.Equal(t, 61, *g[1].UtilMem)
+	assert.Nil(t, g[2].UtilMem)
+	assert.Equal(t, []int{33, 30}, []int{avgUtil(g, false), avgUtil(g, true)}, "N/A 不计入平均")
+
+	_, err = ParseTelemetry("Field \"clocks_throttle_reasons.active\" is not a valid field to query.\n")
+	assert.Error(t, err)
+	assert.True(t, isInvalidFieldErr("Field \"clocks_throttle_reasons.active\" is not a valid field to query."))
+	_, err = ParseTelemetry("GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 90000, 81559, 31, 69.37, 0x0, 0, 0, 0, 0\n")
+	assert.Error(t, err, "已用大于总量")
+	_, err = ParseTelemetry("GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 1, 81559, 31, 69.37, 0x0, 0, 0\n")
+	assert.Error(t, err, "列数不足")
+	_, err = ParseTelemetry("No devices were found\n")
+	assert.Error(t, err)
+	_, err = ParseTelemetry("")
+	assert.Error(t, err)
+}
+
+func TestParseTopoMatrix(t *testing.T) {
+	m, err := ParseTopoMatrix(h100Topo, 8)
+	require.NoError(t, err)
+	require.Len(t, m, 8)
+	assert.Equal(t, "X", m[0][0])
+	assert.Equal(t, "NV18", m[0][7])
+	m, err = ParseTopoMatrix(rtx4090Topo, 4)
+	require.NoError(t, err)
+	for i := range m {
+		for j := range m[i] {
+			if i != j {
+				assert.False(t, strings.HasPrefix(m[i][j], "NV"))
+			}
+		}
+	}
+	_, err = ParseTopoMatrix(h100Topo, 4)
+	assert.Error(t, err)
+}
+
+func TestParseCacheDF(t *testing.T) {
+	// 真实 GNU coreutils 输出(df -B1 --output=avail,size)。
+	d, err := ParseCacheDF("      Avail   1B-blocks\n39125975040 62671097856\n")
+	require.NoError(t, err)
+	assert.Equal(t, int64(39125975040), d.AvailBytes)
+	assert.Equal(t, int64(62671097856), d.TotalBytes)
+	d, err = ParseCacheDF("@@missing\n")
+	require.NoError(t, err)
+	assert.True(t, d.Missing)
+	_, err = ParseCacheDF("df: unrecognized option '--output=avail,size'\n")
+	assert.Error(t, err)
+
+	c, err := cacheDFCommand("/data/omnis-models")
+	require.NoError(t, err)
+	assert.Equal(t, "if [ -d '/data/omnis-models' ]; then df -B1 --output=avail,size '/data/omnis-models'; else echo @@missing; fi", c)
+	for _, bad := range []string{"data", "/data/../etc", "/data/x'; rm -rf /", "/data/$(id)"} {
+		_, err := cacheDFCommand(bad)
+		assert.Error(t, err, bad)
+	}
 }
 
 func TestParseHostInfo(t *testing.T) {
@@ -216,10 +381,4 @@ func TestParseBenchAndThrottle(t *testing.T) {
 	assert.Zero(t, th["GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"]&throttleFailMask, "SW Power Cap 是满载常态, 不判降频")
 	assert.NotZero(t, th["GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d"]&throttleFailMask)
 	assert.True(t, strings.Contains(DescribeThrottle(0x40), "硬件温控"))
-}
-
-func TestParseXidMissingJournalctl(t *testing.T) {
-	x := ParseXid("@@id uid=0 groups=root\nsh: 1: journalctl: not found\n")
-	assert.False(t, x.Known)
-	assert.Contains(t, x.Note, "journalctl")
 }

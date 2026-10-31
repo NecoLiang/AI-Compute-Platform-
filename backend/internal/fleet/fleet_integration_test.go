@@ -149,6 +149,7 @@ func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 		Enabled: true, Workers: 1, ControllerEgressIPs: []string{"10.0.0.1"},
 		ProbeImage: testProbeImage, MinDriverVersion: "535.104",
 		Probe:          config.FleetProbe{MinPerfRatio: 0.7},
+		ModelCacheDir:  "/data/omnis-models",
 		BaseImages:     []config.BaseImage{{Name: "pytorch", Ref: testBaseImage}},
 		HostReserveCPU: 2, HostReserveMemGB: 8,
 	}
@@ -390,7 +391,7 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 	assert.True(t, outcomeOf(t, done[0]).Pass)
 
 	// 掉卡: 轻量探活发现 GPU1 消失 → 空闲卡槽 faulty, 库存 1, 通知供给方。
-	fake.Override(cmdLight, fakeReply{Stdout: "0, " + fakeUUID0 + ", 37, 12, 41, 0\n"})
+	fake.Override(cmdTelemetry, fakeReply{Stdout: fakeTelLine(fakeUUID0, 0)})
 	s.lightProbe(ctx, n)
 	fake.ClearOverrides()
 	assert.Equal(t, SlotFaulty, slotState(t, db, id, 1))
@@ -462,7 +463,7 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 
 	// 离线判定: 连不上且距上次成功超过 90s → offline, 库存 0, 通知。
 	db.MustExec(`UPDATE supplier_nodes SET last_probe_ok_at=NOW() - INTERVAL 5 MINUTE WHERE id=?`, id)
-	fake.Override(cmdLight, fakeReply{Stderr: "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.", Code: 9})
+	fake.Override(cmdTelemetry, fakeReply{Stderr: "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.", Code: 9})
 	n, _ = s.repo.GetNode(id)
 	s.lightProbe(ctx, n)
 	fake.ClearOverrides()

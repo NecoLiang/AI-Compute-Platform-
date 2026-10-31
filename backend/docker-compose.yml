@@ -57,6 +57,7 @@ services:
       - ./migrations/027_leases_and_gateway.up.sql:/docker-entrypoint-initdb.d/027.sql:ro
       - ./migrations/028_flexible_pricing.up.sql:/docker-entrypoint-initdb.d/028.sql:ro
       - ./migrations/030_model_deployment.up.sql:/docker-entrypoint-initdb.d/030.sql:ro
+      - ./migrations/031_probe_telemetry.up.sql:/docker-entrypoint-initdb.d/031.sql:ro
       - ./migrations/032_lease_suspended_at.up.sql:/docker-entrypoint-initdb.d/032.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]

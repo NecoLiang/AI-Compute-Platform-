@@ -38,6 +38,11 @@ func (s *Service) RunPeriodic(ctx context.Context) {
 			} else if n > 0 {
 				slog.Info("已清理过期访问会话记录", "rows", n)
 			}
+			if n, err := s.repo.PurgeOldXidEvents(lastPurge.Add(-xidEventRetention)); err != nil {
+				slog.Error("清理过期 Xid 事件明细失败", "error", err)
+			} else if n > 0 {
+				slog.Info("已清理过期 Xid 事件明细", "rows", n)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -178,27 +183,44 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	defer client.Close()
 	p := &probeRun{s: s, n: n, client: client}
 
-	out, err := p.runFor(ctx, cmdLight, 20*time.Second)
-	if err != nil {
-		return "nvidia-smi 执行失败: " + err.Error(), false
-	}
-	gpus, err := ParseLight(out)
+	gpus, telAt, err := s.lightTelemetry(ctx, p)
 	if err != nil {
 		return err.Error(), false
 	}
 	if _, err := p.runFor(ctx, cmdDockerAlive, 15*time.Second); err != nil {
 		return "Docker 守护进程不可用: " + err.Error(), false
 	}
-	cmd, _ := xidCommand("-2min")
-	xout, _ := p.runFor(ctx, cmd, 15*time.Second)
-	xid := ParseXid(xout)
+	// Xid: 自上次成功扫描起(见 xidWindowSince), 事件与覆盖区间在下方事务内落库。
+	lastScan, err := s.repo.lastXidScanAt(n.ID)
+	if err != nil {
+		slog.Error("fleet 读取 Xid 扫描时间失败", "node_id", n.ID, "error", err)
+		return "", true // 平台侧故障不计入节点失败
+	}
+	since, window := xidSince(xidWindowSince(lastScan, time.Now()))
+	cmd, _ := xidCommand(since)
+	xout, _ := p.runFor(ctx, cmd, 15*time.Second) // 以解析结果为准(错误输出带 @@err 前缀)
+	xidAt := time.Now()
+	xid := ParseXid(xout, window)
+	// 致命 Xid 告警按"近 1 小时"保持(与 docs/27 F6 同口径): 本次扫描 ∪ 已入库事件, 不因下一次干净的扫描提前解除。
+	recentFatal, err := s.repo.recentFatalXids(n.ID, xidAt.Add(-fatalXidHold))
+	if err != nil {
+		slog.Error("fleet 读取近期致命 Xid 失败", "node_id", n.ID, "error", err)
+		return "", true // 平台侧故障不计入节点失败
+	}
+	mergeFatalXids(recentFatal, xid.fatalSince(xidAt, xidAt.Add(-fatalXidHold)))
+	// 模型缓存目录容量(docs/27 F4): 读取失败不影响探活成败, 只记原因。
+	cacheDF, cacheNote := p.readCacheDF(ctx, 15*time.Second)
+	cacheAt := time.Now()
+	if cacheNote != "" {
+		slog.Warn("fleet 轻量探活读取模型缓存目录容量失败", "node_id", n.ID, "detail", cacheNote)
+	}
 
 	slots, err := s.repo.listSlots(s.repo.db, n.ID)
 	if err != nil {
 		slog.Error("fleet 读取卡槽失败", "node_id", n.ID, "error", err)
 		return "", true // 平台侧故障不计入节点失败
 	}
-	seen := map[string]LightGPU{}
+	seen := map[string]GPUTelemetry{}
 	for _, g := range gpus {
 		seen[g.UUID] = g
 	}
@@ -214,10 +236,10 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		g, ok := seen[sl.GPUUUID]
 		if !ok {
 			why = append(why, "掉卡(nvidia-smi 未列出)")
-		} else if g.UncorrectedECC > 0 {
-			why = append(why, fmt.Sprintf("不可纠正 ECC 错误 %d 次", g.UncorrectedECC))
+		} else if g.ECCUncorrected != nil && *g.ECCUncorrected > 0 {
+			why = append(why, fmt.Sprintf("不可纠正 ECC 错误 %d 次", *g.ECCUncorrected))
 		}
-		if x := xid.FatalXidsFor(sl.PCIBusID); len(x) > 0 {
+		if x := recentFatal[NormalizeBusID(sl.PCIBusID)]; len(x) > 0 {
 			why = append(why, fmt.Sprintf("致命 Xid %v", x))
 		}
 		if len(why) == 0 {
@@ -255,6 +277,15 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		if prev, err = s.repo.recordLightOK(tx, n.ID, free, avgUtil(gpus, false), avgUtil(gpus, true)); err != nil {
 			return err
 		}
+		if err := s.repo.recordTelemetryTx(tx, n.ID, n.Generation, gpus, telAt); err != nil {
+			return err
+		}
+		if err := s.repo.recordXidScanTx(tx, n.ID, n.Generation, xid, xidAt); err != nil {
+			return err
+		}
+		if err := s.repo.recordCacheDFTx(tx, n.ID, n.Generation, cacheSourceLight, cacheDF, cacheNote, cacheAt); err != nil {
+			return err
+		}
 		if changed > 0 || prev != "online" {
 			return s.recomputeStockTx(tx, n.ProductID)
 		}
@@ -278,20 +309,41 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	return "", true
 }
 
-// avgUtil 平均利用率(百分比)。
-func avgUtil(gpus []LightGPU, mem bool) int {
-	if len(gpus) == 0 {
-		return 0
+// lightTelemetry 轻探活的逐卡读数(cmdTelemetry, 不认识 clocks_throttle_reasons 的新驱动改用 clocks_event_reasons)。
+// 执行或解析失败即本次轻探活失败(与原先单独的利用率/ECC 查询口径一致); 遥测列随之不刷新, 一键部署可行性读取时按过期处理。
+func (s *Service) lightTelemetry(ctx context.Context, p *probeRun) ([]GPUTelemetry, time.Time, error) {
+	out, err := p.runFor(ctx, cmdTelemetry, 20*time.Second)
+	if err != nil && isInvalidFieldErr(out+err.Error()) {
+		out, err = p.runFor(ctx, cmdTelemetryEvent, 20*time.Second)
 	}
-	sum := 0
+	at := time.Now()
+	if err != nil {
+		return nil, at, fmt.Errorf("nvidia-smi 执行失败: %w", err)
+	}
+	tel, err := ParseTelemetry(out)
+	if err != nil {
+		return nil, at, err
+	}
+	return tel, at, nil
+}
+
+// avgUtil 平均利用率(百分比)。
+func avgUtil(gpus []GPUTelemetry, mem bool) int {
+	sum, n := 0, 0
 	for _, g := range gpus {
+		v := g.UtilGPU
 		if mem {
-			sum += g.UtilMem
-		} else {
-			sum += g.UtilGPU
+			v = g.UtilMem
+		}
+		if v != nil {
+			sum += *v
+			n++
 		}
 	}
-	return sum / len(gpus)
+	if n == 0 {
+		return 0
+	}
+	return sum / n
 }
 
 // syncResourceAlerts 在租/预留卡的轻探活异常写入对应租约的 resource_alert, 卡恢复正常的租约清空(docs/25 §25.6)。

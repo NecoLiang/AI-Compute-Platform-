@@ -156,7 +156,7 @@ func (p *probeRun) bench(ctx context.Context) {
 		notes = append(notes, err.Error())
 		throttle = map[string]uint64{}
 	}
-	p.health(ctx, "-10min", "") // 压测后复扫: 新出现的致命 Xid / ECC 直接标故障
+	p.health(ctx, 10*time.Minute, "") // 压测后复扫: 新出现的致命 Xid / ECC 直接标故障
 
 	byUUID := map[string]BenchResult{}
 	for _, r := range results {

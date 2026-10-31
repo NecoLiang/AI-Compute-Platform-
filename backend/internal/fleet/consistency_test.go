@@ -91,14 +91,3 @@ func TestCheckResources(t *testing.T) {
 	arm := HostInfo{Arch: "aarch64", CPUCores: 72, MemGB: 480, DiskFreeGB: 3000}
 	assert.Len(t, CheckResources(arm, ResourceReq{Cards: 1, ReserveCPU: 2, ReserveMemGB: 8}), 1)
 }
-
-func TestParseLight(t *testing.T) {
-	out := "0, GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 97, 61, 71, 0\n1, GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d, 0, 0, 33, [N/A]\n"
-	g, err := ParseLight(out)
-	require.NoError(t, err)
-	require.Len(t, g, 2)
-	assert.Equal(t, 97, g[0].UtilGPU)
-	assert.Equal(t, -1, g[1].UncorrectedECC)
-	_, err = ParseLight("No devices were found\n")
-	assert.Error(t, err)
-}

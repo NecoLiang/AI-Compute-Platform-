@@ -7,9 +7,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -35,6 +37,31 @@ type fakeNode struct {
 	cmds       []string
 	pwLogins   int
 	pwTries    int // 收到的密码/键盘交互认证次数(含失败): 用于断言密码根本没有发出
+	xidLines   []string
+}
+
+// fakeXidHeader 与 xidCommand 真实输出同格式的头部: 节点时钟取当前时间, 日志自两天前开始(时间窗完整覆盖)。
+func fakeXidHeader() string {
+	now := time.Now()
+	return "@@id uid=0 groups=root\n@@now " + strconv.FormatInt(now.Unix(), 10) + "\n@@src journal\n@@first " +
+		now.Add(-48*time.Hour).Format("2006-01-02T15:04:05-0700") + "\n"
+}
+
+// fakeXidLine journalctl -k -o short-iso 格式的一条 Xid 日志。
+func fakeXidLine(at time.Time, bus string, xid int) string {
+	return fmt.Sprintf("%s gpu-node-01 kernel: NVRM: Xid (PCI:%s): %d, pid=0, name=, test event", at.Format("2006-01-02T15:04:05-0700"), bus, xid)
+}
+
+// fakeTelLine cmdTelemetry 单卡输出(H100 空闲, 降频位 0x1 = GPU 空闲); eccUnc 为 volatile 不可纠正 ECC 计数。
+func fakeTelLine(uuid string, eccUnc int) string {
+	return fmt.Sprintf("%s, 1, 81559, 41, 69.37, 0x0000000000000001, %d, 0, 0, 0\n", uuid, eccUnc)
+}
+
+// SetXidLines 之后的 Xid 扫描都会返回这些日志行(真实节点上同一事件会在相邻窗口重复读到)。
+func (f *fakeNode) SetXidLines(lines ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.xidLines = lines
 }
 
 const (
@@ -73,9 +100,9 @@ var fakeDefaults = []struct {
 	{cmdRemap, true, fakeReply{Stdout: fakeUUID0 + ", 0, 0\n" + fakeUUID1 + ", 0, 0\n"}},
 	{cmdDocker, true, fakeReply{Stdout: fakeDockerInfo}},
 	{cmdPorts, true, fakeReply{Stdout: "LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*\nLISTEN 0      4096            [::]:22            [::]:*\n"}},
-	{cmdLight, true, fakeReply{Stdout: "0, " + fakeUUID0 + ", 37, 12, 41, 0\n1, " + fakeUUID1 + ", 3, 0, 33, 0\n"}},
 	{cmdDockerAlive, true, fakeReply{}},
-	{`echo "@@id`, false, fakeReply{Stdout: "@@id uid=0 groups=root\n"}},
+	{cmdTelemetry, true, fakeReply{Stdout: fakeTelLine(fakeUUID0, 0) + fakeTelLine(fakeUUID1, 0)}},
+	{"if [ -d '", false, fakeReply{Stdout: "         Avail     1B-blocks\n3298534883328 3840755982336\n"}},
 	{"echo @@nproc", false, fakeReply{Stdout: fakeHostInfo}},
 	{"docker pull -q ", false, fakeReply{Stdout: "registry.example.com/omnis/probe@sha256:" + strings.Repeat("ab", 32) + "\n"}},
 	{"docker run --rm --network none --storage-opt", false, fakeReply{}},
@@ -258,9 +285,16 @@ func (f *fakeNode) exec(cmd string) fakeReply {
 			return r
 		}
 	}
+	xid := strings.Join(f.xidLines, "\n")
 	f.mu.Unlock()
 	if strings.HasPrefix(cmd, "umask 077;") {
 		return f.installKey(cmd)
+	}
+	if strings.HasPrefix(cmd, `echo "@@id`) {
+		if xid != "" {
+			xid += "\n"
+		}
+		return fakeReply{Stdout: fakeXidHeader() + xid}
 	}
 	for _, d := range fakeDefaults {
 		if (d.exact && cmd == d.prefix) || (!d.exact && strings.HasPrefix(cmd, d.prefix)) {

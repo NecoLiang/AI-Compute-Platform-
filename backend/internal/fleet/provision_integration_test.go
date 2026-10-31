@@ -309,7 +309,7 @@ func TestLightProbeSetsLeaseResourceAlert(t *testing.T) {
 	n, err := e.s.repo.GetNode(e.node)
 	require.NoError(t, err)
 
-	e.fake.Override(cmdLight, fakeReply{Stdout: "0, " + fakeUUID0 + ", 37, 12, 41, 0\n1, " + fakeUUID1 + ", 3, 0, 33, 2\n"})
+	e.fake.Override(cmdTelemetry, fakeReply{Stdout: fakeTelLine(fakeUUID0, 0) + fakeTelLine(fakeUUID1, 2)})
 	e.s.lightProbe(context.Background(), n)
 	l, _ := e.s.repo.getLease(e.db, e.lease.ID)
 	require.NotNil(t, l.ResourceAlert)
@@ -317,7 +317,7 @@ func TestLightProbeSetsLeaseResourceAlert(t *testing.T) {
 	assert.Equal(t, LeaseActive, l.State, "停机认定属 T-105, 这里只记录")
 	assert.Equal(t, 2, countRows(t, e.db, `SELECT COUNT(*) FROM gpu_slots WHERE lease_id=? AND state='leased'`, e.lease.ID))
 
-	e.fake.Override(cmdLight, fakeReply{Stdout: "0, " + fakeUUID0 + ", 37, 12, 41, 0\n1, " + fakeUUID1 + ", 3, 0, 33, 0\n"})
+	e.fake.Override(cmdTelemetry, fakeReply{Stdout: fakeTelLine(fakeUUID0, 0) + fakeTelLine(fakeUUID1, 0)})
 	e.s.lightProbe(context.Background(), n)
 	l, _ = e.s.repo.getLease(e.db, e.lease.ID)
 	assert.True(t, l.ResourceAlert == nil || *l.ResourceAlert == "")

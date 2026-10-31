@@ -61,6 +61,8 @@ type probeRun struct {
 	freeIdx  map[int]bool // 本次可做侵入项的空闲卡(不含在租/预留/排空)
 	await    bool         // 首次连接, 待供给方确认指纹
 	mismatch string       // 指纹变化时的观测值
+	// topoLinks P6 解析出的两两拓扑(index×index), 探活结论落库后写入卡槽(新卡槽在通过时才建)。
+	topoLinks [][]string
 }
 
 // ProbeOutcome 任务结果(写入 node_tasks.result)。
@@ -177,7 +179,13 @@ func (s *Service) runProbe(ctx context.Context, nodeID int64, pl ProbePayload) (
 		// 服务停机/锁超时导致的中断不是节点的问题: 不写结论, 由 worker 按可重试失败处理。
 		return nil, fmt.Errorf("探活被中断: %w", err)
 	}
-	return s.commitProbe(p)
+	out, err := s.commitProbe(p)
+	if err == nil && out != nil && !out.Discarded && p.topoLinks != nil {
+		if err := s.recordTopo(n.ID, p.gen, p.gpus, p.topoLinks, time.Now()); err != nil {
+			slog.Error("fleet 记录卡间拓扑失败", "node_id", n.ID, "error", err)
+		}
+	}
+	return out, err
 }
 
 // connect P1–P3。指纹未确认(TOFU)时记录观测指纹并在 P3 之后停止, 等供给方确认。
