@@ -10,7 +10,9 @@ import (
 	"tokenfactory/internal/legal"
 	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/pkg/config"
+	"tokenfactory/pkg/errcode"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -262,6 +264,13 @@ func TestNightlyUnparkOccupiedRecordsOutage(t *testing.T) {
 	assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM gpu_slots WHERE lease_id=? AND state IN ('reserved','leased')`, l.ID),
 		"认领的卡退回(draining → stop 后 free)")
 	assert.Equal(t, []string{"ended", "failed", "booked"}, nightStates(t, e.db, l.ID), "顺延补加一晚")
+	var cs struct {
+		Score   int `db:"score"`
+		Minutes int `db:"outage_minutes_30d"`
+	}
+	require.NoError(t, e.db.Get(&cs, `SELECT score, outage_minutes_30d FROM credit_scores WHERE supplier_id=20`))
+	assert.Equal(t, 240, cs.Minutes, "整晚 night_unpark_failed 计入供给方停机分钟")
+	assert.Less(t, cs.Score, 100, "扣信用分(docs/26 §26.6.4)")
 
 	// 后续轮次不重复处理。
 	e.s.NightlyRound(context.Background())
@@ -418,4 +427,19 @@ func TestNightlyOutageStartClampedToUnpark(t *testing.T) {
 	var started time.Time
 	require.NoError(t, e.db.Get(&started, `SELECT started_at FROM lease_outages WHERE lease_id=? AND ended_at IS NULL`, l.ID))
 	assert.False(t, started.Before(unparked), "停机开始 %s 早于本晚开通 %s", started, unparked)
+}
+
+// 包夜续租未开放: 报价与下单都返回 50000 + 买家可读的中文提示(不带内部文档编号), 且不触碰租约。
+func TestNightlyRenewalRejectedWithClearMessage(t *testing.T) {
+	e, _ := newNightEnv(t)
+	e.outcome(t, runOne(t, e.s))
+	_, err := e.comp.GetRenewalQuote(21, e.order.OrderNo, 1)
+	require.Error(t, err)
+	assert.Equal(t, errcode.InternalError, compute.ErrToCode(err))
+	assert.Contains(t, err.Error(), "包夜订单暂不支持续租")
+	assert.NotContains(t, err.Error(), "docs/")
+	_, err = e.comp.RenewOrder(21, e.order.OrderNo, compute.RenewOrderReq{Duration: 1, RequestID: uuid.NewString(), ComplianceAgreed: true, ComplianceVersion: legal.Version})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "包夜订单暂不支持续租")
+	assert.Equal(t, LeaseActive, e.leaseNow(t).State)
 }

@@ -77,6 +77,10 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int, ev st
 	if err := s.requireManagedRenewable(parent); err != nil {
 		return nil, err
 	}
+	// 包夜续租(在同一组卡上追加后续晚, docs/26 §26.6.3)未开放: 在租约钩子之前拒绝, 买家始终看到同一条明确提示。
+	if m, err := OrderPricingMode(parent); err == nil && m == PricingNightly {
+		return nil, errNightlyNotWired
+	}
 	managed := parent.FulfillmentMode == FulfillmentManaged
 	if managed && parent.SettleReadyAt != nil {
 		// 已到租期末结算(T-106, 整条续租链进入一次分账): 不能再续租复活, 需重新下单。
@@ -144,11 +148,7 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int, ev st
 	if err != nil {
 		return nil, err
 	}
-	// 托管订单同样按上面的快照报价(RenewTx 未接入时已在入口 50000)。
-	// 包夜续租依赖夜间预订(T-094), 未接入前 50000。
-	if mode == PricingNightly {
-		return nil, errNightlyNotWired
-	}
+	// 托管订单同样按上面的快照报价(RenewTx 未接入时已在入口 50000); 包夜已在入口拒绝。
 	quantity, duration, err := ValidateRenewParamsFor(&product, price, parent.Quantity, duration)
 	if err != nil {
 		return nil, err
