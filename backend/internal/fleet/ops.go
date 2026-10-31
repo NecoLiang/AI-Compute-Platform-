@@ -236,6 +236,7 @@ func (s *Service) Suspend(operatorID, nodeID int64, reason, ip string) error {
 func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 	var node *Node
 	var taskID int64
+	var reimage bool
 	err := s.inTx(func(tx *sqlx.Tx) error {
 		n, err := s.repo.lockNode(tx, nodeID)
 		if err != nil {
@@ -252,11 +253,17 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 		if !ok {
 			return errcode.New(errcode.Conflict, "节点不在停用状态")
 		}
+		to := VerifyUnverified
+		if n.ReimageRequiredAt != nil {
+			// 停用期间整机租约结束(T-089): 恢复到 needs_reimage, 不入队探活, 等供给方重装确认。
+			to = VerifyNeedsReimage
+		}
 		if err := s.repo.audit(tx, operatorID, "node.resumed", "supplier_node", nodeID,
-			map[string]any{"verify_status": VerifySuspended}, map[string]any{"verify_status": VerifyUnverified}, ip); err != nil {
+			map[string]any{"verify_status": VerifySuspended}, map[string]any{"verify_status": to}, ip); err != nil {
 			return err
 		}
-		if !n.sshReady() {
+		if !n.sshReady() || to == VerifyNeedsReimage {
+			reimage = to == VerifyNeedsReimage
 			return nil
 		}
 		n.VerifyStatus = VerifyUnverified
@@ -265,6 +272,10 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 	})
 	if err != nil {
 		return 0, err
+	}
+	if reimage {
+		s.notify(node.SupplierID, "节点已恢复, 待重装", fmt.Sprintf("节点「%s」已被平台运营恢复; 该节点的整机租约已结束, 请重装操作系统后在控制台确认重装, 通过完整探活后恢复接单。", node.NodeName), nodeID)
+		return 0, nil
 	}
 	s.notify(node.SupplierID, "节点已恢复", fmt.Sprintf("节点「%s」已被平台运营恢复, 正在重新探活, 通过后恢复接单。", node.NodeName), nodeID)
 	return taskID, nil

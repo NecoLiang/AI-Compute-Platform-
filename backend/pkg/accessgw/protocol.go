@@ -105,12 +105,15 @@ type AuthRequest struct {
 
 // AuthResponse 鉴权结果。拒绝时只有 allow=false(不区分登录名是否存在)。
 type AuthResponse struct {
-	Allow             bool       `json:"allow"`
-	UpstreamHost      string     `json:"upstream_host,omitempty"`
-	UpstreamPort      int        `json:"upstream_port,omitempty"`
-	UpstreamHostKeyFP string     `json:"upstream_host_key_fp,omitempty"`
-	AccessUntil       *time.Time `json:"access_until,omitempty"`
-	CacheTTLS         int        `json:"cache_ttl_s"`
+	Allow             bool   `json:"allow"`
+	UpstreamHost      string `json:"upstream_host,omitempty"`
+	UpstreamPort      int    `json:"upstream_port,omitempty"`
+	UpstreamHostKeyFP string `json:"upstream_host_key_fp,omitempty"`
+	// UpstreamUser 登录上游时使用的账户名; 空 = 网关配置的默认账户(--upstream-user, 容器交付为 root)。
+	// 整机交付(bare_metal, T-089)为平台在宿主机上创建的租约账户 omnis-<lease_no>。
+	UpstreamUser string     `json:"upstream_user,omitempty"`
+	AccessUntil  *time.Time `json:"access_until,omitempty"`
+	CacheTTLS    int        `json:"cache_ttl_s"`
 	// System 系统自检身份的放行(开通自检): 网关不缓存、不上报会话审计。
 	System bool `json:"system,omitempty"`
 	// Probe 探活 P11 的端口连通任务: 网关从本机(出口 IP 即节点放行的 IP)对 host:port 做一次 TCP 连接,

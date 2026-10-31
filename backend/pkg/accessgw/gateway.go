@@ -40,7 +40,23 @@ type Route struct {
 	Host      string
 	Port      int
 	HostKeyFP string
-	System    bool
+	// User 上游账户名; 空 = 网关默认账户(见 AuthResponse.UpstreamUser)。
+	User   string
+	System bool
+}
+
+// ValidUpstreamUser 上游账户名白名单(POSIX 可移植用户名子集, ≤32 位): 主服务下发的账户名不合法即拒绝登录。
+func ValidUpstreamUser(u string) bool {
+	if len(u) == 0 || len(u) > 32 || !(u[0] >= 'a' && u[0] <= 'z' || u[0] == '_') {
+		return false
+	}
+	for i := 1; i < len(u); i++ {
+		c := u[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 const (
@@ -178,7 +194,12 @@ func (g *Gateway) auth(ctx context.Context, connID, cacheKey string, req AuthReq
 	if !resp.Allow || resp.UpstreamHost == "" || resp.UpstreamPort <= 0 || resp.UpstreamHostKeyFP == "" {
 		return nil, ErrDenied
 	}
-	route := Route{Host: resp.UpstreamHost, Port: resp.UpstreamPort, HostKeyFP: resp.UpstreamHostKeyFP, System: resp.System}
+	if resp.UpstreamUser != "" && !ValidUpstreamUser(resp.UpstreamUser) {
+		g.log.Warn("主服务下发的上游账户名非法, 拒绝登录", "login", req.Login)
+		return nil, ErrDenied
+	}
+	route := Route{Host: resp.UpstreamHost, Port: resp.UpstreamPort, HostKeyFP: resp.UpstreamHostKeyFP,
+		User: resp.UpstreamUser, System: resp.System}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	ttl := min(time.Duration(resp.CacheTTLS)*time.Second, MaxCacheTTL)
