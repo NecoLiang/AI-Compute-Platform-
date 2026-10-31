@@ -255,6 +255,13 @@ func (s *Service) HandleNotify(kind, raw string) error {
 		if err != nil {
 			return err
 		}
+		partial, err := s.isPartialRefundRequest(result.RequestID)
+		if err != nil {
+			return err
+		}
+		if partial {
+			return s.applyPartialRefundResult(result)
+		}
 		return s.applyRefundResult(result)
 	case NotifyNetIn:
 		result, err := parseNetInNotify(content)
@@ -617,6 +624,18 @@ func (s *Service) submitRefund(orderNo string) (string, error) {
 			back = append(back, DivideBackItem{LedgerNo: *row.LedgerNo, DivideDetailNo: *row.DivideDetailNo, Amount: row.Amount})
 		}
 	}
+	// 托管订单的部分退款(停机补偿/违约, T-106): 处理中时等终态; 已成功的从全额退款中扣除, 只退剩余。
+	refunded, err := partialRefundProcessingTx(tx, pay.ID)
+	if err != nil {
+		return "", err
+	}
+	if refunded < 0 {
+		return "pending", nil
+	}
+	amount := pay.Amount - refunded
+	if amount <= 0 {
+		return "", fmt.Errorf("订单 %s 已通过部分退款退完实付, 需人工处理", orderNo)
+	}
 	requestID := newRequestID("R", orderNo)
 	if _, err := tx.Exec("UPDATE payments SET refund_status='processing',refund_request_id=? WHERE id=?", requestID, pay.ID); err != nil {
 		return "", err
@@ -624,7 +643,7 @@ func (s *Service) submitRefund(orderNo string) (string, error) {
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
-	result, err := s.yeepay.Refund(RefundOrder{OrderNo: orderNo, RequestID: requestID, Amount: pay.Amount, Reason: pay.RefundReason, DivideBack: back})
+	result, err := s.yeepay.Refund(RefundOrder{OrderNo: orderNo, RequestID: requestID, Amount: amount, Reason: pay.RefundReason, DivideBack: back})
 	if err != nil {
 		if bizCode(err) != "" {
 			return "failed", s.applyRefundResult(&RefundResult{OrderNo: orderNo, RequestID: requestID, Status: "FAILED", FailReason: err.Error()})
@@ -678,8 +697,17 @@ func (s *Service) applyRefundResult(r *RefundResult) error {
 	if pay.Status == "refunded" {
 		return tx.Commit()
 	}
-	if r.Amount > 0 && r.Amount != pay.Amount {
-		return fmt.Errorf("易宝退款金额与支付金额不一致: order=%s", orderNo)
+	refunded, _, err := partialRefundTotals(tx, pay.ID)
+	if err != nil {
+		return err
+	}
+	if r.Amount > 0 && r.Amount != pay.Amount-refunded {
+		return fmt.Errorf("易宝退款金额与支付金额(扣除已成功部分退款)不一致: order=%s", orderNo)
+	}
+	// 尚未提交的部分退款由全额退款覆盖, 不再提交(处理中的部分退款在 submitRefund 已等待终态)。
+	if _, err := tx.Exec(`UPDATE payment_refunds SET status='failed', last_error='订单已全额退款, 本笔不再提交'
+		WHERE payment_id=? AND status IN ('pending','failed')`, pay.ID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec("UPDATE payments SET status='refunded',refund_status='success',refunded_at=NOW() WHERE id=?", pay.ID); err != nil {
 		return err
@@ -716,6 +744,7 @@ func (s *Service) RunJobs() error {
 	keep(s.syncClearing())
 	keep(s.queueCancelledPaidRefunds())
 	keep(s.syncDivides())
+	keep(s.runPartialRefunds())
 	keep(s.runSplits())
 	keep(s.runRefunds())
 	return firstErr

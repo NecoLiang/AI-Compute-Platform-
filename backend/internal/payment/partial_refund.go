@@ -466,3 +466,21 @@ func affected(res sql.Result, err error) (bool, error) {
 	n, err := res.RowsAffected()
 	return n > 0, err
 }
+
+// partialRefundProcessingTx 全额退款前锁定本支付的部分退款: 有处理中的返回 -1(等待终态), 否则返回已成功合计。
+func partialRefundProcessingTx(tx *sqlx.Tx, paymentID int64) (int64, error) {
+	var rows []PartialRefund
+	if err := tx.Select(&rows, `SELECT `+partialRefundColumns+` FROM payment_refunds WHERE payment_id=? FOR UPDATE`, paymentID); err != nil {
+		return 0, err
+	}
+	var ok int64
+	for _, r := range rows {
+		switch r.Status {
+		case "processing":
+			return -1, nil
+		case "success":
+			ok += r.Amount
+		}
+	}
+	return ok, nil
+}
