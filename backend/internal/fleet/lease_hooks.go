@@ -30,7 +30,8 @@ const cleanupMaxAttempts = 10
 // LeaseHooks 供 main 注入 compute.SetLeaseHooks。
 func (s *Service) LeaseHooks() compute.LeaseHooks {
 	return compute.LeaseHooks{ReserveTx: s.reserveLeaseTx, OnPaidTx: s.onLeasePaidTx, ReleaseTx: s.releaseLeaseTx, RenewTx: s.renewLeaseTx,
-		Feasible: s.leaseFeasible, FreezeTx: s.freezeLeaseTx, UnfreezeTx: s.unfreezeLeaseTx, WrongFreeze: s.wrongFreeze}
+		Feasible: s.leaseFeasible, FreezeTx: s.freezeLeaseTx, UnfreezeTx: s.unfreezeLeaseTx, WrongFreeze: s.wrongFreeze,
+		NightFeasible: s.nightFeasible, NightCalendar: s.nightCalendar}
 }
 
 // wrongFreeze 误冻结停机交给停机认定(T-105); 未注入时只记日志, 不自行开/关 lease_outages。
@@ -67,6 +68,9 @@ func (s *Service) reserveLeaseTx(tx *sqlx.Tx, o *compute.Order, p *compute.Produ
 	l := &Lease{OrderID: o.ID, BuyerID: o.BuyerID, ProductID: p.ID, Cards: o.Quantity, DeliveryKind: kind}
 	if err := s.repo.insertLease(tx, l); err != nil {
 		return err
+	}
+	if o.PricingMode != nil && *o.PricingMode == compute.PricingNightly {
+		return s.reserveNightLeaseTx(tx, o, p, l)
 	}
 	nodeID, _, err := s.repo.reserveSlotsTx(tx, p.ID, o.Quantity, kind == "bare_metal", l.ID, 0)
 	if err != nil {
@@ -156,6 +160,16 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 	}
 	// 锁顺序: 订单 → 租约 → 节点行 → 卡槽 → 商品行(见 reserveSlotsTx)。
 	if err := s.lockNodeRow(tx, l.NodeID); err != nil {
+		return err
+	}
+	// 包夜预订(§26.6.3): 关单/取消删除全部; 退款/到期只删尚未开始的晚(已开始的晚保留作履约记录)。
+	switch l.State {
+	case LeaseReserved, LeasePending:
+		err = s.releaseNightsTx(tx, l.ID, true)
+	case LeaseProvisioning, LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace:
+		err = s.releaseNightsTx(tx, l.ID, false)
+	}
+	if err != nil {
 		return err
 	}
 	switch l.State {

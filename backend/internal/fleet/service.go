@@ -190,7 +190,17 @@ func (s *Service) recomputeStockTx(tx *sqlx.Tx, productID int64) error {
 	if err := s.products.LockManagedProductTx(tx, productID); err != nil {
 		return err
 	}
-	free, maxNode, err := s.repo.freeSlotStats(tx, productID)
+	win, err := s.repo.productNightWindow(tx, productID)
+	if err != nil {
+		return err
+	}
+	var free, maxNode int
+	if win != nil {
+		// 夜间窗口商品(T-094): 库存按预订算, 与卡槽当前状态无关(卡槽只在窗口内被占用)。
+		free, maxNode, err = s.repo.nightStock(tx, productID, *win, time.Now())
+	} else {
+		free, maxNode, err = s.repo.freeSlotStats(tx, productID)
+	}
 	if err != nil {
 		return err
 	}

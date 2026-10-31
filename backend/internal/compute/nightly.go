@@ -65,6 +65,11 @@ func FirstBookableNight(now time.Time, w NightWindow) time.Time {
 	return d.AddDate(0, 0, 1)
 }
 
+// LastStartedNight 窗口开始时刻不晚于 now 的最后一晚(night_date 晚于它的晚都尚未开始)。
+func LastStartedNight(now time.Time, w NightWindow) time.Time {
+	return NightDate(now.In(shanghaiLoc()).Add(-time.Duration(w.StartMin) * time.Minute))
+}
+
 func todayIn(now time.Time) time.Time { return NightDate(now.In(shanghaiLoc())) }
 
 // NightOrderWindow 包夜下单/报价的商品前置条件(Q-44): 夜间窗口 + 平台托管 + 分卡容器。返回商品窗口。
