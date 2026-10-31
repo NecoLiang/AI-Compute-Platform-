@@ -25,6 +25,9 @@ type Node struct {
 	MgmtMode     string `db:"mgmt_mode" json:"mgmt_mode"`
 	VerifyStatus string `db:"verify_status" json:"verify_status"`
 	Schedulable  bool   `db:"schedulable" json:"schedulable"`
+	// DispatchHold 平台按信用/停机自动停调度(T-105, migration 033, 由 fleet 写; 非托管节点恒为 false)。
+	DispatchHold       bool    `db:"dispatch_hold" json:"dispatch_hold"`
+	DispatchHoldReason *string `db:"dispatch_hold_reason" json:"dispatch_hold_reason"`
 	// Managed 托管节点的附加信息(最近探活结论等), 由 fleet 填充; push 节点为空。
 	Managed any `db:"-" json:"managed,omitempty"`
 	// SupplierName 供给方公司名, 仅 ListAllNodes(运营视角)填充; 供给方自查列表不带。
@@ -33,7 +36,7 @@ type Node struct {
 	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
 }
 
-const nodeColumns = "id, supplier_id, product_id, node_name, COALESCE(node_key_hash,'') AS node_key_hash, status, total_cards, available_cards, gpu_util_pct, vram_util_pct, last_heartbeat_at, mgmt_mode, verify_status, schedulable, created_at, updated_at"
+const nodeColumns = "id, supplier_id, product_id, node_name, COALESCE(node_key_hash,'') AS node_key_hash, status, total_cards, available_cards, gpu_util_pct, vram_util_pct, last_heartbeat_at, mgmt_mode, verify_status, schedulable, dispatch_hold, dispatch_hold_reason, created_at, updated_at"
 
 type Repository struct{ db *sqlx.DB }
 

@@ -55,6 +55,7 @@ func setupSchedDB(t *testing.T) (*sqlx.DB, *Service) {
 		mgmt_mode ENUM('push','ssh') NOT NULL DEFAULT 'push',
 		verify_status ENUM('unverified','verifying','verified','failed','key_mismatch','needs_reimage','suspended') NOT NULL DEFAULT 'unverified',
 		schedulable TINYINT NOT NULL DEFAULT 1,
+		dispatch_hold TINYINT NOT NULL DEFAULT 0, dispatch_hold_reason VARCHAR(255) NULL, -- migrations/033
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 		UNIQUE KEY uk_product_node (product_id, node_name)
@@ -240,5 +241,28 @@ func TestLiveness_SweepSkipsSSHNodes(t *testing.T) {
 	db.MustExec("UPDATE products SET fulfillment_mode='managed' WHERE id=1")
 	if _, _, err := svc.RegisterNode(10, 1, "push-on-managed", 8); err == nil {
 		t.Fatal("托管商品不应接受 push 节点")
+	}
+}
+
+// 供给方节点列表带出平台停调度标记(T-105, docs/api/page-api-map.md 供给方节点⑨); 非托管/未停调度节点为 false/null。
+func TestSupplierNodesExposeDispatchHold(t *testing.T) {
+	db, svc := setupSchedDB(t)
+	db.MustExec("INSERT INTO products (id, supplier_id) VALUES (1, 10), (2, 10)")
+	db.MustExec(`INSERT INTO supplier_nodes (supplier_id, product_id, node_name, node_key_hash, status, total_cards, mgmt_mode, dispatch_hold, dispatch_hold_reason)
+		VALUES (10, 1, 'held', NULL, 'online', 8, 'ssh', 1, '信用分 52 低于阈值 60'),
+		       (10, 2, 'push', REPEAT('a',64), 'online', 8, 'push', 0, NULL)`)
+	list, err := svc.repo.ListNodesBySupplier(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Node{}
+	for _, n := range list {
+		got[n.NodeName] = n
+	}
+	if h := got["held"]; !h.DispatchHold || h.DispatchHoldReason == nil || *h.DispatchHoldReason != "信用分 52 低于阈值 60" {
+		t.Fatalf("停调度节点应带出 dispatch_hold/原因: %+v", h)
+	}
+	if p := got["push"]; p.DispatchHold || p.DispatchHoldReason != nil {
+		t.Fatalf("非托管节点 dispatch_hold 应为 false/null: %+v", p)
 	}
 }

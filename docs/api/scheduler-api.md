@@ -28,7 +28,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 ## GET /supplier/nodes · 我的节点列表 ✅
 ## DELETE /supplier/nodes/:id · 删除节点 ✅
 
-托管节点在列表中带 `mgmt_mode`、`verify_status`、`schedulable` 等字段，不含任何凭证。删除托管节点由 fleet 处理：有进行中租约的卡槽时 40900；否则同事务删除卡槽、作废任务并重算库存。`fleet.enabled=false` 时删除托管节点返回 50000（托管模块未启用，无法安全清理卡槽）。
+托管节点在列表中带 `mgmt_mode`、`verify_status`、`schedulable` 等字段，不含任何凭证。所有节点都带 `dispatch_hold`（bool，平台自动停调度，非托管节点恒为 `false`）与 `dispatch_hold_reason`（string|null），含义见 [managed-rental-api.md](managed-rental-api.md)。删除托管节点由 fleet 处理：有进行中租约的卡槽时 40900；否则同事务删除卡槽、作废任务并重算库存。`fleet.enabled=false` 时删除托管节点返回 50000（托管模块未启用，无法安全清理卡槽）。
 
 ## POST /node/heartbeat · 节点心跳（机器侧，30s 一次）✅
 
