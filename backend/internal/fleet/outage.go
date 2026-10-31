@@ -174,6 +174,14 @@ func (s *Service) startOutage(leaseID int64, cause, detail string, start time.Ti
 		if lastEnd.Valid && start.Before(lastEnd.Time) {
 			start = lastEnd.Time
 		}
+		// 包夜: 停机不早于本晚开通时刻(白天停放期不计停机; 开通前的迟到已由 provision_delay/night_unpark_failed 计入)。
+		var unparked sql.NullTime
+		if err := tx.Get(&unparked, `SELECT MAX(unparked_at) FROM lease_nights WHERE lease_id=? AND state='active'`, leaseID); err != nil {
+			return err
+		}
+		if unparked.Valid && start.Before(unparked.Time) {
+			start = unparked.Time
+		}
 		orderID, err := s.coveringOrderID(tx, l.OrderID, start)
 		if err != nil {
 			return err

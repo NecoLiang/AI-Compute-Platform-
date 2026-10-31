@@ -399,3 +399,23 @@ func TestNightlyDeploymentStopsAtParkResumesAtUnpark(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE kind=? AND state='pending' AND lease_id=?`,
 		modeldeploy.TaskDeployModel, e.lease.ID))
 }
+
+// 包夜第 N 晚: 网关心跳/探活成功时刻可能早在白天停放期; 停机开始不得早于本晚开通时刻, 否则白天被计入停机补偿。
+func TestNightlyOutageStartClampedToUnpark(t *testing.T) {
+	e, _ := newNightEnv(t)
+	e.outcome(t, runOne(t, e.s))
+	l := e.leaseNow(t)
+	require.Equal(t, LeaseActive, l.State)
+	// 模拟: 租约首晚开通于一天前, 本晚 10 分钟前开通。
+	e.db.MustExec(`UPDATE leases SET provisioned_at=NOW() - INTERVAL 1 DAY WHERE id=?`, l.ID)
+	e.db.MustExec(`UPDATE lease_nights SET unparked_at=NOW() - INTERVAL 10 MINUTE WHERE lease_id=? AND state='active'`, l.ID)
+	var unparked time.Time
+	require.NoError(t, e.db.Get(&unparked, `SELECT unparked_at FROM lease_nights WHERE lease_id=? AND state='active'`, l.ID))
+
+	opened, err := e.s.startOutage(l.ID, OutageGatewayDown, "网关自白天起未上报", time.Now().Add(-6*time.Hour))
+	require.NoError(t, err)
+	require.True(t, opened)
+	var started time.Time
+	require.NoError(t, e.db.Get(&started, `SELECT started_at FROM lease_outages WHERE lease_id=? AND ended_at IS NULL`, l.ID))
+	assert.False(t, started.Before(unparked), "停机开始 %s 早于本晚开通 %s", started, unparked)
+}
