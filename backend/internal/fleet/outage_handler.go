@@ -92,3 +92,20 @@ func (h *Handler) AdminOverrideCredit(c *gin.Context) {
 	}
 	response.Success(c, d)
 }
+
+// AdminSupplierBreachRefund 运营发起供给方违约未使用部分退款(T-106; 部分退款能力未确认时 50000)。
+func (h *Handler) AdminSupplierBreachRefund(c *gin.Context) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, "reason 必填")
+		return
+	}
+	d, err := h.svc.AdminSupplierBreachRefund(c.Request.Context(), c.GetInt64("user_id"), c.Param("order_no"), req.Reason, c.ClientIP())
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	response.Success(c, d)
+}

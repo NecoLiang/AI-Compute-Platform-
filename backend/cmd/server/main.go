@@ -154,6 +154,15 @@ func main() {
 		fleetSvc.SetRedis(rdb)
 		paymentSvc.SetPaidHook(computeSvc.OnOrderPaidTx)
 		schedulerSvc.SetManagedNodes(fleetSvc)
+		// 停机补偿部分退款(T-106): 仅在易宝书面确认部分退款能力后打开; 未打开时选退费返回 50000、只做顺延。
+		if cfg.Fleet.Outage.YeepayPartialRefundConfirmed {
+			if perr := paymentSvc.EnablePartialRefunds(); perr != nil {
+				slog.Error("fleet.outage.yeepay_partial_refund_confirmed=true 但易宝未接入", "error", perr)
+				os.Exit(1)
+			}
+			fleetSvc.SetOutageRefunder(paymentSvc)
+			fleetSvc.SetBreachRefunder(paymentSvc)
+		}
 
 		// 访问网关 (docs/25 §25.6, T-085): 系统自检身份 + 内部接口(独立监听, 不挂公网路由)。
 		// 任一环节不可用即启动失败, 不降级为"跳过自检"。

@@ -59,7 +59,14 @@ const partialRefundColumns = `id, payment_id, order_no, refund_request_id, amoun
 // EnablePartialRefunds 打开部分退款通道。main 仅在 fleet.enabled 且 fleet.outage.yeepay_partial_refund_confirmed=true 时调用;
 // 未打开时 RequestOutageRefund / RequestBreachRefund 返回 ErrPartialRefundDisabled, 定时任务也不提交新的部分退款
 // (已在 processing 的仍会查询落地, 钱可能已经退出去了)。
-func (s *Service) EnablePartialRefunds() { s.partialRefunds = true }
+// 易宝未接入时拒绝打开(不降级为"假装可退")。
+func (s *Service) EnablePartialRefunds() error {
+	if !s.yeepay.Configured() {
+		return ErrYeepayNotConfigured
+	}
+	s.partialRefunds = true
+	return nil
+}
 
 // PartialRefundsEnabled 部分退款通道是否已打开。
 func (s *Service) PartialRefundsEnabled() bool { return s.partialRefunds }
@@ -107,77 +114,108 @@ func (s *Service) RequestOutageRefund(_ context.Context, outageID int64) error {
 	return s.requestPartialRefund(o.OrderNo, RefundKindOutage, outageID, *o.Amount, "算力订单停机补偿退费")
 }
 
-// RequestBreachRefund 供给方违约整单退款(未使用部分, 运营发起): 从 orderNo 的支付部分退款 amount, source_id = 租约 ID。
-func (s *Service) RequestBreachRefund(orderNo string, leaseID, amount int64, reason string) error {
+// RegisterBreachRefundTx 供给方违约整单退款(未使用部分, 运营发起, T-106): 在调用方事务内登记一笔
+// kind='supplier_breach'、source_id=租约 ID 的部分退款(与截断租期同事务, 要么都生效要么都不生效)。
+// 调用方须已按"根订单 → 租约"加锁; 这里再按 订单族 → payment_refunds → payments → settlements 加锁。
+// 提交后调用 SubmitPartialRefund 发起退款; 提交失败时定时任务继续推进 pending。
+func (s *Service) RegisterBreachRefundTx(tx *sqlx.Tx, orderNo string, leaseID, amount int64, reason string) (int64, error) {
 	if !s.partialRefunds {
-		return ErrPartialRefundDisabled
-	}
-	if !s.yeepay.Configured() {
-		return ErrYeepayNotConfigured
+		return 0, ErrPartialRefundDisabled
 	}
 	if amount <= 0 {
-		return fmt.Errorf("违约退款金额无效")
+		return 0, fmt.Errorf("违约退款金额无效")
 	}
-	return s.requestPartialRefund(orderNo, RefundKindSupplierBreach, leaseID, amount, reason)
+	id, existed, err := s.registerPartialRefundTx(tx, orderNo, RefundKindSupplierBreach, leaseID, amount, reason)
+	if err != nil {
+		return 0, err
+	}
+	if existed {
+		return 0, errcode.New(errcode.Conflict, "该租约已发起过供给方违约退款")
+	}
+	return id, nil
 }
 
-// requestPartialRefund 登记(幂等)并提交一笔部分退款。登记校验: 托管订单、整条续租链未进入分账、支付未在全额退款、
-// 无处理中/已成功的分账、本支付部分退款累计不超过实付。
+// SubmitPartialRefund 提交一笔已登记的部分退款(幂等: 非 pending/failed 时无操作)。
+func (s *Service) SubmitPartialRefund(id int64) error { return s.submitPartialRefund(id) }
+
+// requestPartialRefund 登记(幂等)并提交一笔部分退款。
 func (s *Service) requestPartialRefund(orderNo, kind string, sourceID, amount int64, reason string) error {
 	tx, err := s.db.Beginx()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	order, parent, _, err := compute.NewRepository(s.db).LockOrderFamilyTx(tx, orderNo)
+	id, _, err := s.registerPartialRefundTx(tx, orderNo, kind, sourceID, amount, reason)
 	if err != nil {
 		return err
 	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if id == 0 {
+		return nil // 已成功
+	}
+	return s.submitPartialRefund(id)
+}
+
+// registerPartialRefundTx 按 (kind, source_id) 幂等登记。登记校验: 托管订单、整条续租链未进入分账、支付未在全额退款、
+// 无处理中/已成功的分账、本支付部分退款累计不超过实付。已存在且成功时补写来源落地并返回 id=0。
+func (s *Service) registerPartialRefundTx(tx *sqlx.Tx, orderNo, kind string, sourceID, amount int64, reason string) (id int64, existed bool, err error) {
+	order, parent, _, err := compute.NewRepository(s.db).LockOrderFamilyTx(tx, orderNo)
+	if err != nil {
+		return 0, false, err
+	}
 	if order == nil {
-		return fmt.Errorf("订单 %s 不存在", orderNo)
+		return 0, false, fmt.Errorf("订单 %s 不存在", orderNo)
 	}
 	if err := partialRefundableOrder(order, parent); err != nil {
-		return err
+		return 0, false, err
 	}
 	var row PartialRefund
 	err = tx.Get(&row, `SELECT `+partialRefundColumns+` FROM payment_refunds WHERE kind=? AND source_id=? FOR UPDATE`, kind, sourceID)
 	switch {
 	case err == nil:
 		if row.OrderNo != orderNo || row.Amount != amount {
-			return fmt.Errorf("部分退款 %s 已登记的订单/金额(%s/%d)与本次(%s/%d)不一致, 需人工核查",
+			return 0, true, fmt.Errorf("部分退款 %s 已登记的订单/金额(%s/%d)与本次(%s/%d)不一致, 需人工核查",
 				row.RequestID, row.OrderNo, row.Amount, orderNo, amount)
 		}
 		if row.Status == "success" {
-			if err := markRefundSourceAppliedTx(tx, &row); err != nil {
-				return err
-			}
-			return tx.Commit()
+			return 0, true, markRefundSourceAppliedTx(tx, &row)
 		}
+		return row.ID, true, nil
 	case errors.Is(err, sql.ErrNoRows):
-		pay, err := lockPartialRefundPaymentTx(tx, orderNo)
-		if err != nil {
-			return err
-		}
-		var committed int64
-		if err := tx.Get(&committed, `SELECT COALESCE(SUM(amount),0) FROM payment_refunds WHERE payment_id=?`, pay.ID); err != nil {
-			return err
-		}
-		if committed+amount > pay.Amount {
-			return fmt.Errorf("订单 %s 部分退款累计 %d + 本次 %d 超过实付 %d", orderNo, committed, amount, pay.Amount)
-		}
-		res, err := tx.Exec(`INSERT INTO payment_refunds (payment_id, order_no, refund_request_id, amount, kind, source_id, reason, status)
-			VALUES (?,?,?,?,?,?,?,'pending')`, pay.ID, orderNo, newRequestID("P", orderNo), amount, kind, sourceID, truncateRunes(reason, 250))
-		if err != nil {
-			return err
-		}
-		row.ID, _ = res.LastInsertId()
 	default:
-		return err
+		return 0, false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
+	pay, err := lockPartialRefundPaymentTx(tx, orderNo)
+	if err != nil {
+		return 0, false, err
 	}
-	return s.submitPartialRefund(row.ID)
+	var committed int64
+	if err := tx.Get(&committed, `SELECT COALESCE(SUM(amount),0) FROM payment_refunds WHERE payment_id=?`, pay.ID); err != nil {
+		return 0, false, err
+	}
+	if committed+amount > pay.Amount {
+		return 0, false, fmt.Errorf("订单 %s 部分退款累计 %d + 本次 %d 超过实付 %d", orderNo, committed, amount, pay.Amount)
+	}
+	res, err := tx.Exec(`INSERT INTO payment_refunds (payment_id, order_no, refund_request_id, amount, kind, source_id, reason, status)
+		VALUES (?,?,?,?,?,?,?,'pending')`, pay.ID, orderNo, newRequestID("P", orderNo), amount, kind, sourceID, truncateRunes(reason, 250))
+	if err != nil {
+		return 0, false, err
+	}
+	id, err = res.LastInsertId()
+	return id, false, err
+}
+
+// RefundableRemainder 订单当前已收款支付的实付减去已登记(任意状态)的部分退款, 供违约退款封顶。调用方事务内只读。
+func (s *Service) RefundableRemainder(q sqlx.Queryer, orderNo string) (int64, error) {
+	var r int64
+	err := sqlx.Get(q, &r, `SELECT p.amount - COALESCE((SELECT SUM(pr.amount) FROM payment_refunds pr WHERE pr.payment_id=p.id),0)
+		FROM payments p WHERE p.order_no=? AND p.status='paid' AND p.refund_status IS NULL ORDER BY p.id DESC LIMIT 1`, orderNo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return r, err
 }
 
 // partialRefundableOrder 部分退款只用于托管订单, 且整条续租链尚未进入分账(根订单 settle_ready_at IS NULL)。
