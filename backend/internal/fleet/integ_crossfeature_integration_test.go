@@ -38,6 +38,7 @@ func TestCrossBareMetalRejectsModelDeploy(t *testing.T) {
 		TP: 2, DP: 1, GPUMemUtilPct: 90, LicenseAck: true, UntestedAck: true})
 	require.Error(t, err)
 	assert.Equal(t, errcode.ParamInvalid, errCode(err), "整机提交部署须 40001: %v", err)
+	assert.Contains(t, err.Error(), "整机租用不支持一键部署")
 
 	var n int
 	require.NoError(t, e.db.Get(&n, `SELECT COUNT(*) FROM model_deployments WHERE lease_id=?`, e.lease.ID))
