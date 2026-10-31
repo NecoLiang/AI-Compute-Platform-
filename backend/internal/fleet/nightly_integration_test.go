@@ -463,3 +463,43 @@ func TestNightlyWrongFreezeCountsOnlyWindowSeconds(t *testing.T) {
 		AND started_at=?`, e.lease.ID, ws.Add(-10*time.Hour)))
 	assert.Equal(t, 0, counted)
 }
+
+// 商品在用(未结束的租约或未过期的包夜预订)时, 供给方不得修改可用时段/夜间窗口/交付方式:
+// 否则可能把已有包夜预订的卡改成按天售卖(或反之), 两套占用互不感知。只改价格不受限。
+func TestManagedScheduleEditLockedWhileInUse(t *testing.T) {
+	e, w := newNightEnv(t)
+	e.db.MustExec(`INSERT INTO node_probe_reports (node_id, kind, result, checks, inventory) VALUES (?, 'verify', 'pass', '[]',
+		'{"gpus":[{"index":0,"name":"NVIDIA H100 80GB HBM3"},{"index":1,"name":"NVIDIA H100 80GB HBM3"}]}')`, e.node)
+	e.db.MustExec(`UPDATE products SET status='offline' WHERE id=?`, leaseProductID)
+	req := func(startMin, price int) compute.CreateProductReq {
+		end := (startMin + 240) % 1440
+		return compute.CreateProductReq{ProductType: compute.ProductTypeCardRental, GpuModel: "H100-80G", CardCount: 2,
+			DeliveryMode: "container", FulfillmentMode: compute.FulfillmentManaged, Region: "cn-north",
+			Availability: "night_window", NightStartMin: &startMin, NightEndMin: &end,
+			Prices:           []compute.PriceInput{{PricingMode: compute.PricingNightly, UnitPrice: int64(price)}},
+			ComplianceAgreed: true, ComplianceVersion: legal.Version}
+	}
+	shifted := (w.StartMin + 60) % 1440
+
+	_, err := e.comp.ResubmitProduct(20, leaseProductID, req(shifted, nightlyPrice))
+	require.Error(t, err)
+	assert.Equal(t, errcode.Conflict, compute.ErrToCode(err))
+	assert.ErrorIs(t, err, compute.ErrManagedWindowLocked)
+
+	// 只改价格: 放行。
+	require.NoError(t, lastErr(e.comp.ResubmitProduct(20, leaseProductID, req(w.StartMin, nightlyPrice+1000))))
+
+	// 租约已结束但仍有未过期的包夜预订: 仍锁定。
+	e.db.MustExec(`UPDATE products SET status='offline' WHERE id=?`, leaseProductID)
+	e.db.MustExec(`UPDATE leases SET state='purged' WHERE id=?`, e.lease.ID)
+	require.Positive(t, countRows(t, e.db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=?`, e.lease.ID))
+	_, err = e.comp.ResubmitProduct(20, leaseProductID, req(shifted, nightlyPrice))
+	assert.ErrorIs(t, err, compute.ErrManagedWindowLocked)
+
+	// 预订均已过期(早于昨夜): 解锁, 修改生效。
+	e.db.MustExec(`UPDATE night_bookings SET night_date=night_date - INTERVAL 10 DAY WHERE lease_id=? ORDER BY night_date`, e.lease.ID)
+	require.NoError(t, lastErr(e.comp.ResubmitProduct(20, leaseProductID, req(shifted, nightlyPrice))))
+	var got int
+	require.NoError(t, e.db.Get(&got, `SELECT night_start_min FROM products WHERE id=?`, leaseProductID))
+	assert.Equal(t, shifted, got)
+}

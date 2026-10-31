@@ -29,7 +29,14 @@ type ManagedGate interface {
 	CheckManagedSubmit(productID int64, gpuModel string) error
 	// RefreshManagedStock 按卡槽重算派生库存(审核通过后立即生效, 不等下一轮探活)。
 	RefreshManagedStock(productID int64) error
+	// ManagedProductInUse 商品下是否还有未终结的租约(含停放/冻结/宽限/清除中)或未过期的包夜预订。
+	ManagedProductInUse(productID int64) (bool, error)
 }
+
+// ErrManagedWindowLocked 托管商品仍有在租/宽限租约或包夜预订时, 不能修改可用时段、夜间窗口或交付方式:
+// 夜间窗口商品的节点只服务包夜, 全天商品的节点不看包夜预订, 改时段会让同一张卡被两种方式重复售出。
+var ErrManagedWindowLocked = errcode.New(errcode.Conflict,
+	"该商品仍有未结束的租约或包夜预订, 不能修改可用时段、夜间窗口或交付方式; 请待全部租约结束后再修改, 或新建商品")
 
 // ErrManagedDisabled fleet 未启用时托管商品的统一提示(docs/25 §25.12)。
 var ErrManagedDisabled = errcode.New(errcode.ParamInvalid, "托管履约未启用(fleet.enabled=false): 托管商品暂不可提交审核或下单")

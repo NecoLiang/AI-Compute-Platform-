@@ -498,6 +498,9 @@ v1.2 S1（T-076~T-081）。`fulfillment_mode` 缺省或 `manual` 的商品所有
 | 没有一台「`verified` + 最近一次通过的完整探活 + 每张卡型号与商品 `gpu_model` 一致（P5 归一比对）」的节点 | 40001 | 托管商品暂不可提交审核: 节点 X: 核验状态 unverified; 节点 Y: GPU0 实测 … 与商品型号 … 不一致; …（逐节点列出原因） |
 | 请求体 `fulfillment_mode` 与创建时不同 | 40001 | 履约模式创建后不可修改, 如需切换请新建商品 |
 | 商品不在 `draft` / `offline`（如已 `pending` / `active`） | 40900 | product review conflict |
+| 修改了 `availability` / `night_start_min` / `night_end_min` / `delivery_mode`，而该商品仍有未结束的租约（state 不在 purged/failed/cancelled）或昨夜及以后的包夜预订 | 40900 | 该商品仍有未结束的租约或包夜预订, 不能修改可用时段、夜间窗口或交付方式; 请待全部租约结束后再修改, 或新建商品 |
+
+只改价格、卡数选项等其他字段不受上表最后一行限制。这一行保证同一张卡不会同时出现「按时/天/周/月在租」与「包夜预订」：节点只挂一个商品，`night_window` 商品只能包夜下单，全天商品不能包夜下单，所以两种占用在结构上互斥；唯一能打破互斥的是在用期间修改售卖时段，现在已被拒绝。
 
 **审核通过 `POST /admin/audits/products/:id/approve`**：`managed` 商品按当前节点状态再校验一次（审核期间节点可能已探活失败），不满足返回上表同样的 40001；通过后 `pending → active` 并立即按空闲卡槽重算库存（无空闲卡则 `sold_out`，有卡后自动回到 `active`）。
 

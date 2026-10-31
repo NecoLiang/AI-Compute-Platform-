@@ -808,11 +808,28 @@ func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) ([
 		if err := s.checkManagedSubmit(id, p.GpuModel); err != nil {
 			return nil, err
 		}
+		if managedScheduleChanged(existing, p) {
+			// 商品处于 draft/offline 时不能下新单, 在用状态不会在本次检查与写入之间新增。
+			inUse, err := s.managedGate.ManagedProductInUse(id)
+			if err != nil {
+				return nil, err
+			}
+			if inUse {
+				return nil, ErrManagedWindowLocked
+			}
+		}
 	}
 	if err := s.repo.ResubmitProduct(id, p, req.ComplianceVersion); err != nil {
 		return nil, err
 	}
 	return PriceWarnings(p.Prices), nil
+}
+
+// managedScheduleChanged 托管商品的售卖时段口径(可用时段/夜间窗口/交付方式)是否变化。
+func managedScheduleChanged(old, p *Product) bool {
+	eq := func(a, b *int) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+	return old.Availability != p.Availability || !eq(old.NightStartMin, p.NightStartMin) ||
+		!eq(old.NightEndMin, p.NightEndMin) || old.DeliveryMode != p.DeliveryMode
 }
 
 func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Product, error) {

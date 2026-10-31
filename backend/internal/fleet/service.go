@@ -482,6 +482,17 @@ func (s *Service) CheckManagedSubmit(productID int64, gpuModel string) error {
 	return errcode.New(errcode.ParamInvalid, "托管商品暂不可提交审核: "+strings.Join(problems, "; "))
 }
 
+// ManagedProductInUse 商品下仍有未终结租约(reserved…purging)或未过期包夜预订(昨晚起, 跨午夜窗口仍在进行)。
+func (s *Service) ManagedProductInUse(productID int64) (bool, error) {
+	var n int
+	err := s.repo.db.Get(&n, `SELECT
+		(SELECT COUNT(*) FROM leases WHERE product_id=? AND state NOT IN ('purged','failed','cancelled')) +
+		(SELECT COUNT(*) FROM night_bookings b JOIN gpu_slots g ON g.id=b.slot_id JOIN supplier_nodes n ON n.id=g.node_id
+			WHERE n.product_id=? AND b.night_date >= ?)`,
+		productID, productID, compute.NightDate(time.Now().In(shanghai())).AddDate(0, 0, -1).Format(dateLayout))
+	return n > 0, err
+}
+
 // RefreshManagedStock 审核通过等商品状态变化后立即按卡槽重算库存。
 func (s *Service) RefreshManagedStock(productID int64) error {
 	return s.inTx(func(tx *sqlx.Tx) error { return s.recomputeStockTx(tx, productID) })
