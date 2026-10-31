@@ -464,7 +464,7 @@ type LeaseSource interface {
 |---|---|
 | `running` | → `restarting`（`manual_restart` 事件，`restart_count+1`），入队 `deploy_model` 重建引擎 |
 | `restarting` 且在退避等待 | 跳过等待立即重启 |
-| `stopped/failed` | 恢复：→ `pending`，重新走 checking/pulling/starting（`resume` 事件）；租约须 `active`，否则 40900；该租约已有其它未终止部署 40900 |
+| `stopped/failed` | 恢复：→ `pending`，重新走 checking/pulling/starting（`resume` 事件）；租约须 `active`，否则 40900；该租约已有其它未终止部署 40900；租约已被重新分配节点或 GPU（宽限期后 restart 续租 / 开通失败改配），原部署绑定的卡不再属于本租约 → 40900，须重新提交部署 |
 | `pending/checking/pulling/starting/restarting`（进行中） | 幂等，返回当前状态 |
 | `stopping` | 40900 |
 

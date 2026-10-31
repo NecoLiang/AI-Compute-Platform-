@@ -51,3 +51,36 @@ func TestCrossBareMetalRejectsModelDeploy(t *testing.T) {
 	e.s.ExpiryRound(ctx)
 	assert.Equal(t, LeasePurging, e.leaseNow(t).State)
 }
+
+// 租约被重新分配节点/卡(宽限期后 restart 续租、开通失败改配)后, 恢复原部署须 40900 而不是在旧节点上以
+// "GPU 不属于本租约"失败; 同一节点同一批卡时恢复照常进入 pending。
+func TestCrossRestartRejectsMovedLease(t *testing.T) {
+	e := newMDEnv(t)
+	ctx := context.Background()
+	v := e.toStarting(t, false)
+	stopAndDrain := func() {
+		t.Helper()
+		_, err := e.md.Stop(ctx, mdBuyer, e.order.OrderNo, v.DeployNo)
+		require.NoError(t, err)
+		e.fake.Override("if docker inspect --type container "+modeldeploy.EngineContainer(v.DeployNo)+" >/dev/null 2>&1; then docker rm -f",
+			fakeReply{Stdout: "@@removed\n"})
+		e.drain(t)
+		require.Equal(t, "stopped", e.dep(t, v.DeployNo).State)
+	}
+	stopAndDrain()
+
+	r, err := e.md.Restart(ctx, mdBuyer, e.order.OrderNo, v.DeployNo)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", r.State)
+	stopAndDrain()
+
+	// 租约换卡: 部署记录里的卡已不在 gpu_slots.lease_id=本租约中。
+	e.db.MustExec(`UPDATE model_deployments SET gpu_uuids='["GPU-moved-0","GPU-moved-1"]' WHERE deploy_no=?`, v.DeployNo)
+	before := countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE kind='deploy_model'`)
+	_, err = e.md.Restart(ctx, mdBuyer, e.order.OrderNo, v.DeployNo)
+	require.Error(t, err)
+	assert.Equal(t, errcode.Conflict, errCode(err), "%v", err)
+	assert.Equal(t, "stopped", e.dep(t, v.DeployNo).State)
+	assert.Equal(t, before, countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE kind='deploy_model'`))
+	assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM model_deployments WHERE lease_active_claim IS NOT NULL`))
+}

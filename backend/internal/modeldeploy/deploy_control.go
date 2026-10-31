@@ -97,6 +97,11 @@ func (s *Service) Restart(ctx context.Context, buyerID int64, orderNo, deployNo 
 		if lr == nil || lr.State != "active" {
 			return nil, newErr(errcode.Conflict, "托管租约未处于运行中, 不能恢复部署")
 		}
+		// 宽限期后 restart 续租 / 开通失败改配会把租约重新分到别的节点或别的卡; 原部署绑定的节点与卡已不属于本租约,
+		// 恢复只会在旧节点上以"GPU 不属于本租约"失败。须按新卡重新判定并提交。
+		if !sameLeasePlacement(lr, d) {
+			return nil, newErr(errcode.Conflict, "租约已重新分配节点或 GPU, 原部署无法恢复, 请重新提交部署")
+		}
 	}
 	tx, err := s.repo.beginTx()
 	if err != nil {
@@ -180,4 +185,25 @@ func (s *Service) StopForLeaseTx(ctx context.Context, tx *sqlx.Tx, leaseID int64
 		}
 	}
 	return nil
+}
+
+// sameLeasePlacement 部署绑定的节点与卡仍全部属于租约当前占用(节点相同且每张卡在 gpu_slots.lease_id=本租约中)。
+func sameLeasePlacement(lr *LeaseRuntime, d *Deployment) bool {
+	if lr.NodeID != d.NodeID {
+		return false
+	}
+	uuids := d.GPUUUIDs()
+	if len(uuids) == 0 {
+		return false
+	}
+	own := make(map[string]bool, len(lr.SlotUUIDs))
+	for _, u := range lr.SlotUUIDs {
+		own[u] = true
+	}
+	for _, u := range uuids {
+		if !own[u] {
+			return false
+		}
+	}
+	return true
 }
