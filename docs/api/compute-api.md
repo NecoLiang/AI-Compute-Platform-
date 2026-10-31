@@ -121,22 +121,25 @@ curl -H "Authorization: Bearer <token>" \
 },"request_id":"..."}
 ```
 
-**响应**（包夜，S4 未接入）：
+**响应**（包夜，S4 T-094；`night_start_date` 省略时取可订的第一晚）：
 ```json
 {"code":0,"message":"success","data":{
-  "available":false,
-  "reason":"包夜预订尚未开放(夜间日历与每晚开停机待接入), 暂不可下单",
-  "quote":null,
-  "lease_preview":null
+  "available":true,
+  "reason":"",
+  "quote":{"pricing_mode":"nightly","unit_price":9000,"quantity":4,"duration":2,
+           "total_amount":72000,"platform_fee":4680,"fee_rate":650},
+  "lease_preview":{"start_rule":"night_window",
+                   "start_at":"2026-11-03T22:00:00+08:00","end_at":"2026-11-05T06:00:00+08:00"}
 },"request_id":"..."}
 ```
+包夜不可订时 `available=false`、`reason`「所选夜晚暂无同机空闲卡(同一组卡须每晚都未被预订)」（报价照给）。
 
 字段说明：
-- `quote`：金额单位分。`unit_price` 分/卡/周期；`total_amount = unit_price × quantity × duration`；`platform_fee` 内含于总价，= `total_amount × fee_rate / 10000` 向下取整；`fee_rate` 为基点。与随后 `POST /orders` 的 `total_amount/platform_fee` 相同（前提是期间商品价格与交易配置未变）。`available=false` 时仍给报价（包夜除外）。
-- `lease_preview.start_rule`：`on_activation`＝托管商品，租期从开通自检通过起算（D-6，不计开通耗时），`start_at` 取查询时刻（Asia/Shanghai，秒级），`end_at` 按计费周期换算，仅为预估；买断 `end_at=null`。`on_buyer_confirm`＝人工商品，租期从买家确认签收起算，签收时刻未知，`start_at/end_at` 均为 `null`。
+- `quote`：金额单位分。`unit_price` 分/卡/周期；`total_amount = unit_price × quantity × duration`；`platform_fee` 内含于总价，= `total_amount × fee_rate / 10000` 向下取整；`fee_rate` 为基点。与随后 `POST /orders` 的 `total_amount/platform_fee` 相同（前提是期间商品价格与交易配置未变）。`available=false` 时仍给报价。
+- `lease_preview.start_rule`：`on_activation`＝托管商品，租期从开通自检通过起算（D-6，不计开通耗时），`start_at` 取查询时刻（Asia/Shanghai，秒级），`end_at` 按计费周期换算，仅为预估；买断 `end_at=null`。`on_buyer_confirm`＝人工商品，租期从买家确认签收起算，签收时刻未知，`start_at/end_at` 均为 `null`。`night_window`＝包夜：`start_at` = 首晚窗口开始（当晚订单为查询时刻），`end_at` = 末晚窗口结束（固定，不随开通耗时顺延）。
 - `available=false` 时 `reason` 为可直接展示的中文原因，按以下优先级只给第一条：交易总开关关闭（「交易暂时关闭，请稍后再试」）→ 商品已售罄 → 供应方算力节点已全部离线 → 供给方资质已过期 → 人工：库存不足 → 托管：托管履约未启用 / 托管履约模块未启用 → 托管：「所选卡数暂无整机余量」（没有任何单台节点能凑齐 `cards` 张卡；判定与下单分配的候选规则一致：已验收 + 可调度 + 在线 + 空闲 ≥ cards，无磁盘配额的节点只能整机）。
 
-**错误码**：40001 参数非法（cards 缺失/非正、卡数不在可选集合、计费方式未开放、时长不足、托管买断、面议商品、`night_start_date` 非法）；40400「商品不存在」（不存在或非 `active/sold_out`；`sold_out` 可查询，返回 `available=false`）；42900 限流；50000 内部错误。
+**错误码**：40001 参数非法（cards 缺失/非正、卡数不在可选集合、计费方式未开放、时长不足、托管买断、面议商品、`night_start_date` 非法：格式错、非包夜传入、早于可订的第一晚、晚于今天起第 30 天、末晚超出今天起 60 天；包夜用于非夜间窗口/非托管/非分卡容器商品）；40400「商品不存在」（不存在或非 `active/sold_out`；`sold_out` 可查询，返回 `available=false`）；42900 限流；50000 内部错误。
 
 ---
 
@@ -181,6 +184,40 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 
 ---
 
+## GET /products/:id/night-calendar · 包夜夜间日历 ✅ 登录（S4 T-094）
+
+只读：自 `from` 起连续 `days` 晚，每晚**单台节点**最多可订的同机卡数（已按商品可选卡数 / 整机规则取整）。不加锁快照，下单仍以预订唯一键为准（并发下可能 40900）。仅 `availability=night_window` 的托管分卡容器商品可查。
+
+```
+curl -H "Authorization: Bearer <token>" \
+  "http://localhost:8080/api/v1/products/12/night-calendar?cards=4&from=2026-11-03&days=7"
+```
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|:--:|------|
+| cards | int | — | 计划卡数；> 0 时只统计能一次容纳该卡数的节点，`max_cards` 不足 `cards` 的晚记 0。省略或 0 = 不限 |
+| from | string | — | `YYYY-MM-DD`（Asia/Shanghai），省略取可订的第一晚；须在昨天 ~ 今天起 60 天内，否则 40001 |
+| days | int | — | 1-30，缺省 14 |
+
+**夜晚标识**：`night_date` = 窗口**开始**那天的日期。跨零点窗口（如 22:00-06:00）的 11-03 晚 = 11-03 22:00 至 11-04 06:00；11-04 01:00 仍属 11-03 晚。
+
+**响应**
+```json
+{"code":0,"message":"success","data":[
+  {"night_date":"2026-11-03","max_cards":0},
+  {"night_date":"2026-11-04","max_cards":4},
+  {"night_date":"2026-11-05","max_cards":8}
+],"request_id":"..."}
+```
+- 已截止（当晚窗口开始满 2 小时，Q-36）或超出可订范围（今天起 60 天）的晚 `max_cards=0`。
+- 同一订单所有晚使用**同一组卡**（容器跨晚复用、数据不丢），故连续 N 晚能否下单不等于每晚 `max_cards` 的最小值：同机同卡须每晚都空闲。连续多晚以 `GET /products/:id/availability?pricing_mode=nightly&night_start_date=&duration=N&cards=` 为准。
+
+**限流**：与 availability 共用每用户每分钟 30 次（同一 Redis key），超出 42900；Redis 未装配 50000。
+
+**错误码**：40001（参数非法；商品非夜间窗口托管分卡容器）；40400「商品不存在」；42900；50000（托管履约/包夜租约钩子未接入等内部错误）。
+
+---
+
 ## POST /orders · 下单 ✅ buyer
 
 ```
@@ -196,6 +233,7 @@ curl -X POST http://localhost:8080/api/v1/orders \
 | quantity | int | ✅ | 卡数 |
 | duration | int | ✅ | 租期，单位为所选计费方式的周期（小时/天/周/月/晚）；买断忽略并按 1 |
 | pricing_mode | string | — | 所选计费方式；省略取商品展示主价方式（兼容旧前端）。必须是该商品已启用的价格行，否则 `40001`「该商品未开放xx计费」 |
+| night_start_date | string | 包夜必填 | `YYYY-MM-DD`，首晚（窗口开始那天的日期）。`duration` = 晚数（1-31）。校验见「包夜订单（S4）」 |
 | compliance_agreed | bool | ✅ | 合规承诺 |
 | compliance_version | string | ✅ | 当前规范版本：`2026-09-06.1`；发布为上架规范，下单为使用规范 |
 
@@ -212,7 +250,7 @@ curl -X POST http://localhost:8080/api/v1/orders \
 {"code":40900,"message":"insufficient stock"}
 ```
 
-金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。v1.2 前的存量订单由迁移 028 按迁移时的计费方式回填快照（续租子订单取其续租快照，其余取当时商品方式），与新订单同样只认快照；快照缺失属数据异常，交付、签收、续租报价返回 `50000`「订单缺少计费方式快照…」，不回退商品当前展示方式。托管商品（`fulfillment_mode=managed`）下单的错误码见下方「托管商品」「托管订单」两节（`fleet.enabled=false` 为 40001，租约钩子未接入为 50000）；包夜（`nightly`）在 S4 接入前下单返回 `50000`，不会静默按人工交付建单。
+金额 = 所选方式的 `unit_price × quantity × duration`，最短/最长租期按该方式校验。订单写入计费方式快照 `orders.pricing_mode`，此后租期换算、续租报价、发票只认快照，不随商品改价或展示主价变化漂移。v1.2 前的存量订单由迁移 028 按迁移时的计费方式回填快照（续租子订单取其续租快照，其余取当时商品方式），与新订单同样只认快照；快照缺失属数据异常，交付、签收、续租报价返回 `50000`「订单缺少计费方式快照…」，不回退商品当前展示方式。托管商品（`fulfillment_mode=managed`）下单的错误码见下方「托管商品」「托管订单」两节（`fleet.enabled=false` 为 40001，租约钩子未接入为 50000）；包夜（`nightly`）见下方「包夜订单（S4）」。
 
 ---
 
@@ -617,3 +655,29 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 - 开关为 `false`（默认）时：选 `refund` 仍返回 `50000` 并只记录意向；租期结束后的待退费停机段不会退款，**该订单整条续租链不会进入分账**（资金留在易宝待分账账户），结算任务按订单发运营告警，需人工处理或打开开关。
 - 先前只记录了 `refund_requested_at`（补偿按顺延执行）的买家，开关打开后**不会自动改为退费**，需买家重新选择 `refund`（已顺延的段不改）。
 - 租期末结算：租约进入清除（`purging/purged`）且所有停机段补偿落地、部分退款全部成功后，根订单写 `settle_ready_at` 并开始分账；此后续租报价 / 下单返回 `40900`（「续租条件已变化…」，需重新下单）。宽限期内仍可 restart 续租。
+
+---
+
+## 包夜订单（S4，`pricing_mode=nightly`）✅
+
+v1.2 S4（T-094/T-095），设计见 docs/26 §26.6、docs/25 §25.7.6。只适用于 `availability=night_window` + `fulfillment_mode=managed` + `delivery_mode=container` 的商品（Q-44）；其他商品选包夜 40001「包夜仅适用于平台托管的夜间窗口分卡容器商品」。一切以 `fleet.enabled=true` 为前提，关闭时与其他托管订单同样 40001。
+
+**下单 `POST /orders`**（`pricing_mode=nightly`、`night_start_date`、`duration`=晚数、`quantity`=卡数）
+- 金额 = `unit_price`（分/卡/晚）× 卡数 × 晚数；当晚订单（窗口已开始但未满 2 小时，Q-36）按整晚计价。
+- `night_start_date` 校验（40001）：格式 `YYYY-MM-DD`；不早于可订的第一晚（当晚窗口开始满 2 小时即截止）；不晚于今天起第 30 天；末晚不超出今天起第 60 天。
+- 同一事务内建租约（`reserved`）并在**同一台节点**为每晚写入同一组 k 张卡的预订（`night_bookings` 唯一键 `(slot_id, night_date)`）。预订不改卡槽状态：白天卡仍归供给方。并发抢同一组卡只有一单成功，其余 40900「所选夜晚暂无同机空闲卡, 请调整日期或卡数」。
+- 订单快照写 `night_start_date` 与夜间窗口（`night_start_min/night_end_min`），供给方事后改窗口不影响已下订单；`lease_start_at` = max(首晚开通自检通过, 首晚窗口开始)，`lease_end_at` = 末晚窗口结束（固定）。
+
+**每晚开停机（fleet 每分钟任务）**
+- 首晚：支付后到达 窗口开始−10min（当晚订单为支付时刻）认领本晚卡槽并开通（同常规托管开通流水线）。到 应开通时刻+10min 仍认领不到卡（上一租约未释放等）→ 订单 `cancelled`，支付侧自动全额原路退款，买家收到「包夜订单开通失败」。首晚开通晚于应开通时刻 ≥ `fleet.outage.min_minutes` 记 `provision_delay` 停机（平台责任）。
+- 窗口结束：租约 `active → parked`（不可登录），停止容器（数据保留）并把卡还给供给方；一键部署同时停止（`stop_reason=nightly`，`auto_resume` 保留）。窗口结束前 30 / 10 分钟站内信提醒，并尝试向容器内终端广播（best-effort）。
+- 下一晚 窗口开始−10min：检查宿主机本晚卡上没有其他 GPU 计算进程 → 原容器 `docker start` → 网关自检 → `parked → active`，`auto_resume` 的部署自动恢复为 `pending` 重新部署。
+- 开窗失败：宿主机进程占用本晚卡且到 应开通时刻+10min 仍未释放 → 本晚失败，记 `night_unpark_failed` 整晚停机（供给方责任），审计 `lease.night_unpark_failed`，通知供给方「包夜节点违约: 窗口内 GPU 被占用」与买家「包夜本晚未能开通」。其他失败（节点连不上、启动/自检失败）本晚内每分钟重试，窗口结束仍未开通则整晚按失败原因记停机（`node_offline/container_down/gateway_down`）；开窗成功但晚于应开通时刻 ≥ `min_minutes` 的延迟段同样记停机。
+- 最后一晚窗口结束 = `access_until`，按常规到期进入宽限期（`fleet.grace.nightly`）。
+
+**登录**：网关只在当晚窗口内放行（`active` 且 当前时刻 ∈ [窗口开始, min(窗口结束, access_until))），会话在窗口结束时断开。
+
+**停机补偿**：默认顺延 = **补加一晚**（同一组卡、同窗口，接在末晚之后，`access_until` 后移 24h）；同一晚内多段停机只补一晚；补加的那晚卡已被别人预订则改为退费（`remedy=refund`，退费通道见上节）。责任金额按 实付 × 有效秒数 ÷（晚数 × 窗口时长）计算。
+
+**续租**：包夜订单续租仍返回 50000（未开放）。
+
