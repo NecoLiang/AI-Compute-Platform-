@@ -111,3 +111,16 @@ func TestCrossSettleAfterPurgedRestartFails(t *testing.T) {
 	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM orders WHERE id=? AND settle_ready_at IS NOT NULL`, e.order.ID),
 		"原租期已交付, 根订单须进入分账")
 }
+
+// 停机责任金额无法计算(remedy_amount=NULL)的待退费段: 退款扫描不会提交, 结算须给出可告警的阻塞原因而不是静默等待。
+func TestCrossSettleBlockedOnUnknownOutageAmount(t *testing.T) {
+	e := newSettleEnv(t, true)
+	e.purge(t)
+	e.db.MustExec(`INSERT INTO lease_outages (lease_id, order_id, cause, liable, started_at, ended_at, seconds, minutes, counted,
+		remedy, remedy_amount, liability_amount) VALUES (?, ?, 'node_offline', 'supplier', NOW()-INTERVAL 30 MINUTE, NOW()-INTERVAL 10 MINUTE,
+		1200, 20, 1, 'refund', NULL, NULL)`, e.lease.ID, e.order.ID)
+	blocked, err := e.s.markSettleReady(e.order.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "outage_amount_unknown", blocked)
+	assert.False(t, e.settleReady(t, e.order.ID))
+}

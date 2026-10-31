@@ -92,14 +92,21 @@ func (s *Service) markSettleReady(orderID int64) (blocked string, err error) {
 		var outages struct {
 			Open          int `db:"open_n"`
 			RefundPending int `db:"refund_n"`
+			AmountUnknown int `db:"unknown_n"`
 		}
 		if err := tx.Get(&outages, `SELECT COALESCE(SUM(lo.ended_at IS NULL),0) AS open_n,
-			COALESCE(SUM(lo.ended_at IS NOT NULL AND lo.remedy_applied_at IS NULL),0) AS refund_n
+			COALESCE(SUM(lo.ended_at IS NOT NULL AND lo.remedy_applied_at IS NULL),0) AS refund_n,
+			COALESCE(SUM(lo.ended_at IS NOT NULL AND lo.remedy_applied_at IS NULL AND lo.remedy='refund' AND lo.remedy_amount IS NULL),0) AS unknown_n
 			FROM lease_outages lo JOIN leases l ON l.id=lo.lease_id WHERE l.order_id=?`, orderID); err != nil {
 			return err
 		}
 		if outages.Open > 0 {
 			blocked = "outage_open"
+			return nil
+		}
+		if outages.AmountUnknown > 0 {
+			// 责任金额无法计算(settleOutageTx 记 remedy_amount=NULL): 退款扫描不会提交, 须人工核定, 否则永久卡住分账。
+			blocked = "outage_amount_unknown"
 			return nil
 		}
 		if outages.RefundPending > 0 {
