@@ -174,6 +174,10 @@ func TestValidateCardRentalPricing(t *testing.T) {
 			night(r)
 			r.FulfillmentMode = FulfillmentManual
 		}, "仅限平台托管"},
+		{"夜间窗口不支持整机交付", func(r *CreateProductReq) {
+			night(r)
+			r.DeliveryMode = "bare_metal"
+		}, "整机(bare_metal)不能包夜出租"},
 		{"夜间窗口只能卖包夜", func(r *CreateProductReq) {
 			night(r)
 			r.Prices = []PriceInput{price(PricingDaily, 1)}

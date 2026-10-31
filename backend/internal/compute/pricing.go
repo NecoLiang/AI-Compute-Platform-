@@ -399,6 +399,9 @@ func validateCardRentalPricing(req CreateProductReq) error {
 		if fm != FulfillmentManaged {
 			return fmt.Errorf("夜间窗口(包夜)商品仅限平台托管模式")
 		}
+		if req.DeliveryMode != "container" {
+			return fmt.Errorf("夜间窗口(包夜)商品仅支持 container(分卡容器)交付, 整机(bare_metal)不能包夜出租")
+		}
 		w := NightWindow{StartMin: intOr(req.NightStartMin, DefaultNightStartMin), EndMin: intOr(req.NightEndMin, DefaultNightEndMin)}
 		return w.Validate()
 	}

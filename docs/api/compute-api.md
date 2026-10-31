@@ -172,7 +172,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/products \
 
 ¹ 零租传 `prices` 时顶层 `pricing_mode/unit_price/min_duration` 被忽略，并由服务端同步为展示主价；未传 `prices` 时（旧前端）按顶层字段生成一行价格。
 
-**零租计费组合约束**（违反返回 `40001`）：每种方式最多一行、单价 > 0、`1 ≤ min_duration ≤` 该方式单笔上限（小时 87600 / 天 3650 / 周 520 / 月 120 / 晚 31）、至少启用一种、`单价 × max(stock, card_count) × 单笔上限 ≤ 100 亿元`；`nightly`（包夜）只能单独开放，且要求 `availability=night_window` + `fulfillment_mode=managed`；`night_window` 商品只能卖包夜；`fulltime` 商品不能传夜间时段。非零租商品不能传 `prices`、`managed` 或夜间窗口。
+**零租计费组合约束**（违反返回 `40001`）：每种方式最多一行、单价 > 0、`1 ≤ min_duration ≤` 该方式单笔上限（小时 87600 / 天 3650 / 周 520 / 月 120 / 晚 31）、至少启用一种、`单价 × max(stock, card_count) × 单笔上限 ≤ 100 亿元`；`nightly`（包夜）只能单独开放，且要求 `availability=night_window` + `fulfillment_mode=managed`；`night_window` 商品只能卖包夜，且只能 `delivery_mode=container`（整机 `bare_metal` 返回 40001「夜间窗口(包夜)商品仅支持 container(分卡容器)交付, 整机(bare_metal)不能包夜出租」）；`fulltime` 商品不能传夜间时段。非零租商品不能传 `prices`、`managed` 或夜间窗口。
 
 **成功响应**（`PUT /supplier/products/:id` 重提同样返回）：
 ```json
