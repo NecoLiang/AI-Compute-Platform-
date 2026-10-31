@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/internal/modeldeploy"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -279,7 +280,7 @@ func (s *Service) parkNight(ctx context.Context, r nightRow, we time.Time) error
 			if err := s.mustTransition(tx, l, LeaseParked, ""); err != nil {
 				return err
 			}
-			if err := s.stopDeploymentsTx(tx, l.ID, "nightly"); err != nil {
+			if err := s.stopDeploymentsTx(tx, l.ID, modeldeploy.StopNightly); err != nil {
 				return err
 			}
 			if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotLeased, SlotReserved}, SlotDraining); err != nil {
@@ -592,7 +593,7 @@ func (s *Service) activateNight(ctx context.Context, r nightRow, l *Lease) error
 			return err
 		}
 		now := time.Now()
-		if due := n.due(r.window()); now.Sub(due) >= time.Duration(s.cfg.Outage.MinMinutes)*time.Minute {
+		if due := n.due(r.window()); now.After(due) && now.Sub(due) >= time.Duration(s.cfg.Outage.MinMinutes)*time.Minute {
 			cause := OutageNightUnparkFailed
 			if n.FailCause != nil && *n.FailCause != "" {
 				cause = *n.FailCause
@@ -818,7 +819,7 @@ func (s *Service) recordProvisionDelayTx(tx *sqlx.Tx, o *compute.Order, l *Lease
 	if we := compute.NightEndAt(n.NightDate, plan.Window); we.Before(end) {
 		end = we
 	}
-	if end.Sub(due) < time.Duration(s.cfg.Outage.MinMinutes)*time.Minute {
+	if !end.After(due) || end.Sub(due) < time.Duration(s.cfg.Outage.MinMinutes)*time.Minute {
 		return 0, nil
 	}
 	return s.insertNightOutageTx(tx, o, l, n, OutageProvisionDelay, due, end, "包夜首晚开通耗时")

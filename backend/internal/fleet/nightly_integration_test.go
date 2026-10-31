@@ -8,6 +8,8 @@ import (
 
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/legal"
+	"tokenfactory/internal/modeldeploy"
+	"tokenfactory/pkg/config"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
@@ -93,7 +95,8 @@ func TestNightlyConcurrentDoubleBookingAndCalendar(t *testing.T) {
 	o2, err := placeNight(comp, 31, 2, d.AddDate(0, 0, 2), 1)
 	require.NoError(t, err)
 
-	// 夜间日历(跨零点窗口, night_date = 窗口开始日期)。
+	// 夜间日历(跨零点窗口, night_date = 窗口开始日期)。与 availability 共用限流。
+	comp.SetRateLimiter(availabilityRedis(t, 7, 32))
 	cal, err := comp.NightCalendar(context.Background(), 32, leaseProductID, 0, d.Format(dateLayout), 4)
 	require.NoError(t, err)
 	got := map[string]int{}
@@ -116,7 +119,7 @@ func TestNightlyConcurrentDoubleBookingAndCalendar(t *testing.T) {
 	// 关单: 预订全部释放, 可再订。
 	require.NoError(t, comp.CancelOrder(o.OrderNo))
 	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=(SELECT id FROM leases WHERE order_id=?)`, o.ID))
-	_, err = placeNight(comp, 33, 4, d, 2)
+	_, err = placeNight(comp, 30, 4, d, 2)
 	require.NoError(t, err)
 	assert.Equal(t, 2, countRows(t, db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=(SELECT id FROM leases WHERE order_id=?)`, o2.ID))
 }
@@ -126,6 +129,7 @@ func newNightEnv(t *testing.T) (*provEnv, compute.NightWindow) {
 	t.Helper()
 	e := newProvNode(t, "container", true)
 	e.s.cfg.Grace.Short, e.s.cfg.Grace.Long, e.s.cfg.Grace.Nightly = 24*time.Hour, 72*time.Hour, 24*time.Hour
+	e.s.cfg.Outage = config.FleetOutage{MinMinutes: 5, RefundRatio: 0.10, RefundSingleHours: 2, MaxSupplierMinutes30d: 360}
 	w := currentWindow()
 	nightlyize(t, e.db, e.s, w)
 	d := compute.NightDateOf(time.Now(), w)
@@ -346,4 +350,52 @@ func TestNightlyGatewayAccessEnd(t *testing.T) {
 	end, ok = r.accessEnd(at("2026-11-03 12:00"))
 	assert.True(t, ok)
 	assert.Equal(t, until, end)
+}
+
+// 一键部署随包夜窗口停/起(docs/27 §27.6): park 时部署 → stopped(stop_reason=nightly, 保留 auto_resume),
+// 下一晚 unpark 同事务恢复为 pending 并入队部署。
+func TestNightlyDeploymentStopsAtParkResumesAtUnpark(t *testing.T) {
+	e := newMDEnv(t)
+	v := e.toStarting(t, false)
+
+	// 把已开通的 2 卡租约改成包夜: 上一晚(已结束, active) + 今晚(booked)。
+	w := currentWindow()
+	today := compute.NightDateOf(time.Now(), w)
+	prev := today.AddDate(0, 0, -1)
+	e.db.MustExec(`UPDATE orders SET pricing_mode='nightly', night_start_date=?, night_start_min=?, night_end_min=?, duration=2,
+		lease_end_at=? WHERE id=?`, prev.Format(dateLayout), w.StartMin, w.EndMin, compute.NightEndAt(today, w), e.order.ID)
+	e.db.MustExec(`UPDATE leases SET access_until=? WHERE id=?`, compute.NightEndAt(today, w), e.lease.ID)
+	e.db.MustExec(`INSERT INTO lease_nights (lease_id, night_date, state, unparked_at) VALUES (?, ?, 'active', NOW()), (?, ?, 'booked', NULL)`,
+		e.lease.ID, prev.Format(dateLayout), e.lease.ID, today.Format(dateLayout))
+	e.db.MustExec(`INSERT INTO night_bookings (slot_id, night_date, lease_id)
+		SELECT id, ?, lease_id FROM gpu_slots WHERE lease_id=? UNION ALL SELECT id, ?, lease_id FROM gpu_slots WHERE lease_id=?`,
+		prev.Format(dateLayout), e.lease.ID, today.Format(dateLayout), e.lease.ID)
+	no := e.lease.LeaseNo
+	e.fake.Override(cmdOK(startContainerCommand(no)), fakeReply{Stdout: "@@started\n"})
+	e.fake.Override(cmdOK(stopContainerCommand(no)), fakeReply{Stdout: "@@stopped\n"})
+	e.fake.Override(cmdGPUApps, fakeReply{Stdout: ""})
+	e.fake.Override("if docker inspect --type container "+modeldeploy.EngineContainer(v.DeployNo)+" >/dev/null 2>&1; then docker rm -f",
+		fakeReply{Stdout: "@@removed\n"})
+
+	e.s.NightlyRound(context.Background())
+	assert.Equal(t, LeaseParked, e.leaseNow(t).State)
+	d := e.dep(t, v.DeployNo)
+	assert.Equal(t, "stopping", d.State)
+	require.NotNil(t, d.StopReason)
+	assert.Equal(t, modeldeploy.StopNightly, *d.StopReason)
+
+	kinds := e.drain(t)
+	assert.Contains(t, kinds, KindStop)
+	assert.Contains(t, kinds, modeldeploy.TaskStopModel)
+	d = e.dep(t, v.DeployNo)
+	assert.Equal(t, "stopped", d.State)
+	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM model_deployments WHERE deploy_no=? AND auto_resume=1`, v.DeployNo))
+
+	e.s.NightlyRound(context.Background())
+	require.Equal(t, LeaseActive, e.leaseNow(t).State)
+	d = e.dep(t, v.DeployNo)
+	assert.Equal(t, "pending", d.State, "包夜开窗自动恢复")
+	assert.Nil(t, d.StopReason)
+	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE kind=? AND state='pending' AND lease_id=?`,
+		modeldeploy.TaskDeployModel, e.lease.ID))
 }
