@@ -62,6 +62,7 @@ services:
       - ./migrations/033_outage_credit.up.sql:/docker-entrypoint-initdb.d/033.sql:ro
       - ./migrations/034_bare_metal_reimage.up.sql:/docker-entrypoint-initdb.d/034.sql:ro
       - ./migrations/035_model_deploy_runtime.up.sql:/docker-entrypoint-initdb.d/035.sql:ro
+      - ./migrations/036_night_bookings.up.sql:/docker-entrypoint-initdb.d/036.sql:ro
       - ./migrations/037_partial_refund_settlement.up.sql:/docker-entrypoint-initdb.d/037.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
