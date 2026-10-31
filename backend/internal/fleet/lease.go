@@ -43,7 +43,7 @@ var leaseFrom = map[string][]string{
 	LeasePending:      {LeaseReserved, LeaseGrace, LeaseProvisioning, LeasePurged},
 	LeaseProvisioning: {LeasePending},
 	LeaseActive:       {LeaseProvisioning, LeaseSuspended, LeaseParked},
-	LeaseParked:       {LeaseActive},
+	LeaseParked:       {LeaseActive, LeaseSuspended},
 	LeaseSuspended:    {LeaseActive, LeaseParked},
 	LeaseGrace:        {LeaseActive, LeaseSuspended, LeaseParked, LeasePending, LeaseProvisioning},
 	LeasePurging:      {LeasePending, LeaseProvisioning, LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace},

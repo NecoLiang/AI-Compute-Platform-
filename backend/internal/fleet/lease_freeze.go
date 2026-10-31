@@ -95,7 +95,12 @@ func (s *Service) unfreezeLeaseTx(tx *sqlx.Tx, o *compute.Order) (*compute.Manag
 			break
 		}
 		if l.State == LeaseSuspended {
-			if err := s.mustTransition(tx, l, LeaseActive, ""); err != nil {
+			// 包夜(S4 T-095): 冻结期间窗口已结束、容器已停卡已还(无 leased 卡槽) → parked, 下一晚照常开窗。
+			to, err := s.unfreezeTargetTx(tx, l)
+			if err != nil {
+				return nil, err
+			}
+			if err := s.mustTransition(tx, l, to, ""); err != nil {
 				return nil, err
 			}
 		}
@@ -112,6 +117,22 @@ func (s *Service) unfreezeLeaseTx(tx *sqlx.Tx, o *compute.Order) (*compute.Manag
 	}
 	slog.Info("订单解冻(租约侧)", "lease_no", l.LeaseNo, "lease_state", l.State, "order_no", o.OrderNo, "order_to", plan.OrderStatus)
 	return plan, nil
+}
+
+// unfreezeTargetTx 冻结租约解冻后的状态: 包夜租约无 leased 卡槽(窗口外) → parked, 否则 active。
+func (s *Service) unfreezeTargetTx(tx *sqlx.Tx, l *Lease) (string, error) {
+	plan, err := s.repo.leaseNightPlan(tx, l.ID)
+	if err != nil || plan == nil {
+		return LeaseActive, err
+	}
+	var n int
+	if err := tx.Get(&n, `SELECT COUNT(*) FROM gpu_slots WHERE lease_id=? AND state='leased'`, l.ID); err != nil {
+		return "", err
+	}
+	if n == 0 {
+		return LeaseParked, nil
+	}
+	return LeaseActive, nil
 }
 
 // requeueProvisionTx 解冻后恢复开通: provisioning → pending; 已有待领取的开通任务(同节点)则沿用, 否则入队一条,
@@ -133,6 +154,18 @@ func (s *Service) requeueProvisionTx(tx *sqlx.Tx, l *Lease) error {
 	}
 	for _, t := range live {
 		if t.NodeID == l.NodeID {
+			return nil
+		}
+	}
+	// 包夜(S4): 首晚卡槽尚未认领(reserved)时不入队, 由包夜任务在窗口开始前认领后入队。
+	if plan, err := s.repo.leaseNightPlan(tx, l.ID); err != nil {
+		return err
+	} else if plan != nil {
+		var n int
+		if err := tx.Get(&n, `SELECT COUNT(*) FROM gpu_slots WHERE lease_id=? AND state='reserved'`, l.ID); err != nil {
+			return err
+		}
+		if n == 0 {
 			return nil
 		}
 	}

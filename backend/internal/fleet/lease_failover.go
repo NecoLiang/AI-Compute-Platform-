@@ -147,7 +147,17 @@ func (s *Service) provisionFailover(pl LeaseProvisionPayload, taskNode int64, la
 		if err := s.releaseOldNodeTx(tx, l, lastErr); err != nil {
 			return err
 		}
-		if !pl.Reallocated {
+		plan, err := s.repo.leaseNightPlan(tx, l.ID)
+		if err != nil {
+			return err
+		}
+		if plan != nil {
+			// 包夜(S4): 全部夜晚的预订绑定在原节点的同一组卡上, 不换节点; 开通失败整单退款并释放全部预订。
+			if err := s.releaseNightsTx(tx, l.ID, true); err != nil {
+				return err
+			}
+		}
+		if !pl.Reallocated && plan == nil {
 			newNode, _, err := s.repo.reserveSlotsTx(tx, l.ProductID, l.Cards, l.DeliveryKind == "bare_metal", l.ID, l.NodeID)
 			switch {
 			case err == nil:

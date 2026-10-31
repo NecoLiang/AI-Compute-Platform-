@@ -23,6 +23,8 @@ CREATE TABLE lease_nights (
     attempts INT NOT NULL DEFAULT 0 COMMENT '本晚开通尝试次数',
     last_error VARCHAR(512) NULL,
     occupied TINYINT NOT NULL DEFAULT 0 COMMENT '最近一次失败是否因卡被宿主机进程占用',
+    fail_cause VARCHAR(32) NULL COMMENT '失败计入的停机原因: night_unpark_failed/node_offline/container_down/gateway_down',
+    due_at TIMESTAMP NULL COMMENT '本晚应开通时刻(NULL = 窗口开始); 当晚订单为支付时刻, 开通延迟与停机按它起算',
     unparked_at TIMESTAMP NULL COMMENT '本晚开通(自检通过)时刻',
     failed_at TIMESTAMP NULL,
     ended_at TIMESTAMP NULL,

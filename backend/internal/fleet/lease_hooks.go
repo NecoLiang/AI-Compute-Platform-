@@ -105,6 +105,8 @@ type LeaseTaskPayload struct {
 	CleanupOnly   bool   `json:"cleanup_only,omitempty"`
 	ContainerName string `json:"container_name,omitempty"`
 	VolumeName    string `json:"volume_name,omitempty"`
+	// Nightly=true: 包夜窗口结束停容器(S4 T-095)。冻结中(suspended)的包夜租约同样要停, 把卡还给供给方白天自用。
+	Nightly bool `json:"nightly,omitempty"`
 }
 
 // onLeasePaidTx 收款确认: 租约 reserved → pending, 入队 provision(优先级 3)。
@@ -122,6 +124,15 @@ func (s *Service) onLeasePaidTx(tx *sqlx.Tx, o *compute.Order) error {
 	}
 	if !ok {
 		return fmt.Errorf("托管订单 %s 的租约状态为 %s, 无法进入开通", o.OrderNo, l.State)
+	}
+	plan, err := s.repo.leaseNightPlan(tx, l.ID)
+	if err != nil {
+		return err
+	}
+	if plan != nil {
+		// 包夜(S4 T-095): 卡槽到首晚窗口开始前 10 分钟才认领, 开通任务由包夜任务按时入队。
+		l.State = LeasePending
+		return s.nightPaidTx(tx, l, plan)
 	}
 	_, err = s.repo.insertLeaseTask(tx, l.NodeID, l.ID, KindProvision, prioProvision, LeaseProvisionPayload{LeaseID: l.ID})
 	return err

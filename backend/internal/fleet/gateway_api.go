@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"tokenfactory/internal/compute"
 	"tokenfactory/pkg/accessgw"
 	"tokenfactory/pkg/errcode"
 
@@ -117,6 +118,33 @@ type gwLeaseRoute struct {
 	Port         *int       `db:"upstream_port"`
 	HostKeyFP    *string    `db:"upstream_host_key_fp"`
 	Host         *string    `db:"ssh_host"`
+	PricingMode  *string    `db:"pricing_mode"`
+	NightStart   *int       `db:"night_start_min"`
+	NightEnd     *int       `db:"night_end_min"`
+}
+
+// accessEnd 本次登录可用到的时刻: access_until; 包夜租约(S4 T-095)另截断到当晚窗口结束,
+// 窗口开始前(提前开通的几分钟)不放行。ok=false 表示当前不可登录。
+func (r *gwLeaseRoute) accessEnd(now time.Time) (time.Time, bool) {
+	if r.AccessUntil == nil || !now.Before(*r.AccessUntil) {
+		return time.Time{}, false
+	}
+	end := *r.AccessUntil
+	if r.PricingMode == nil || *r.PricingMode != compute.PricingNightly {
+		return end, true
+	}
+	if r.NightStart == nil || r.NightEnd == nil {
+		return time.Time{}, false
+	}
+	w := compute.NightWindow{StartMin: *r.NightStart, EndMin: *r.NightEnd}
+	d := compute.NightDateOf(now, w)
+	if now.Before(compute.NightStartAt(d, w)) {
+		return time.Time{}, false
+	}
+	if we := compute.NightEndAt(d, w); we.Before(end) {
+		end = we
+	}
+	return end, now.Before(end)
 }
 
 func (r *gwLeaseRoute) routable() bool {
@@ -139,7 +167,8 @@ func (r *gwLeaseRoute) upstreamUser(leaseNo string) (string, bool) {
 func (g *GatewayAPI) leaseRoute(login string) (*gwLeaseRoute, error) {
 	var r gwLeaseRoute
 	err := g.s.repo.db.Get(&r, `SELECT l.id, l.order_id, l.buyer_id, l.state, l.delivery_kind, l.access_until, l.upstream_port,
-		l.upstream_host_key_fp, n.ssh_host FROM leases l JOIN supplier_nodes n ON n.id=l.node_id WHERE l.lease_no=?`, login)
+		l.upstream_host_key_fp, n.ssh_host, o.pricing_mode, o.night_start_min, o.night_end_min
+		FROM leases l JOIN supplier_nodes n ON n.id=l.node_id LEFT JOIN orders o ON o.id=l.order_id WHERE l.lease_no=?`, login)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -215,7 +244,8 @@ func (g *GatewayAPI) check(ctx context.Context, req accessgw.AuthRequest) (*acce
 	}
 	now := g.now()
 	user, kindOK := r.upstreamUser(req.Login)
-	if r.State != LeaseActive || !kindOK || r.AccessUntil == nil || !now.Before(*r.AccessUntil) || !r.routable() {
+	until, open := r.accessEnd(now)
+	if r.State != LeaseActive || !kindOK || !open || !r.routable() {
 		return deny, nil
 	}
 	switch req.Method {
@@ -241,8 +271,7 @@ func (g *GatewayAPI) check(ctx context.Context, req accessgw.AuthRequest) (*acce
 	if err != nil {
 		return nil, err
 	}
-	ttl := min(accessgw.MaxCacheTTL, r.AccessUntil.Sub(now))
-	until := *r.AccessUntil
+	ttl := min(accessgw.MaxCacheTTL, until.Sub(now))
 	return &accessgw.AuthResponse{Allow: true, UpstreamHost: upstream, UpstreamPort: *r.Port, UpstreamHostKeyFP: *r.HostKeyFP,
 		UpstreamUser: user, AccessUntil: &until, CacheTTLS: int(ttl / time.Second)}, nil
 }
@@ -290,7 +319,7 @@ func (g *GatewayAPI) systemAuth(ctx context.Context, login string) (*accessgw.Au
 	}
 	switch r.State {
 	case LeaseProvisioning:
-	case LeaseActive:
+	case LeaseActive, LeaseParked: // parked: 包夜开窗(unpark)自检期间租约仍是 parked(S4 T-095)
 		n, err := g.rdb.Exists(ctx, recheckKey(login)).Result()
 		if err != nil {
 			return nil, err
