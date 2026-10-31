@@ -121,14 +121,11 @@ func TestManagedAvailabilityMatchesOrderAndNeverReserves(t *testing.T) {
 	assert.Equal(t, compute.ErrManagedDisabled.Error(), off.Reason)
 	comp.SetManagedGate(s)
 
-	// 包夜: 价格行存在也返回 available=false + 原因, 不给报价。
+	// 包夜(S4 Q-44): 全天商品即使有包夜价格行也不可包夜, 40001。
 	db.MustExec(`INSERT INTO product_prices (product_id, pricing_mode, unit_price, min_duration, enabled) VALUES (?, 'hourly', 1500, 1, 1), (?, 'nightly', 9000, 1, 1)`,
 		leaseProductID, leaseProductID)
-	night := availabilityOf(t, comp, 24, compute.AvailabilityReq{PricingMode: "nightly", Cards: 4, Duration: 1, NightStartDate: "2026-11-01"})
-	assert.False(t, night.Available)
-	assert.Contains(t, night.Reason, "包夜")
-	assert.Nil(t, night.Quote)
-	assert.Nil(t, night.LeasePreview)
+	_, err = comp.ProductAvailability(context.Background(), 24, leaseProductID, compute.AvailabilityReq{PricingMode: "nightly", Cards: 4, Duration: 1})
+	assert.Equal(t, 40001, compute.ErrToCode(err))
 	// night_start_date 只适用于包夜。
 	_, err = comp.ProductAvailability(context.Background(), 24, leaseProductID, compute.AvailabilityReq{Cards: 4, Duration: 2, NightStartDate: "2026-11-01"})
 	assert.Equal(t, 40001, compute.ErrToCode(err))

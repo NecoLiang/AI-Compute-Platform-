@@ -59,6 +59,28 @@ func newProvEnv(t *testing.T, withGateway bool) *provEnv {
 // newProvEnvKind 同 newProvEnv, 商品交付方式可选(container / bare_metal)。
 func newProvEnvKind(t *testing.T, kind string, withGateway bool) *provEnv {
 	t.Helper()
+	e := newProvNode(t, kind, withGateway)
+	var err error
+	e.order, err = placeManaged(e.comp, 21, 2)
+	require.NoError(t, err)
+	e.payAndLoad(t)
+	return e
+}
+
+// payAndLoad 支付 e.order 并载入其租约。
+func (e *provEnv) payAndLoad(t *testing.T) {
+	t.Helper()
+	payOrder(t, e.db, e.comp, e.order.OrderNo)
+	var err error
+	e.lease, err = e.s.repo.getLeaseByOrder(e.db, e.order.ID)
+	require.NoError(t, err)
+	require.NotNil(t, e.lease)
+	require.Equal(t, e.node, e.lease.NodeID)
+}
+
+// newProvNode 1 台 2 卡节点接到 fakeNode, 托管已接线, 尚未下单。
+func newProvNode(t *testing.T, kind string, withGateway bool) *provEnv {
+	t.Helper()
 	db := setupFleetDB(t)
 	s := newTestFleet(t, db)
 	nodes := seedLeaseMarket(t, db, s, kind, 1, 2, 1)
@@ -87,13 +109,6 @@ func newProvEnvKind(t *testing.T, kind string, withGateway bool) *provEnv {
 		s.SetGateway(e.gw)
 	}
 	e.comp = wireLeases(t, s)
-	e.order, err = placeManaged(e.comp, 21, 2)
-	require.NoError(t, err)
-	payOrder(t, db, e.comp, e.order.OrderNo)
-	e.lease, err = s.repo.getLeaseByOrder(db, e.order.ID)
-	require.NoError(t, err)
-	require.NotNil(t, e.lease)
-	require.Equal(t, e.node, e.lease.NodeID)
 	return e
 }
 

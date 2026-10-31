@@ -26,10 +26,10 @@ const (
 
 // 不可下单原因(available=false 时的 reason)。
 const (
-	reasonNoNightCards   = "所选夜晚暂无同机空闲卡(同一组卡须每晚都未被预订)"
-	reasonSoldOut        = "商品已售罄"
-	reasonNodesOffline   = "供应方算力节点已全部离线, 该商品暂不可下单"
-	reasonNoWholeNode    = "所选卡数暂无整机余量"
+	reasonNoNightCards = "所选夜晚暂无同机空闲卡(同一组卡须每晚都未被预订)"
+	reasonSoldOut      = "商品已售罄"
+	reasonNodesOffline = "供应方算力节点已全部离线, 该商品暂不可下单"
+	reasonNoWholeNode  = "所选卡数暂无整机余量"
 )
 
 // 租期起算规则(lease_preview.start_rule)。

@@ -17,7 +17,7 @@ func TestLeaseTransitionTable(t *testing.T) {
 		{LeasePending, LeaseProvisioning},
 		{LeaseProvisioning, LeaseActive}, {LeaseSuspended, LeaseActive}, {LeaseParked, LeaseActive},
 		{LeaseActive, LeaseParked},
-		{LeaseActive, LeaseSuspended}, {LeaseParked, LeaseSuspended},
+		{LeaseActive, LeaseSuspended}, {LeaseParked, LeaseSuspended}, {LeaseSuspended, LeaseParked},
 		{LeaseActive, LeaseGrace}, {LeaseSuspended, LeaseGrace}, {LeaseParked, LeaseGrace},
 		{LeasePending, LeasePurging}, {LeaseProvisioning, LeasePurging}, {LeaseActive, LeasePurging}, {LeaseParked, LeasePurging},
 		{LeaseSuspended, LeasePurging}, {LeaseGrace, LeasePurging},
