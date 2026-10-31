@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/pkg/errcode"
 
 	"github.com/jmoiron/sqlx"
@@ -33,6 +34,9 @@ func (s *Service) freezeLeaseTx(tx *sqlx.Tx, o *compute.Order) error {
 	switch l.State {
 	case LeaseActive, LeaseParked:
 		if err := s.mustTransition(tx, l, LeaseSuspended, ""); err != nil {
+			return err
+		}
+		if err := s.stopDeploymentsTx(tx, l.ID, modeldeploy.StopLeaseFrozen); err != nil {
 			return err
 		}
 		live, err := s.repo.liveLeaseTasks(tx, l.ID, KindKillSessions)

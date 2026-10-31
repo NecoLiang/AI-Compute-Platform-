@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/internal/modeldeploy"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/redis/go-redis/v9"
@@ -91,6 +92,17 @@ func (s *Service) RunLeaseJobs(ctx context.Context) {
 	go func() { defer wg.Done(); s.jobLoop(ctx, "remind", remindInterval, s.RemindRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "mining", s.miningInterval(), s.MiningScanRound) }()
 	go func() { defer wg.Done(); s.jobLoop(ctx, "reconcile", reconcileInterval, s.ReconcileRound) }()
+	if s.modelDeploy != nil { // 一键部署健康检测(60s)与采样清理(每日), 未接入时不启动
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			s.jobLoop(ctx, "model_health", modeldeploy.HealthInterval, s.modelHealthRound)
+		}()
+		go func() {
+			defer wg.Done()
+			s.jobLoop(ctx, "model_sample_cleanup", modelSampleCleanupEvery, s.modelSampleCleanup)
+		}()
+	}
 	s.jobLoop(ctx, "expiry", expirySweepInterval, s.ExpiryRound)
 	wg.Wait()
 }
@@ -220,6 +232,9 @@ func (s *Service) enterGraceTx(tx *sqlx.Tx, l *Lease, o *compute.Order, reason s
 	}
 	until := time.Now().Add(s.graceFor(mode))
 	if err := s.mustTransition(tx, l, LeaseGrace, ", grace_until=?", until); err != nil {
+		return err
+	}
+	if err := s.stopDeploymentsTx(tx, l.ID, modeldeploy.StopLeaseExpired); err != nil {
 		return err
 	}
 	l.GraceUntil = &until

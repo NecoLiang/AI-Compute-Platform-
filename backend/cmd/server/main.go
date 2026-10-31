@@ -185,6 +185,8 @@ func main() {
 	// 缓存区剩余空间、逐对 NVLink)由数据源标为未知, 判定结果写明"无法判定"(docs/api/model-deploy-api.md)。
 	if fleetSvc != nil {
 		modelDeploySvc.SetLeaseSource(fleetSvc.ModelDeployLeaseSource())
+		// 一键部署运行期(T-098/T-099): 注册 deploy_model/pull_model/stop_model 执行器、租约钩子与健康轮询, 须在 RunWorkers 之前。
+		modelDeploySvc.SetDeployRuntime(fleetSvc.AttachModelDeploy(modelDeploySvc), notificationSvc, rdb)
 	}
 
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
@@ -271,6 +273,8 @@ func main() {
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
 	if fleetSvc != nil {
 		fleet.NewHandler(fleetSvc).RegisterBuyerRoutes(buyer)
+		// 部署接口只在 fleet 启用时注册: fleet.enabled=false 时行为与之前一致(路由不存在)。
+		modeldeploy.NewHandler(modelDeploySvc).RegisterDeployRoutes(buyer)
 	}
 	modeldeploy.NewHandler(modelDeploySvc).RegisterBuyerRoutes(buyer)
 	if cfg.Server.Mode != "release" {
@@ -313,6 +317,7 @@ func main() {
 	scheduler.NewHandler(schedulerSvc).RegisterAdminRoutes(adminRoute)
 	if fleetSvc != nil {
 		fleet.NewHandler(fleetSvc).RegisterAdminRoutes(adminRoute)
+		modeldeploy.NewHandler(modelDeploySvc).RegisterAdminDeployRoutes(adminRoute)
 	}
 	catalog.NewHandler(catalogSvc).RegisterAdminRoutes(adminRoute)
 	modeldeploy.NewHandler(modelDeploySvc).RegisterAdminRoutes(adminRoute)

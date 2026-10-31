@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/pkg/errcode"
 
 	"github.com/jmoiron/sqlx"
@@ -205,6 +206,9 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 // purgeTx 租约 → purging, 卡槽 → draining, 入队 purge(宽限 0)。
 func (s *Service) purgeTx(tx *sqlx.Tx, l *Lease, reason string) error {
 	if err := s.mustTransition(tx, l, LeasePurging, ""); err != nil {
+		return err
+	}
+	if err := s.stopDeploymentsTx(tx, l.ID, modeldeploy.StopLeasePurged); err != nil {
 		return err
 	}
 	if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotReserved, SlotLeased}, SlotDraining); err != nil {
