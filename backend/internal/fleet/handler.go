@@ -42,7 +42,7 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/admin/supplier-credits", h.AdminCredits)
 	r.GET("/admin/supplier-credits/:id", h.AdminCredit)
 	r.PUT("/admin/supplier-credits/:id/override", h.AdminOverrideCredit)
-	r.POST("/admin/orders/:order_no/supplier-breach-refund", h.AdminSupplierBreachRefund)
+	r.POST("/admin/supplier-breach-refunds", h.AdminSupplierBreachRefund)
 }
 
 // fail 业务错误原样返回; 未分类错误记日志并返回 50000(不向前端暴露 SQL 细节)。
