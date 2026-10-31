@@ -63,11 +63,12 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 **响应**：`{"code":0,"data":{"node":{Node}}}`。平台为该节点生成专属 ed25519 管理密钥（私钥 AES-256-GCM 加密入库），不返回 `node_key`。
 **错误**：40001 参数 / 商品非托管；40400 商品不存在或非本人；40900 同名；50000 `security.credential_key` 未配置。
 
-`Node` 字段：`id, supplier_id, product_id, node_name, status, total_cards, available_cards, last_heartbeat_at, mgmt_mode, ssh_host, ssh_port, ssh_user, host_key_fingerprint, host_key_confirmed_at, verify_status, schedulable, verified_at, last_probe_ok_at, probe_fail_count, cpu_cores, mem_gb, disk_free_gb, disk_per_card_gb, disk_quota_supported, driver_version, cuda_version, lease_port_start, lease_port_end, created_at, updated_at`。
+`Node` 字段：`id, supplier_id, product_id, node_name, status, total_cards, available_cards, last_heartbeat_at, mgmt_mode, ssh_host, ssh_port, ssh_user, host_key_fingerprint, host_key_confirmed_at, verify_status, schedulable, dispatch_hold, dispatch_hold_reason, verified_at, last_probe_ok_at, probe_fail_count, cpu_cores, mem_gb, disk_free_gb, disk_per_card_gb, disk_quota_supported, driver_version, cuda_version, lease_port_start, lease_port_end, created_at, updated_at`。
 
 ## GET /supplier/nodes · 我的节点 ✅ / DELETE /supplier/nodes/:id · 删除 ✅
 
-列表沿用 docs/23，托管节点带 `mgmt_mode:"ssh"`、`verify_status`、`schedulable`。
+列表沿用 docs/23，托管节点带 `mgmt_mode:"ssh"`、`verify_status`、`schedulable`、`dispatch_hold`、`dispatch_hold_reason`。
+`dispatch_hold=true` 表示平台按供给方信用或该节点停机累计**自动停调度**（不分配新托管租约，已在租的不受影响；原因见 `dispatch_hold_reason`，变化时站内通知供给方），与供给方自己的排空（`schedulable=false`）互不覆盖；解除见「停机认定与补偿 · 供给方信用与停调度」。
 删除托管节点：存在 `reserved/leased/draining` 卡槽或绑定租约的卡槽时 40900「节点上有进行中的租约」；否则同一事务内删除卡槽、作废排队与执行中的任务、释放指纹占用、删除节点并重算商品库存。管理密钥随节点作废。
 
 ## GET /supplier/nodes/:id/onboarding · 上架说明 ✅
@@ -254,6 +255,8 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | 到期提醒 | 1min | 到期前 24h / 2h / 30min 站内通知 + 容器内 `wall`；进入宽限的站内通知（需 Redis，未配置时不发提醒） |
 | 挖矿特征扫描 | `fleet.mining.interval`，默认 10min | 见下文「挖矿特征扫描」 |
 | 对账 | 5min | 收尾任务补入队；在租容器与节点实况对账，节点重启后恢复 |
+| 停机扫描 | 1min | 在租租约逐个判定停机开始/结束并结算补偿（见「停机认定与补偿」） |
+| 信用重算 | 10min | 重算托管供给方信用分并同步节点 `dispatch_hold` |
 
 ### 到期与宽限
 
@@ -347,6 +350,43 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 `hits` 冻结类在前，同 `kind+detail` 只出现一次；`stratum` 的 `detail` 截取匹配到的 URL（≤ 120 字符）。
 
+## 停机认定与补偿（S2 T-105，docs/25 §25.7.6）✅
+
+本节描述后台认定规则；买家接口见 compute-api.md「托管订单停机与补偿」，运营接口见下文「运营接口」与 admin-api.md「供给方信用」。
+
+**一段停机 = `lease_outages` 一行**：开始时插入（`open_claim=lease_id` 唯一，同一租约同一时刻只有一段进行中，多原因并发只记一段），结束时守卫式更新并在同一事务内结算补偿。只认定 `state=active` 的租约；开始时间不早于开通时间，也不早于本租约上一段的结束时间。
+
+| `cause` | 认定来源 | 开始 | 结束 | `liable` |
+|---|---|---|---|---|
+| `node_offline` | 节点探活判离线（90s 无成功轻量探活），或节点主机密钥与登记不符（`key_mismatch`），或节点已不在平台托管 | 节点最后一次探活成功时刻（`last_probe_ok_at`） | 节点恢复在线（容器租约另需对账确认容器在跑，见下） | supplier |
+| `full_probe_failed` | 12h 定时完整探活（或其他完整探活）未通过，节点 `verify_status=failed` | 停机扫描发现时刻（≤ 1min 延迟） | 供给方修复后重新发起完整探活并通过 | supplier |
+| `gpu_fault` | 轻量探活写入的租约 `resource_alert`（卡掉线 / UUID 变化 / ECC 等；对账自身写的告警不算） | 发现时刻 | 告警清除 | supplier |
+| `container_down` | 对账：容器缺失 / 非运行态 / 重启失败 / 读不到容器列表 | 对账观测时刻 | 对账确认容器在跑 | supplier |
+| `gateway_down` | 对账重启容器后经访问网关自检时，网关未接入、连不上或网关主机指纹不符 | 对账观测时刻 | 对账确认容器在跑（重启并通过网关自检） | platform |
+| `wrong_freeze` | 运营解冻时认定误冻结（`POST /admin/orders/:id/unfreeze` `wrong_freeze:true`） | 冻结时刻 `suspended_at` | 解冻时刻（直接记已结束的一段） | platform |
+| `provision_delay` / `night_unpark_failed` | 包夜计费未开放（T-094/T-095），S2 不产生 | — | — | — |
+
+- **容器租约**的停机须等对账（5min）确认容器在跑才结束（「恢复在线且自检通过」），因此结束时刻最多晚约 5min（偏向买家）；整机租约在硬原因消失的那轮扫描即结束。
+- **买家原因不计**：停机期间租约被冻结（`suspended`），本段在 `suspended_at` 结束，冻结期只有运营认定误冻结才计入；租约到期/清除时进行中的停机在 `min(当前, access_until)` 结束。买家自己导致的容器退出（OOM 等）由对账自动重启，重启成功不产生停机。
+- **结算**（同一事务，幂等，`counted` 非空即已结算）：
+  - 有效秒数 `seconds` = 本段扣除与同租约其他已结束段的重叠；原始时长 < `fleet.outage.min_minutes`（默认 5）或有效秒数为 0 → `counted=0`，不补偿（`remedy_applied_at` 照写，视为已处理）。
+  - 责任金额 `liability_amount`（分）= floor(所属订单实付 × `seconds` ÷ 该订单租期秒数)，不超过实付；所属订单 = 停机开始时刻已生效的续租单或原订单。由 `liable` 方承担（D-9/D-10，分账侧扣减见 T-106）。
+  - 租约补偿方式 `outage_remedy=extend` 且仍在租期内 → `remedy=extend`：租约 `access_until`、订单 `lease_end_at`、交付 `access_expires_at`、待支付 `extend` 续租单起止同事务后移 `seconds`；`remedy_applied_at`=结算时刻。
+  - 否则（买家已选退费，或租期已结束）→ `remedy=refund`、`remedy_amount=liability_amount`，`remedy_applied_at` 留空，等 T-106 退款后写入。
+- 供给方责任段结算后即时重算该供给方信用（下节）。
+
+### 供给方信用与停调度
+
+近 30 天口径：停机 = 供给方责任且计入的停机分钟/段数（按结束时间）；探活失败 = 已验证节点完整探活失败次数（审计 `node.verify_failed`）；违约 = 落在该供给方节点上的租约开通失败数（`leases.state=failed`）。
+
+`score = 100 − min(60, ceil(50 × 停机分钟 ÷ max_supplier_minutes_30d)) − min(20, 5 × 探活失败) − min(30, 10 × 违约)`，下限 0。
+
+停调度（`supplier_nodes.dispatch_hold=1`；派生库存与下单分配都排除，已在租的不受影响，续租 restart 回原节点不受影响）：
+- 供给方级：运营覆盖 `stop`，或覆盖为 `auto` 且 `score < fleet.credit.stop_below`（默认 60）→ 其全部托管节点；
+- 节点级：覆盖不是 `allow` 且该节点近 30 天供给方责任停机分钟 > `fleet.outage.max_supplier_minutes_30d`（默认 360）。
+
+运营覆盖 `allow` 后若再发生新的计入停机，覆盖自动回到 `auto`。停/恢复调度时站内通知供给方。
+
 ---
 
 ## 运营接口
@@ -393,6 +433,24 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 - `resource_alert`：轻量探活发现的在租卡异常（如卡掉线 / UUID 变化），为空表示正常。`port_claim`、`commit_image` 不出接口。
 - 40001 参数非法。
+
+### GET /admin/lease-outages?lease_no=&order_no=&cause=&supplier_id=&open=&refund_pending=&page=&page_size= · 停机检索 ✅（S2 T-105）
+
+条件可组合：`order_no` 匹配停机所属订单或租约原订单；`cause` 取上表值（其他值 40001）；`supplier_id` 正整数；`open=1` 只看进行中；`refund_pending=1` 只看待退费（`remedy=refund` 且未退款，T-106 的工作队列）。按开始时间倒序，分页同上。
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":31,"lease_id":5,"order_id":88,"node_id":7,"cause":"node_offline","liable":"supplier",
+   "started_at":"2026-11-01T10:20:00+08:00","ended_at":"2026-11-01T10:30:00+08:00","seconds":600,"minutes":10,
+   "counted":true,"remedy":"extend","remedy_applied_at":"2026-11-01T10:30:02+08:00","remedy_amount":null,
+   "liability_amount":250,"detail":"节点探活失败已判离线",
+   "lease_no":"l-4g7bq4xc","order_no":"ORD20261101103000123abc","supplier_id":20}],
+  "total":1,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `liability_amount` 为 `null`：所属订单租期无法换算（如包夜），服务日志 ERROR「运营告警: 停机责任金额无法计算(需人工核定)」。
+- 供给方信用查看与覆盖见 admin-api.md「供给方信用（S2 T-105）」。
 
 ### GET /admin/access-sessions?lease_no=&ip=&page=&page_size= · 会话检索 ✅（S2 T-086）
 

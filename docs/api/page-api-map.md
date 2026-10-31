@@ -100,6 +100,7 @@
 - 🆕 订单详情可加「存证时间线」：复用 `/blockchain/verify?type=order|delivery&id=<orderNo>`
 - 支付：`POST /payment/pay` → 响应含 `pay_url`；`GET /payment/status/:order_no` ⬜（轮询支付结果，待接）
 - 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。（S2 T-087/T-088）`lease_state=grace` 时提示「租期已结束，宽限期至 `grace_until`，可续租恢复（restart），逾期清除数据」；`suspended`（订单 `frozen`）时提示「订单已冻结，暂停登录，容器与数据保留，请联系客服」；`purging/purged` 时提示数据已清除。续租按钮同样只看 `actions.can_renew`，`mode`(extend/restart) 由报价接口返回。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
+- 🆕 托管订单「停机与补偿」卡片（S2 T-105）：`GET /orders/:id/outages` 列出停机段（`ongoing` 标进行中，`counted=false` 标「不足 5 分钟不补偿」）、已顺延分钟 `extended_minutes`、待退费 `pending_refund_amount`（分）；补偿方式切换 `PUT /orders/:id/outage-remedy` `{remedy:"extend"|"refund"}`，仅 `can_change_remedy=true` 时可点，「退费」仅 `refund_eligible=true` 时可点；`refund_available=false` 时点退费返回 50000「易宝部分退款能力未确认，暂只支持顺延补偿」并记录意向（`refund_requested_at`），页面应提示「已记录退费申请，当前按顺延补偿」。契约见 [compute-api.md](compute-api.md#托管订单停机与补偿s2-t-105)
 
 ### `/console/buyer/invoices` 发票 ✅
 - `GET/PUT /invoices/title`、`GET /invoices/billable-orders`、`POST /invoices/apply`、`GET /invoices?status`、`GET /invoices/:invoice_no/download`(PDF 二进制)
@@ -154,6 +155,7 @@
 | ⑥ 探活报告 | `GET /supplier/nodes/:id/probe-reports?limit=` | P1–P13 逐项 ok/skipped/detail；`inventory` 可能为 `null` |
 | ⑦ 卡槽 | `GET /supplier/nodes/:id/slots`、`PUT /supplier/nodes/:id/slots/:gpu_index` `{state:"withheld"\|"free"}` | 只允许 free↔withheld |
 | ⑧ 运维 | `POST .../drain`、`POST .../undrain`、`POST .../reimage-confirm`、`DELETE /supplier/nodes/:id` | `key_mismatch` 走⑤重新确认；`needs_reimage` 走重装确认 |
+| ⑨ 停调度提示（T-105） | `GET /supplier/nodes` 的 `dispatch_hold`、`dispatch_hold_reason` | `dispatch_hold=true` 时标「平台暂停接单」并展示原因（信用分低于阈值 / 30 天停机超限 / 运营暂停），说明在租不受影响、需联系运营复核；与供给方自己的排空（`schedulable=false`）分开展示 |
 
 ### `/console/supplier/settlements` 结算 ✅
 - `GET /supplier/settlements?status`、`GET /supplier/settlements/summary`
@@ -182,6 +184,7 @@
 | `/admin/cms` | `GET/POST /admin/cms/notices` | ✅ |
 | 节点总览（建议并入 `/admin/settings` 或新页）🆕 | `GET /admin/nodes?status`、`GET /admin/schedule-advice?order_no=`、`POST /admin/blockchain/requeue-failed`(存证死信补推) | 🆕 |
 | 托管节点运维（v1.2，`fleet.enabled=true`，页面待建）🆕 | `GET /admin/nodes`（托管节点带 `managed` 摘要）、`POST /admin/nodes/:id/suspend\|resume`、`GET /admin/node-tasks?state&node_id`、`POST /admin/node-tasks/:id/retry`、`GET /admin/leases?state&node_id&buyer_id`（租约检索，含 `resource_alert`）、`GET /admin/access-sessions?lease_no&ip`（登录会话检索），见 [managed-rental-api.md](managed-rental-api.md#运营接口) | 🆕 后端就绪 |
+| 停机与供给方信用（v1.2 S2 T-105，页面待建）🆕 | `GET /admin/lease-outages?lease_no&order_no&cause&supplier_id&open=1&refund_pending=1`（停机检索，含 `detail`、`liability_amount` 分；`refund_pending=1` 即待退费队列）、`GET /admin/supplier-credits?stopped=1`（按分数升序）、`GET /admin/supplier-credits/:id`（含节点 `dispatch_hold` 与 30 天停机分钟）、`PUT /admin/supplier-credits/:id/override` `{mode:auto\|allow\|stop, reason}`（allow/stop 必填理由），见 [admin-api.md](admin-api.md#供给方信用s2-t-105) | 🆕 后端就绪 |
 
 ---
 

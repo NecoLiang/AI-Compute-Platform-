@@ -126,6 +126,39 @@ curl -X POST http://localhost:8080/api/v1/admin/nodes/7/suspend \
   -d '{"reason":"多次探活失败, 待供给方排查"}'
 ```
 
+### GET /admin/lease-outages · 停机检索（S2 T-105）
+`?lease_no=&order_no=&cause=&supplier_id=&open=1&refund_pending=1&page=&page_size=`；含认定原文 `detail` 与责任金额 `liability_amount`（分）。契约见 [managed-rental-api.md](managed-rental-api.md#运营接口)。
+
+### 供给方信用（S2 T-105）
+
+沿用 `credit_scores`（每个托管供给方一行）。计分口径与停调度规则见 [managed-rental-api.md](managed-rental-api.md#供给方信用与停调度)；后台每 10min 重算，供给方责任停机结算后即时重算。阈值 `fleet.credit.stop_below`（默认 60）。
+
+#### GET /admin/supplier-credits?stopped=1&page=&page_size= · 信用列表
+读已落库结果（不逐个重算），按 `score` 升序；`stopped=1` 只看已停调度。分页信封 `{list,total,page,page_size}`，`list[]` 为 `CreditScore`：
+
+```json
+{"supplier_id":20,"score":85,"outage_minutes_30d":0,"outage_count_30d":0,"probe_failures_30d":3,"defaults_30d":0,
+ "dispatch_stopped":true,"override_mode":"auto","override_by":null,"override_reason":null,"override_at":null,
+ "computed_at":"2026-11-01T10:30:00+08:00"}
+```
+
+#### GET /admin/supplier-credits/:id · 信用详情
+`:id` 为供给方用户 id。先即时重算再返回 `CreditScore` + `stop_below` + `nodes[]`：
+`{"id","node_name","dispatch_hold","dispatch_hold_reason","dispatch_hold_at","schedulable","outage_minutes_30d"}`。
+40001 `:id` 非正整数；40400「该供给方没有平台托管节点」。
+
+#### PUT /admin/supplier-credits/:id/override · 运营覆盖
+```json
+{"mode":"allow","reason":"已核实为探活镜像问题"}
+```
+`mode`：`auto` 按分数自动；`allow` 强制放行（含单节点停机超限；之后再发生计入的供给方责任停机即自动回到 `auto`）；`stop` 强制停调度（该供给方全部托管节点 `dispatch_hold=1`，已在租的不受影响）。`allow/stop` 必须填 `reason`（≤254 字）。立即重算并同步节点，返回同详情结构；写审计 `supplier.credit_override`（`target_type=supplier`，before/after 含 `override_mode`）。
+
+| 场景 | code |
+|---|---|
+| `mode` 缺失或不是 auto/allow/stop；allow/stop 未填理由；`:id` 非法 | 40001 |
+| 供给方没有托管节点 | 40400 |
+| 并发下信用记录已变化 | 40900 |
+
 ---
 
 ## 用户管理

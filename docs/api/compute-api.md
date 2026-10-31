@@ -556,3 +556,59 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 | 租约 `failed/cancelled` | 40900 | 租约 X 已failed, 订单无法恢复, 请关闭订单或退款 |
 | 无运营身份 | 40300 | 无权操作订单 |
 | 托管租约钩子未接入（`fleet.enabled=false` 时即如此） | 50000 | 托管履约模块未启用: 租约开通(docs/25 S2)尚未接入, 托管商品暂不可下单 |
+
+### 托管订单停机与补偿（S2 T-105）✅
+
+停机的认定规则、原因与责任方见 managed-rental-api.md「停机认定与补偿」；运营检索见同文件「运营接口 · GET /admin/lease-outages」。两个接口都只对托管订单有效，`:id` 为**原订单号**（续租子订单的停机也挂在原订单的租约下）。归属判定顺序与 `GET /orders/:id/access` 相同：40400 订单不存在 → 40300 非本人订单 → 40400 人工交付订单 → 40400 订单尚无租约。
+
+#### GET /orders/:id/outages · 停机记录与补偿 ✅ buyer（本人）
+
+```json
+{"code":0,"message":"success","data":{
+  "order_no":"ORD20261101103000123abc","lease_no":"l-4g7bq4xc","lease_state":"active",
+  "access_until":"2026-11-01T12:10:00+08:00",
+  "remedy":"extend","refund_requested_at":null,
+  "can_change_remedy":true,"refund_eligible":false,"refund_available":false,
+  "term_minutes":120,"term_outage_minutes":10,"longest_outage_minutes":10,
+  "refund_ratio":0.1,"refund_single_hours":2,
+  "extended_minutes":10,"pending_refund_amount":0,
+  "items":[{"id":31,"cause":"node_offline","liable":"supplier",
+    "started_at":"2026-11-01T10:20:00+08:00","ended_at":"2026-11-01T10:30:00+08:00","ongoing":false,
+    "minutes":10,"counted":true,"remedy":"extend","remedy_applied_at":"2026-11-01T10:30:02+08:00","remedy_amount":null}]},
+ "request_id":"..."}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `remedy` | 当前补偿方式 `extend`（默认，顺延）/ `refund`（按比例退费） |
+| `refund_requested_at` | 买家申请过退费的时间（退费通道未就绪时只记录意向，补偿仍按顺延执行） |
+| `can_change_remedy` | 租约在租（`active/parked/suspended`）且 `access_until` 未到 |
+| `refund_eligible` | 达到退费门槛（Q-47）：**当前所属订单**（原订单或已生效的续租单）期内停机累计 ≥ 租期 × `refund_ratio`，或单次停机 ≥ `refund_single_hours` 小时；进行中的停机按已持续时长计入 |
+| `refund_available` | 退费通道已就绪（T-106 退费实现已接入且 `fleet.outage.yeepay_partial_refund_confirmed=true`）。S2 当前恒为 `false` |
+| `term_minutes` / `term_outage_minutes` / `longest_outage_minutes` | 门槛计算口径：当前所属订单租期分钟数、期内计入停机分钟、期内最长一段 |
+| `extended_minutes` | 已顺延的总分钟数 |
+| `pending_refund_amount` | 待退费金额合计（分），`remedy=refund` 且尚未退款的停机段 |
+| `items[]` | 按开始时间倒序。`ongoing=true` 为进行中（`ended_at=null`，`minutes` 为已持续分钟）；`counted=false` 为不足 `fleet.outage.min_minutes`（默认 5）或与其他段完全重叠，不补偿；`counted=null` 为尚未结算 |
+| `items[].remedy` | `extend` 已顺延（`remedy_applied_at` 为顺延时刻）/ `refund` 待退费（`remedy_amount` 为金额，分；`remedy_applied_at` 为空表示尚未退款） |
+
+`items[]` 不返回认定原文与责任金额（运营接口可见）。
+
+#### PUT /orders/:id/outage-remedy · 选择补偿方式 ✅ buyer（本人）
+
+```json
+{"remedy":"refund"}
+```
+
+成功返回与 `GET /orders/:id/outages` 相同的结构。只影响**之后结束**的停机段，已结算的段不改。
+
+| 场景 | code | message |
+|---|---|---|
+| 缺少 `remedy` 或不是 `extend/refund` | 40001 | remedy 必填(extend 或 refund) / remedy 只能是 extend 或 refund |
+| 租期已结束（租约不在租或 `access_until` 已过） | 40900 | 租期已结束, 不能再修改补偿方式; 未补偿的停机将按比例退费 |
+| `refund` 未达门槛 | 40900 | 未达到退费条件(本期累计停机 ≥ 租期的 10% 或单次停机 ≥ 2 小时), 只能顺延补偿 |
+| `refund` 达门槛但退费通道未就绪（S2 现状） | 50000 | 易宝部分退款能力未确认，暂只支持顺延补偿（同时记录 `refund_requested_at`，补偿方式保持 `extend`） |
+| 并发下租约状态已变化 | 40900 | 租约状态已变化, 请刷新后重试 |
+
+- `extend` 随时可选（租期内），并清除 `refund_requested_at`。
+- 顺延的效果：租约 `access_until`、订单 `lease_end_at`、交付 `access_expires_at` 同一事务后移停机时长（刷新撤销游标，网关按新时刻放行）；已下单未支付的 `extend` 续租单的起点与 `renewed_until` 一并后移（支付时仍能对上原订单结束时间）。
+- 租期结束后才结束的停机段（含冻结中到期）无法顺延，统一转为待退费（`remedy=refund`），由 T-106 退费流程处理。
