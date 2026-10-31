@@ -47,9 +47,10 @@ type LeaseRuntime struct {
 
 // CardHealth L5 硬件遥测(与 fleet 周期探活共用 gpu_slots/gpu_xid_events, 不另起采集)。
 type CardHealth struct {
-	UUID           string
-	TempC          *int
-	Throttle       string // nvidia-smi clocks_throttle_reasons 原文; 空=未采集
+	UUID  string
+	TempC *int
+	// Throttled 温度/功耗降频(HW slowdown/thermal/power brake; 满载时的 SW power cap 属常态不计), nil=未采集。
+	Throttled      *bool
 	ECCUncorrected *int64
 	ECCCorrected   *int64
 	FatalXid       bool // 近 1 小时该卡有致命 Xid
