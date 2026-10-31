@@ -33,9 +33,9 @@ curl -X POST http://localhost:8080/api/v1/payment/pay \
 
 ---
 
-## POST /payment/callback · 支付回调（易宝调用，无需鉴权）
+## POST /payment/yeepay/notify/:kind · 易宝异步通知（易宝调用，无需登录）
 
-该路由预留给支付渠道异步通知，目前一律拒绝未能验签的回调。业务层已实现验签成功后更新订单与发起分账；真实渠道报文适配及供给方支付通知尚未接入。
+`:kind` ∈ `pay`（支付结果）/ `clear`（清算）/ `refund`（退款结果，含 T-106 部分退款，按退款请求号路由）。公开路由，信任来源是报文解密验签，验签失败一律拒绝。（旧文档中的 `POST /payment/callback` 从未注册，以本路由为准。）
 
 ---
 
