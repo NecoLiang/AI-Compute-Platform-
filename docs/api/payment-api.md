@@ -61,6 +61,8 @@ curl "http://localhost:8080/api/v1/payment/settlements?order_no=ORD20260713001" 
 
 记录（含 `GET /supplier/settlements`）新增两个字段（迁移 037，托管订单才非 0）：`refund_deduction` 已成功部分退款从本行扣减的金额（分；收款时锁定的应结 = `amount + refund_deduction`），`platform_compensation` 仅供给方行，平台责任退款超出平台费而从本行扣下、由平台另行补偿的金额（分）。托管订单的 `amount` 在租期末分账前按部分退款重算，口径见下文「租期末结算与部分退款」。
 
+这两个接口的每条记录还带所属订单的 `fulfillment_mode`（`manual`/`managed`）与 `settle_ready_at`（分账闸门时间，ISO8601 或 `null`）：`managed` 订单在 `settle_ready_at` 写入（租约全部结束且停机结算完成）之前不会发起分账，前端对 `fulfillment_mode=managed && settle_ready_at=null` 的待结行标「租期结束后分账」；`manual` 订单 `settle_ready_at` 恒为 `null`，按原有分账流程。
+
 ---
 
 ## 金额说明

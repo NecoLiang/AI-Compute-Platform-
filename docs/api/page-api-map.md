@@ -169,7 +169,7 @@
 
 ### `/console/supplier/settlements` 结算 ✅
 - `GET /supplier/settlements?status`、`GET /supplier/settlements/summary`
-- 🆕 托管订单（T-106）：租期末（租约清除后）才分账；记录含 `refund_deduction`（部分退款扣减，分）与 `platform_compensation`（平台另行补偿，分），非 0 时在明细里展示「停机退款扣减 / 平台补偿」
+- 🆕 托管订单（T-106）：租期末（租约清除后）才分账；记录含 `refund_deduction`（部分退款扣减，分）与 `platform_compensation`（平台另行补偿，分），非 0 时在明细里展示「停机退款扣减 / 平台补偿」；每行带 `fulfillment_mode` 与 `settle_ready_at`，`managed` 且 `settle_ready_at=null` 的待结行标「租期结束后分账」
 
 ### `/console/supplier/inventory` 盘点 ✅
 - `GET /supplier/resource-syncs?product_id`、`POST /supplier/resource-syncs/passive`（托管商品返回 40001「托管商品库存由平台按卡槽自动计算」，页面应对托管商品隐藏上报入口，T-093）

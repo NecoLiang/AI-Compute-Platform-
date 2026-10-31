@@ -1111,14 +1111,14 @@ func (s *Service) GetOrderPayments(buyerID int64, orderNo string) ([]Payment, er
 	return append(list, *p), nil
 }
 
-func (s *Service) GetOrderSettlements(supplierID int64, orderNo string) ([]Settlement, error) {
+func (s *Service) GetOrderSettlements(supplierID int64, orderNo string) ([]SupplierSettlement, error) {
 	return s.repo.GetSettlementsByOrder(supplierID, orderNo)
 }
 
 var settlementStatuses = map[string]bool{"pending": true, "processing": true, "success": true, "failed": true, "cancelled": true, "reversed": true}
 
 // ListSupplierSettlements 供给方结算流水(按商品归属)。
-func (s *Service) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]Settlement, int64, error) {
+func (s *Service) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]SupplierSettlement, int64, error) {
 	if status != "" && !settlementStatuses[status] {
 		return nil, 0, fmt.Errorf("invalid status")
 	}

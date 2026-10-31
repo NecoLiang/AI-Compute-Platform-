@@ -7,6 +7,7 @@ import (
 
 	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/modeldeploy"
+	"tokenfactory/internal/payment"
 	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/errcode"
 
@@ -172,4 +173,29 @@ func TestCrossGatewayHeartbeatOutage(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.NotNil(t, rows[0].EndedAt, "网关恢复上报 + 对账确认在跑 → 结束")
 	require.NotNil(t, rows[0].Counted)
+}
+
+// 供给方结算列表/按单流水逐行带出订单履约模式与分账闸门: managed 行在 settle_ready_at 写入前为 null(前端标「租期结束后分账」)。
+func TestCrossSupplierSettlementRowsExposeSettleGate(t *testing.T) {
+	e := newSettleEnv(t, true)
+	var supplierID int64
+	require.NoError(t, e.db.Get(&supplierID, `SELECT p.supplier_id FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=?`, e.order.ID))
+	repo := payment.NewRepository(e.db)
+
+	list, total, err := repo.ListSupplierSettlements(supplierID, "", 1, 20)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, total)
+	assert.Equal(t, "managed", list[0].FulfillmentMode)
+	assert.Nil(t, list[0].SettleReadyAt, "租期未结束: 分账闸门未开")
+
+	e.purge(t)
+	e.s.SettleRound(context.Background())
+	require.True(t, e.settleReady(t, e.order.ID))
+	rows, err := repo.GetSettlementsByOrder(supplierID, e.order.OrderNo)
+	require.NoError(t, err)
+	require.NotEmpty(t, rows)
+	for _, r := range rows {
+		assert.Equal(t, "managed", r.FulfillmentMode)
+		require.NotNil(t, r.SettleReadyAt)
+	}
 }

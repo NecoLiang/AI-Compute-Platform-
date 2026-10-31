@@ -44,6 +44,17 @@ type Settlement struct {
 	UpdatedAt            *time.Time `db:"updated_at" json:"updated_at"`
 }
 
+// SupplierSettlement 供给方视角的结算行: 附带所属订单的履约模式与分账闸门(docs/25 D-10)。
+// managed 订单在 SettleReadyAt 写入(租约全部结束且停机结算完成)前不发起分账, 前端据此标「租期结束后分账」;
+// manual 订单 SettleReadyAt 恒为 null。
+type SupplierSettlement struct {
+	Settlement
+	FulfillmentMode string     `db:"fulfillment_mode" json:"fulfillment_mode"`
+	SettleReadyAt   *time.Time `db:"settle_ready_at" json:"settle_ready_at"`
+}
+
+const supplierSettlementColumns = "s.*, o.fulfillment_mode, o.settle_ready_at"
+
 // Merchant 供给方在易宝开通的分账接收商编。
 type Merchant struct {
 	ID                int64     `db:"id" json:"id"`
@@ -74,7 +85,7 @@ func (r *Repository) GetPaymentByOrder(orderNo string) (*Payment, error) {
 
 // ListSupplierSettlements 供给方结算流水: 按商品归属过滤, 归属经
 // orders -> products 的 supplier_id 判定(不依赖 payee_id)。
-func (r *Repository) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]Settlement, int64, error) {
+func (r *Repository) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]SupplierSettlement, int64, error) {
 	if page <= 0 {
 		page = 1
 	}
@@ -96,9 +107,9 @@ func (r *Repository) ListSupplierSettlements(supplierID int64, status string, pa
 		args...); err != nil {
 		return nil, 0, err
 	}
-	list := make([]Settlement, 0)
+	list := make([]SupplierSettlement, 0)
 	err := r.db.Select(&list,
-		`SELECT s.* FROM settlements s
+		`SELECT `+supplierSettlementColumns+` FROM settlements s
 		JOIN orders o ON o.order_no=s.order_no
 		JOIN products p ON p.id=o.product_id
 		`+where+` ORDER BY s.created_at DESC LIMIT ? OFFSET ?`,
@@ -124,9 +135,9 @@ func (r *Repository) SumSupplierSettlements(supplierID int64) (total, succeeded,
 
 // GetSettlementsByOrder 归属过滤在 SQL 内: 只能看自己商品所属订单的结算流水。
 // 不带 supplier 条件的版本曾允许任意供给方按订单号窥探他人分账金额(2026-09-07 修复)。
-func (r *Repository) GetSettlementsByOrder(supplierID int64, orderNo string) ([]Settlement, error) {
-	list := make([]Settlement, 0)
-	err := r.db.Select(&list, `SELECT s.* FROM settlements s
+func (r *Repository) GetSettlementsByOrder(supplierID int64, orderNo string) ([]SupplierSettlement, error) {
+	list := make([]SupplierSettlement, 0)
+	err := r.db.Select(&list, `SELECT `+supplierSettlementColumns+` FROM settlements s
 		JOIN orders o ON o.order_no = s.order_no
 		JOIN products p ON p.id = o.product_id
 		WHERE s.order_no = ? AND p.supplier_id = ?`, orderNo, supplierID)
