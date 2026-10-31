@@ -99,7 +99,7 @@
 - 凭证：`GET /orders/:id/access-credential`（脱敏）、`POST .../reveal`（明文，二次确认后调用）
 - 🆕 订单详情可加「存证时间线」：复用 `/blockchain/verify?type=order|delivery&id=<orderNo>`
 - 支付：`POST /payment/pay` → 响应含 `pay_url`；`GET /payment/status/:order_no` ⬜（轮询支付结果，待接）
-- 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。（S2 T-087/T-088）`lease_state=grace` 时提示「租期已结束，宽限期至 `grace_until`，可续租恢复（restart），逾期清除数据」；`suspended`（订单 `frozen`）时提示「订单已冻结，暂停登录，容器与数据保留，请联系客服」；`purging/purged` 时提示数据已清除。续租按钮同样只看 `actions.can_renew`，`mode`(extend/restart) 由报价接口返回。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
+- 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。（S2 T-087/T-088）`lease_state=grace` 时提示「租期已结束，宽限期至 `grace_until`，可续租恢复（restart），逾期清除数据」；`suspended`（订单 `frozen`）时提示「订单已冻结，暂停登录，容器与数据保留，请联系客服」；`purging/purged` 时提示数据已清除。整机订单（商品 `delivery_mode=bare_metal`，T-089）没有宽限期：连接信息卡片提示「登录后为宿主机账户 `omnis-<login>`，可 `sudo`；到期即断开并清除，数据请在到期前导出」，不展示 grace 文案。续租按钮同样只看 `actions.can_renew`，`mode`(extend/restart) 由报价接口返回。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
 
 ### `/console/buyer/invoices` 发票 ✅
 - `GET/PUT /invoices/title`、`GET /invoices/billable-orders`、`POST /invoices/apply`、`GET /invoices?status`、`GET /invoices/:invoice_no/download`(PDF 二进制)
@@ -153,7 +153,7 @@
 | ⑤ 确认指纹 | `POST /supplier/nodes/:id/host-key/confirm` `{fingerprint}` | 首次连接后 `verify_status=unverified` 且 `host_key_fingerprint` 有值、未确认时出现；展示核对命令，用户粘贴机器上看到的指纹 |
 | ⑥ 探活报告 | `GET /supplier/nodes/:id/probe-reports?limit=` | P1–P13 逐项 ok/skipped/detail；`inventory` 可能为 `null` |
 | ⑦ 卡槽 | `GET /supplier/nodes/:id/slots`、`PUT /supplier/nodes/:id/slots/:gpu_index` `{state:"withheld"\|"free"}` | 只允许 free↔withheld |
-| ⑧ 运维 | `POST .../drain`、`POST .../undrain`、`POST .../reimage-confirm`、`DELETE /supplier/nodes/:id` | `key_mismatch` 走⑤重新确认；`needs_reimage` 走重装确认 |
+| ⑧ 运维 | `POST .../drain`、`POST .../undrain`、`POST .../reimage-confirm` `{expected_host_fingerprint}`（T-089 必填）、`DELETE /supplier/nodes/:id` | `key_mismatch` 走⑤重新确认；`needs_reimage`（整机租约结束）显示「待重装」并给出重装确认表单：提示先重装系统、重新放行管理公钥，再在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 粘贴**新**指纹；40001「旧主机指纹」= 未重装/未换主机密钥；40900「冻结核查中」= 等运营结案。此状态下③⑤④提交后节点仍为 `needs_reimage`，页面不要引导走那条路 |
 
 ### `/console/supplier/settlements` 结算 ✅
 - `GET /supplier/settlements?status`、`GET /supplier/settlements/summary`

@@ -134,7 +134,7 @@ curl -H "Authorization: Bearer <token>" \
 字段说明：
 - `quote`：金额单位分。`unit_price` 分/卡/周期；`total_amount = unit_price × quantity × duration`；`platform_fee` 内含于总价，= `total_amount × fee_rate / 10000` 向下取整；`fee_rate` 为基点。与随后 `POST /orders` 的 `total_amount/platform_fee` 相同（前提是期间商品价格与交易配置未变）。`available=false` 时仍给报价（包夜除外）。
 - `lease_preview.start_rule`：`on_activation`＝托管商品，租期从开通自检通过起算（D-6，不计开通耗时），`start_at` 取查询时刻（Asia/Shanghai，秒级），`end_at` 按计费周期换算，仅为预估；买断 `end_at=null`。`on_buyer_confirm`＝人工商品，租期从买家确认签收起算，签收时刻未知，`start_at/end_at` 均为 `null`。
-- `available=false` 时 `reason` 为可直接展示的中文原因，按以下优先级只给第一条：交易总开关关闭（「交易暂时关闭，请稍后再试」）→ 商品已售罄 → 供应方算力节点已全部离线 → 供给方资质已过期 → 人工：库存不足 → 托管：托管履约未启用 / 托管履约模块未启用 → 托管整机交付：「整机托管开通尚未接入(T-089), 暂不可下单」→ 托管：「所选卡数暂无整机余量」（没有任何单台节点能凑齐 `cards` 张卡；判定与下单分配的候选规则一致：已验收 + 可调度 + 在线 + 空闲 ≥ cards，无磁盘配额的节点只能整机）。
+- `available=false` 时 `reason` 为可直接展示的中文原因，按以下优先级只给第一条：交易总开关关闭（「交易暂时关闭，请稍后再试」）→ 商品已售罄 → 供应方算力节点已全部离线 → 供给方资质已过期 → 人工：库存不足 → 托管：托管履约未启用 / 托管履约模块未启用 → 托管：「所选卡数暂无整机余量」（没有任何单台节点能凑齐 `cards` 张卡；判定与下单分配的候选规则一致：已验收 + 可调度 + 在线 + 空闲 ≥ cards，无磁盘配额的节点只能整机）。
 
 **错误码**：40001 参数非法（cards 缺失/非正、卡数不在可选集合、计费方式未开放、时长不足、托管买断、面议商品、`night_start_date` 非法）；40400「商品不存在」（不存在或非 `active/sold_out`；`sold_out` 可查询，返回 `available=false`）；42900 限流；50000 内部错误。
 
@@ -471,7 +471,7 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 - 买断计费（`pricing_mode=perpetual`）的托管商品：40001「托管商品不支持买断计费」。
 - 不扣 `products.stock`（托管库存由卡槽派生），订单 `stock_reserved=0`；同一事务内建租约（`reserved`）并在**同一台节点**上预留 `quantity` 张卡槽（docs/26 §26.5.2），随后重算派生库存。事务使用 READ COMMITTED。
 - 没有一台节点能凑齐所需卡数：40900「所选卡数暂无整机余量」（总空闲卡数可能大于所需，但分散在不同节点）。
-- 整机交付（`delivery_mode=bare_metal`）的托管商品：50000「整机托管开通尚未接入(T-089), 暂不可下单」。
+- 整机交付（`delivery_mode=bare_metal`）的托管商品（T-089 起可下单）：`card_count` 须等于某台节点的全部卡数，只分配全部卡空闲的节点；否则同上 40900「所选卡数暂无整机余量」。整机无宽限期、到期即清除，节点转待重装，见 managed-rental-api.md「整机（bare_metal）租约」。
 
 **状态流转**
 | 订单状态 | 托管口径 |
