@@ -120,7 +120,7 @@ platformFee = totalAmount × feeRate / 10000  (feeRate默认500=5%)
 
 **settle_ready_at 写入时点**（fleet 结算任务每分钟一轮，守卫式 `UPDATE … WHERE settle_ready_at IS NULL AND status='completed' AND fulfillment_mode='managed'`，只写根订单）：
 
-1. 根订单 `completed`，且其租约已进入 `purging/purged`（或 `failed/cancelled`）。**宽限期（grace）内不写**：宽限期内仍可 restart 续租把订单重新打开；`settle_ready_at` 写入后续租报价 / 下单一律 `40900`（`ErrRenewalConflict`，需重新下单）。两者都在根订单行锁下判断，互斥。
+1. 根订单 `completed`，且其租约全部已进入 `purging/purged/failed/cancelled`（`failed/cancelled` 出现在清除后 restart 续租开通失败/取消：续租单退款、根订单回到 `completed`，原租期已交付照常分账；从未交付的托管订单开通失败时订单为 `cancelled`，不进入本流程）。**宽限期（grace）内不写**：宽限期内仍可 restart 续租把订单重新打开；`settle_ready_at` 写入后续租报价 / 下单一律 `40900`（`ErrRenewalConflict`，需重新下单）。两者都在根订单行锁下判断，互斥。
 2. 续租单全部 `completed/cancelled/refunded`（无待支付 / 退款中的续租）。
 3. 租约每段停机都已结束且补偿已落地（`ended_at`、`remedy_applied_at` 均非空）。待退费停机由结算任务兜底提交退款；退费通道未打开时不写并发运营告警（资金继续留在易宝待分账账户）。
 4. 链上订单（根 + 续租）的 `payment_refunds` 全部 `success`（已全额退款的支付除外）。

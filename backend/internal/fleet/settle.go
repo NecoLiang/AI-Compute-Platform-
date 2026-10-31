@@ -11,7 +11,7 @@ import (
 // ===== 租期末结算(settle_ready_at, D-10 / docs/25 §25.7.6, T-106) =====
 //
 // 托管订单整条续租链(根订单 + 续租单)在租期末一次分账。根订单写 settle_ready_at 的条件:
-//   1. 根订单 completed, 且所有租约已进入 purging/purged(或 failed/cancelled)。不在 grace 写:
+//   1. 根订单 completed, 且所有租约已进入 purging/purged/failed/cancelled(后两者见清除后 restart 续租失败)。不在 grace 写:
 //      宽限期内的 restart 续租会把根订单重新打开(completed → active), 而 purged 后的续租在
 //      settle_ready_at 写入后被拒绝(compute.renewalQuoteTx), 两者在根订单行锁下互斥。
 //   2. 续租单全部 completed/cancelled/refunded(无待支付/退款中的续租)。
@@ -31,7 +31,7 @@ func (s *Service) SettleRound(ctx context.Context) {
 	err := s.repo.db.Select(&ids, `SELECT o.id FROM orders o
 		WHERE o.fulfillment_mode='managed' AND o.status='completed' AND o.settle_ready_at IS NULL
 		AND NOT EXISTS (SELECT 1 FROM order_renewals r WHERE r.order_id=o.id)
-		AND EXISTS (SELECT 1 FROM leases l WHERE l.order_id=o.id AND l.state IN ('purging','purged'))
+		AND EXISTS (SELECT 1 FROM leases l WHERE l.order_id=o.id)
 		AND NOT EXISTS (SELECT 1 FROM leases l WHERE l.order_id=o.id AND l.state NOT IN ('purging','purged','failed','cancelled'))
 		ORDER BY o.id LIMIT ?`, settleBatch)
 	if err != nil {
@@ -68,18 +68,17 @@ func (s *Service) markSettleReady(orderID int64) (blocked string, err error) {
 		if err := tx.Select(&states, `SELECT state FROM leases WHERE order_id=? ORDER BY id FOR UPDATE`, orderID); err != nil {
 			return err
 		}
-		purged := false
+		// 未交付的托管订单开通失败/取消时订单落 cancelled(compute.FailManagedOrderTx), 不会是 completed;
+		// completed 且租约 failed/cancelled 只出现在清除后 restart 续租开通失败/取消: 原租期已完整交付, 照常分账。
+		if len(states) == 0 {
+			return nil
+		}
 		for _, st := range states {
 			switch st {
-			case LeasePurging, LeasePurged:
-				purged = true
-			case LeaseFailed, LeaseCancelled:
+			case LeasePurging, LeasePurged, LeaseFailed, LeaseCancelled:
 			default:
 				return nil
 			}
-		}
-		if !purged {
-			return nil
 		}
 		var openChildren int
 		if err := tx.Get(&openChildren, `SELECT COUNT(*) FROM order_renewals r JOIN orders c ON c.id=r.order_id

@@ -84,3 +84,30 @@ func TestCrossRestartRejectsMovedLease(t *testing.T) {
 	assert.Equal(t, before, countRows(t, e.db, `SELECT COUNT(*) FROM node_tasks WHERE kind='deploy_model'`))
 	assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM model_deployments WHERE lease_active_claim IS NOT NULL`))
 }
+
+// 清除后 restart 续租开通失败(无其它可用节点): 续租单取消退款、根订单回到 completed、租约 failed。
+// 原租期已完整交付, 根订单仍须写 settle_ready_at 进入分账, 不能因租约是 failed(而非 purged)永久卡住。
+func TestCrossSettleAfterPurgedRestartFails(t *testing.T) {
+	e := graceProvEnv(t)
+	ctx := context.Background()
+	e.db.MustExec(`UPDATE leases SET grace_until=NOW()-INTERVAL 1 MINUTE WHERE id=?`, e.lease.ID)
+	e.s.ExpiryRound(ctx)
+	require.Equal(t, LeasePurging, e.leaseNow(t).State)
+	e.overridePurge(t, fakeReply{Stdout: "@@removed\n"})
+	purge := runOne(t, e.s)
+	require.Equal(t, TaskSucceeded, purge.State, "last_error=%v", purge.LastError)
+	require.Equal(t, LeasePurged, e.leaseNow(t).State)
+
+	_, child := renewManaged(t, e, 1)
+	payRenewal(t, e, child.OrderNo)
+	require.Equal(t, LeasePending, e.leaseNow(t).State)
+	e.s.onProvisionDead(leaseTaskOf(t, e, KindProvision), "开通失败")
+
+	require.Equal(t, LeaseFailed, e.leaseNow(t).State)
+	require.Equal(t, "completed", orderStatus(t, e))
+	assert.Equal(t, "cancelled", childStatus(t, e, child.OrderNo))
+
+	e.s.SettleRound(ctx)
+	assert.Equal(t, 1, countRows(t, e.db, `SELECT COUNT(*) FROM orders WHERE id=? AND settle_ready_at IS NOT NULL`, e.order.ID),
+		"原租期已交付, 根订单须进入分账")
+}
