@@ -203,9 +203,20 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 }
 
 // purgeTx 租约 → purging, 卡槽 → draining, 入队 purge(宽限 0)。
+// 整机租约若买家已拿到过 root(active/parked/suspended/grace), 节点同时转 needs_reimage(T-089, docs/25 §25.7.4):
+// 删账户清不掉买家以 root 留下的东西, 必须供给方重装确认后才能再售。调用方已锁节点行。
 func (s *Service) purgeTx(tx *sqlx.Tx, l *Lease, reason string) error {
+	from := l.State
 	if err := s.mustTransition(tx, l, LeasePurging, ""); err != nil {
 		return err
+	}
+	if l.DeliveryKind == "bare_metal" {
+		switch from {
+		case LeaseActive, LeaseParked, LeaseSuspended, LeaseGrace:
+			if err := s.markBareMetalReimageTx(tx, l, reason); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotReserved, SlotLeased}, SlotDraining); err != nil {
 		return err

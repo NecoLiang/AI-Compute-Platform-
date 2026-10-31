@@ -214,6 +214,10 @@ func (s *Service) expireLeaseSide(leaseID, orderID int64) error {
 
 // enterGraceTx 租约 → grace(宽限按订单计费方式快照取档), 卡槽 → draining, 入队 stop。调用方已锁订单、租约与节点行。
 func (s *Service) enterGraceTx(tx *sqlx.Tx, l *Lease, o *compute.Order, reason string) error {
+	if l.DeliveryKind == "bare_metal" {
+		// 整机无宽限期(docs/25 §25.7.4): 到期即断开、删账户、节点待重装。
+		return s.purgeTx(tx, l, reason+"(整机无宽限)")
+	}
 	mode, err := compute.OrderPricingMode(o)
 	if err != nil {
 		return err
@@ -250,6 +254,12 @@ func (s *Service) expireSuspended() {
 			}
 			if err := s.ensureStopTx(tx, cur, "冻结中租期结束"); err != nil {
 				return err
+			}
+			if cur.DeliveryKind == "bare_metal" {
+				// 整机: stop 只撤权限、结束进程, 账户与家目录保留作现场; 节点同时待重装(买家曾有 root)。
+				if err := s.markBareMetalReimageTx(tx, cur, "冻结中租期结束"); err != nil {
+					return err
+				}
 			}
 			slog.Info("冻结中租约到期: 停容器释放卡, 保留现场", "lease_no", cur.LeaseNo, "slots", n)
 			return s.recomputeStockTx(tx, cur.ProductID)

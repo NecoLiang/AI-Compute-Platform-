@@ -66,6 +66,10 @@ func (s *Service) runProvisionTask(ctx context.Context, t *Task) (any, error) {
 	}
 	defer p.client.Close()
 	steps := []func(context.Context) error{p.firewall, p.image, p.container, p.selftest}
+	if p.l.DeliveryKind == "bare_metal" {
+		// 整机(T-089, docs/25 §25.7.4): 宿主机建租约账户, 买家经网关登录宿主机 sshd; 无容器/端口段/基础镜像。
+		steps = []func(context.Context) error{p.bareMetalAccount, p.selftest}
+	}
 	for _, step := range steps {
 		if err := step(ctx); err != nil {
 			if ctx.Err() != nil {
@@ -111,8 +115,10 @@ func (p *provisionRun) begin(leaseID int64) error {
 			return errTaskAborted{"租约不存在"}
 		case l.NodeID != p.t.NodeID:
 			return errTaskAborted{fmt.Sprintf("租约 %s 已改由节点 #%d 开通", l.LeaseNo, l.NodeID)}
-		case l.DeliveryKind != "container":
-			return errTaskAborted{"整机托管开通尚未接入(T-089)"}
+		case l.DeliveryKind != "container" && l.DeliveryKind != "bare_metal":
+			return errTaskAborted{fmt.Sprintf("未知交付方式 %q", l.DeliveryKind)}
+		case l.DeliveryKind == "bare_metal" && p.resume:
+			return errTaskAborted{"整机租约无宽限期, 不支持原节点恢复开通"}
 		case l.State == LeasePending:
 			if err := s.mustTransition(tx, l, LeaseProvisioning, ""); err != nil {
 				return err
@@ -147,6 +153,9 @@ func (p *provisionRun) prepare(ctx context.Context) error {
 	p.n = n
 	if p.slots, err = s.repo.leaseSlotsOnNode(s.repo.db, p.l.ID, n.ID); err != nil {
 		return err
+	}
+	if p.l.DeliveryKind == "bare_metal" && p.l.Cards != n.TotalCards {
+		return fmt.Errorf("整机租约 %s 卡数 %d 与节点 #%d 总卡数 %d 不一致", p.l.LeaseNo, p.l.Cards, n.ID, n.TotalCards)
 	}
 	if len(p.slots) != p.l.Cards {
 		return fmt.Errorf("租约 %s 在节点 #%d 上的卡槽数 %d 与租约卡数 %d 不一致", p.l.LeaseNo, n.ID, len(p.slots), p.l.Cards)
@@ -427,6 +436,55 @@ func (p *provisionRun) claimPort(ctx context.Context) (int, error) {
 	return *cur.Port, nil
 }
 
+// bareMetalAccount 整机开通 ②'(T-089): 以探针镜像特权容器 chroot 宿主机创建账户 omnis-<lease_no>(免密 sudo)、
+// 写入网关上游公钥(from=网关出口 IP); 租约上游 = 节点管理 sshd(ssh_port), 主机指纹 = 节点钉死指纹(开通时快照,
+// 租期内节点指纹再变化不会让网关改认新指纹)。重试幂等(账户已存在沿用, 公钥与 sudoers 重写)。
+func (p *provisionRun) bareMetalAccount(ctx context.Context) error {
+	s, l, n := p.s, p.l, p.n
+	if _, err := ensureImageOn(ctx, p.client, s.cfg.ProbeImage); err != nil {
+		return fmt.Errorf("平台探针镜像(建整机租约账户用): %w", err)
+	}
+	script, err := bareMetalProvisionScript(l.LeaseNo, s.gw.UpstreamPubkey, s.gwEgress)
+	if err != nil {
+		return err
+	}
+	cmd, err := hostRootCommand(s.cfg.ProbeImage, script)
+	if err != nil {
+		return err
+	}
+	out, err := runRemote(ctx, p.client, cmd, cmdTimeout)
+	tag, _, perr := parseBareMetalOut(out)
+	switch {
+	case perr != nil && (err != nil || out != ""):
+		if err != nil {
+			return fmt.Errorf("创建整机租约账户失败: %v(%w)", perr, err)
+		}
+		return fmt.Errorf("创建整机租约账户失败: %w", perr)
+	case err != nil:
+		return fmt.Errorf("创建整机租约账户失败: %w", err)
+	case tag != "account":
+		return fmt.Errorf("创建整机租约账户: 意外结论 %q", tag)
+	}
+	port, fp := *n.SSHPort, *n.HostKeyFingerprint
+	ok, err := affected(s.repo.db.Exec(`UPDATE leases SET upstream_port=?, upstream_host_key_fp=?
+		WHERE id=? AND state='provisioning' AND node_id=?`, port, fp, l.ID, n.ID))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		var st string
+		if err := s.repo.db.Get(&st, `SELECT state FROM leases WHERE id=?`, l.ID); err != nil {
+			return err
+		}
+		if st != LeaseProvisioning {
+			return errTaskAborted{fmt.Sprintf("租约 %s 已变为 %s, 停止开通(账户由 purge 回收)", l.LeaseNo, st)}
+		}
+	}
+	l.UpstreamPort = &port
+	p.out.UpstreamPort, p.out.UpstreamHostKeyFP = port, fp
+	return nil
+}
+
 // selftest ⑤。网关未接入时明确失败, 不伪造通过。
 func (p *provisionRun) selftest(ctx context.Context) error {
 	if p.s.gateway == nil {
@@ -443,6 +501,11 @@ func (p *provisionRun) selftest(ctx context.Context) error {
 	}
 	if !sameUUIDSet(got, want) {
 		return fmt.Errorf("自检: 容器内可见 GPU %v 与分配的卡 %v 不一致", got, want)
+	}
+	if p.l.DeliveryKind == "bare_metal" {
+		// 整机上游即宿主机管理 sshd(平台主服务本就能连), "主服务直连必须失败"不适用; 来源限制靠
+		// authorized_keys 的 from="<网关出口IP>"。买家持有 root 可自行开放任意入口, 平台不对此做保证(§25.7.4)。
+		return nil
 	}
 	host, port := *p.n.SSHHost, *p.l.PortClaim
 	d := p.s.dialer.with(5*time.Second, 1)
