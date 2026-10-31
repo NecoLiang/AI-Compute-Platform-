@@ -94,7 +94,9 @@ func (r *Repository) setNodeKey(tx *sqlx.Tx, id int64, pub, encPriv string) erro
 
 // updateSSH 修改连接信息: 节点回到 unverified、代次 +1(进行中的探活结论作废); host/port 变化时清除指纹钉死(换了机器必须重新确认)。
 func (r *Repository) updateSSH(tx *sqlx.Tx, id int64, host string, port int, user string, resetFP bool) (bool, error) {
-	q := `UPDATE supplier_nodes SET ssh_host=?, ssh_port=?, ssh_user=?, verify_status='unverified',
+	// 重装闸门未解除(T-089)时保持 needs_reimage: 改连接信息不能绕过重装确认。
+	q := `UPDATE supplier_nodes SET ssh_host=?, ssh_port=?, ssh_user=?,
+		verify_status=CASE WHEN reimage_required_at IS NULL THEN 'unverified' ELSE 'needs_reimage' END,
 		host_fp_claim=NULL, verified_at=NULL, generation=generation+1`
 	if resetFP {
 		q += `, host_key_fingerprint=NULL, host_key_confirmed_at=NULL`
@@ -128,8 +130,11 @@ func (r *Repository) confirmHostKey(tx *sqlx.Tx, id int64, fp string) (bool, err
 }
 
 // markKeyMismatch 钉死指纹与观测不一致: 停止新分配, 新指纹记为待确认, 释放指纹占用。只写回同一代次的观测。
+// 整机重装闸门在时(供给方已重装、收尾任务连到新系统)保持 needs_reimage: 只能经重装确认(提交新指纹)回到可售路径。
 func (r *Repository) markKeyMismatch(tx *sqlx.Tx, id int64, gen int, pinned, observed string) (bool, error) {
-	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='key_mismatch', host_fp_claim=NULL, status='offline',
+	return affected(tx.Exec(`UPDATE supplier_nodes SET
+		verify_status=CASE WHEN reimage_required_at IS NULL THEN 'key_mismatch' ELSE 'needs_reimage' END,
+		host_fp_claim=NULL, status='offline',
 		host_key_fingerprint=?, host_key_confirmed_at=NULL
 		WHERE id=? AND mgmt_mode='ssh' AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL
 		  AND verify_status<>'suspended' AND generation=?`, observed, id, pinned, gen))
@@ -190,10 +195,13 @@ type Inventory struct {
 // markVerified 完整探活通过: 只允许 verifying(本次入队的完整探活)与 verified(周期补跑)→ verified, 且须同一代次、
 // 连接信息与钉死指纹未变。failed/needs_reimage/key_mismatch/suspended 必须先经供给方/运营操作回到 verifying。
 func (r *Repository) markVerified(tx *sqlx.Tx, id int64, g connGuard, gen int, fp string, inv *Inventory) (bool, error) {
+	// T-089 重装闸门: 整机租约结束未确认重装(reimage_required_at 非空)不得写回; 指纹仍是租期内的旧指纹
+	// (reimage_prev_fp, 买家曾持有 root 可读取主机私钥)亦不得写回。
 	const where = `id=? AND mgmt_mode='ssh' AND ssh_host=? AND ssh_port=? AND ssh_user=?
 		  AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL AND generation=?
-		  AND verify_status IN ('verifying','verified')`
-	res, err := tx.Exec(`UPDATE supplier_nodes SET verify_status='verified', verified_at=NOW(), host_fp_claim=?,
+		  AND verify_status IN ('verifying','verified')
+		  AND reimage_required_at IS NULL AND (reimage_prev_fp IS NULL OR reimage_prev_fp<>host_key_fingerprint)`
+	res, err := tx.Exec(`UPDATE supplier_nodes SET verify_status='verified', verified_at=NOW(), host_fp_claim=?, reimage_prev_fp=NULL,
 		cpu_cores=?, mem_gb=?, disk_free_gb=?, disk_quota_supported=?, driver_version=?, cuda_version=?,
 		status='online', last_heartbeat_at=NOW(), last_probe_ok_at=NOW(), probe_fail_count=0
 		WHERE `+where,
@@ -241,8 +249,24 @@ func (r *Repository) suspend(tx *sqlx.Tx, id int64) (bool, error) {
 
 // resume 运营恢复: 代次 +1(停用前入队/运行的探活不能复用, 也不能把恢复后的节点直接改回 verified)。
 func (r *Repository) resume(tx *sqlx.Tx, id int64) (bool, error) {
-	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='unverified', verified_at=NULL, generation=generation+1
+	// 停用期间整机租约结束(重装闸门已置, T-089): 恢复到 needs_reimage, 须供给方重装确认后才能再探活上架。
+	return affected(tx.Exec(`UPDATE supplier_nodes SET
+		verify_status=CASE WHEN reimage_required_at IS NULL THEN 'unverified' ELSE 'needs_reimage' END,
+		verified_at=NULL, generation=generation+1
 		WHERE id=? AND mgmt_mode='ssh' AND verify_status='suspended'`, id))
+}
+
+// markNeedsReimage 整机租约(买家曾持有 root)结束: 置重装闸门并记下租期内的钉死指纹, 节点 → needs_reimage
+// (运营停用中的节点保持 suspended, 恢复时落到 needs_reimage); 代次 +1, 释放指纹占用。幂等(闸门已置不重复记)。
+// 调用方须在同一事务内已锁住节点行。
+func (r *Repository) markNeedsReimage(tx *sqlx.Tx, id int64) error {
+	_, err := tx.Exec(`UPDATE supplier_nodes SET
+		reimage_prev_fp=CASE WHEN reimage_required_at IS NULL THEN host_key_fingerprint ELSE reimage_prev_fp END,
+		reimage_required_at=COALESCE(reimage_required_at, NOW()),
+		verify_status=CASE WHEN verify_status='suspended' THEN 'suspended' ELSE 'needs_reimage' END,
+		host_fp_claim=NULL, verified_at=NULL, generation=generation+1
+		WHERE id=? AND mgmt_mode='ssh'`, id)
+	return err
 }
 
 func (r *Repository) deleteNode(tx *sqlx.Tx, id, supplierID int64) (bool, error) {

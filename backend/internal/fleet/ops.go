@@ -36,40 +36,6 @@ func (s *Service) Verify(supplierID, nodeID int64) (int64, error) {
 	return taskID, err
 }
 
-// ReimageConfirm 整机租约结束后供给方确认已重装: 重置指纹钉死并入队完整探活(新系统须重新确认指纹)。
-func (s *Service) ReimageConfirm(supplierID, nodeID int64, ip string) (int64, error) {
-	var taskID int64
-	err := s.inTx(func(tx *sqlx.Tx) error {
-		n, err := s.ownedNode(tx, supplierID, nodeID)
-		if err != nil {
-			return err
-		}
-		if n.VerifyStatus != VerifyNeedsReimage {
-			return errcode.New(errcode.Conflict, "仅待重装(needs_reimage)的节点可确认重装")
-		}
-		// 代次 +1: 重装前入队/在跑的探活(针对旧系统)结论作废。
-		ok, err := affected(tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=NULL, host_key_confirmed_at=NULL, host_fp_claim=NULL,
-			generation=generation+1
-			WHERE id=? AND mgmt_mode='ssh' AND verify_status='needs_reimage'`, nodeID))
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errcode.New(errcode.Conflict, "节点状态已变化, 请刷新后重试")
-		}
-		if err := s.repo.audit(tx, supplierID, "node.reimage_confirmed", "supplier_node", nodeID,
-			map[string]any{"fingerprint": n.HostKeyFingerprint}, nil, ip); err != nil {
-			return err
-		}
-		if !n.sshReady() {
-			return nil
-		}
-		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "reimage_confirm", 5)
-		return err
-	})
-	return taskID, err
-}
-
 // ProbeReports 探活报告(不含凭证), limit 默认 10、最大 50。
 func (s *Service) ProbeReports(supplierID, nodeID int64, limit int) ([]ProbeReport, error) {
 	if _, err := s.getOwned(supplierID, nodeID); err != nil {
@@ -236,6 +202,7 @@ func (s *Service) Suspend(operatorID, nodeID int64, reason, ip string) error {
 func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 	var node *Node
 	var taskID int64
+	var reimage bool
 	err := s.inTx(func(tx *sqlx.Tx) error {
 		n, err := s.repo.lockNode(tx, nodeID)
 		if err != nil {
@@ -252,11 +219,17 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 		if !ok {
 			return errcode.New(errcode.Conflict, "节点不在停用状态")
 		}
+		to := VerifyUnverified
+		if n.ReimageRequiredAt != nil {
+			// 停用期间整机租约结束(T-089): 恢复到 needs_reimage, 不入队探活, 等供给方重装确认。
+			to = VerifyNeedsReimage
+		}
 		if err := s.repo.audit(tx, operatorID, "node.resumed", "supplier_node", nodeID,
-			map[string]any{"verify_status": VerifySuspended}, map[string]any{"verify_status": VerifyUnverified}, ip); err != nil {
+			map[string]any{"verify_status": VerifySuspended}, map[string]any{"verify_status": to}, ip); err != nil {
 			return err
 		}
-		if !n.sshReady() {
+		if !n.sshReady() || to == VerifyNeedsReimage {
+			reimage = to == VerifyNeedsReimage
 			return nil
 		}
 		n.VerifyStatus = VerifyUnverified
@@ -265,6 +238,10 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 	})
 	if err != nil {
 		return 0, err
+	}
+	if reimage {
+		s.notify(node.SupplierID, "节点已恢复, 待重装", fmt.Sprintf("节点「%s」已被平台运营恢复; 该节点的整机租约已结束, 请重装操作系统后在控制台确认重装, 通过完整探活后恢复接单。", node.NodeName), nodeID)
+		return 0, nil
 	}
 	s.notify(node.SupplierID, "节点已恢复", fmt.Sprintf("节点「%s」已被平台运营恢复, 正在重新探活, 通过后恢复接单。", node.NodeName), nodeID)
 	return taskID, nil

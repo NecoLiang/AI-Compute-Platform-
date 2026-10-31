@@ -86,6 +86,11 @@ func TestPluginOverGRPC(t *testing.T) {
 			UpstreamHostKeyFP: ssh.FingerprintSHA256(host), CacheTTLS: 30},
 		login + "|pw:s3cret": {Allow: true, UpstreamHost: "2001:db8::5", UpstreamPort: 47002,
 			UpstreamHostKeyFP: ssh.FingerprintSHA256(host), CacheTTLS: 30},
+		// 整机交付(T-089): 主服务指定上游账户; 非法账户名网关拒绝。
+		login + "|pw:bare": {Allow: true, UpstreamHost: "10.1.2.4", UpstreamPort: 22,
+			UpstreamHostKeyFP: ssh.FingerprintSHA256(host), UpstreamUser: "omnis-l-abcdefgh", CacheTTLS: 30},
+		login + "|pw:evil": {Allow: true, UpstreamHost: "10.1.2.4", UpstreamPort: 22,
+			UpstreamHostKeyFP: ssh.FingerprintSHA256(host), UpstreamUser: "root;id", CacheTTLS: 30},
 	}}
 	gw := accessgw.NewGateway(api, nil)
 
@@ -144,6 +149,18 @@ func TestPluginOverGRPC(t *testing.T) {
 	}
 	if _, err := c.PasswordAuth(ctx, &libplugin.PasswordAuthRequest{Meta: meta, Password: []byte("nope")}); err == nil {
 		t.Fatal("wrong password must be rejected")
+	}
+	bm, err := c.PasswordAuth(ctx, &libplugin.PasswordAuthRequest{Meta: &libplugin.ConnMeta{UserName: login, FromAddr: "198.51.100.9:2",
+		UniqId: "conn-3"}, Password: []byte("bare")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bm.GetUpstream().GetUserName() != "omnis-l-abcdefgh" || bm.GetUpstream().GetUri() != "tcp://10.1.2.4:22" {
+		t.Fatalf("bare-metal upstream %v", bm.GetUpstream())
+	}
+	if _, err := c.PasswordAuth(ctx, &libplugin.PasswordAuthRequest{Meta: &libplugin.ConnMeta{UserName: login, FromAddr: "198.51.100.9:3",
+		UniqId: "conn-4"}, Password: []byte("evil")}); err == nil {
+		t.Fatal("invalid upstream user must be rejected")
 	}
 
 	if r, err := c.VerifyHostKey(ctx, &libplugin.VerifyHostKeyRequest{Meta: meta, Key: host.Marshal(), Hostname: "10.1.2.3:47001"}); err != nil || !r.GetVerified() {

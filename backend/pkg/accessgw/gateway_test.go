@@ -435,3 +435,16 @@ func TestAllowLoopbackOnlySetInTests(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidUpstreamUser(t *testing.T) {
+	for _, u := range []string{"omnis-l-abcdefgh", "root", "_svc", "a"} {
+		if !ValidUpstreamUser(u) {
+			t.Errorf("%q should be valid", u)
+		}
+	}
+	for _, u := range []string{"", "Root", "-x", "1abc", "a b", "a;id", "a$(id)", "a/b", strings.Repeat("a", 33), "omnis-l-ä"} {
+		if ValidUpstreamUser(u) {
+			t.Errorf("%q should be invalid", u)
+		}
+	}
+}

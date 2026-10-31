@@ -165,6 +165,11 @@ func validateSSHTarget(ctx context.Context, d *Dialer, host string, port int, us
 	return nil
 }
 
+// errReusedHostKey 整机租约结束后提交的指纹与租期内钉死的旧指纹相同(T-089): 买家曾持有 root, 可读取旧主机私钥,
+// 沿用即无法排除中间人, 一律拒绝。
+var errReusedHostKey = errcode.New(errcode.ParamInvalid,
+	"该指纹为整机租期内使用的旧主机指纹(买家曾持有 root, 旧主机私钥视为已泄露), 请重装系统(或至少重新生成主机密钥)后提交新指纹")
+
 // parseExpectedFingerprint 校验供给方填写的预期主机指纹; 空串表示未填写。
 func parseExpectedFingerprint(fp string) (string, error) {
 	fp = strings.TrimSpace(fp)
@@ -216,6 +221,9 @@ func (s *Service) UpdateSSH(ctx context.Context, supplierID, nodeID int64, in SS
 		}
 		if n.VerifyStatus == VerifySuspended {
 			return errcode.New(errcode.Conflict, "节点已被运营停用, 不能修改连接信息")
+		}
+		if expected != "" && n.ReimagePrevFP != nil && expected == *n.ReimagePrevFP {
+			return errReusedHostKey
 		}
 		old := guardOf(n)
 		// 首次填写连接信息(此前从未有 host)不算"换机器": 保留创建节点时预置的指纹。
@@ -395,6 +403,15 @@ func (s *Service) handleKeyMismatch(nodeID int64, gen int, pinned, observed stri
 	if n == nil {
 		return
 	}
+	if n.ReimageRequiredAt != nil {
+		// 整机待重装节点指纹变化 = 供给方已重装, 属预期: 不告警, 提示走重装确认。
+		slog.Info("待重装整机节点主机指纹已变化(疑已重装), 等待重装确认", "node_id", nodeID, "observed", observed)
+		s.notify(n.SupplierID, "节点主机指纹已变化, 请提交重装确认",
+			fmt.Sprintf("节点「%s」检测到新的 SSH 主机指纹 %s。如已完成重装, 请在机器上执行 %s 核对后, 在节点页提交重装确认并填写该指纹。",
+				n.NodeName, observed, fingerprintCheckCommand), nodeID)
+		s.refreshHealth(n)
+		return
+	}
 	slog.Error("运营告警: 托管节点主机指纹变化, 已停止新分配", "node_id", nodeID, "pinned", pinned, "observed", observed)
 	s.notify(n.SupplierID, "节点主机指纹发生变化",
 		fmt.Sprintf("节点「%s」的 SSH 主机指纹与已确认值不一致(已确认 %s, 本次 %s), 平台已停止向其分配新租约。"+
@@ -419,6 +436,12 @@ func (s *Service) ConfirmHostKey(supplierID, nodeID int64, fingerprint, ip strin
 		}
 		if n.HostKeyFingerprint == nil || *n.HostKeyFingerprint == "" {
 			return errcode.New(errcode.Conflict, "平台尚未观测到该节点的主机指纹, 请先发起探活")
+		}
+		if n.ReimageRequiredAt != nil {
+			return errcode.New(errcode.Conflict, "节点的整机租约已结束、待重装, 请重装后调用重装确认(reimage-confirm)并提交新主机指纹")
+		}
+		if n.ReimagePrevFP != nil && fp == *n.ReimagePrevFP {
+			return errReusedHostKey
 		}
 		observed := *n.HostKeyFingerprint
 		if fp != observed {

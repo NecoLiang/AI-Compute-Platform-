@@ -78,6 +78,9 @@ type Node struct {
 	HostKeyFingerprint *string    `db:"host_key_fingerprint" json:"host_key_fingerprint"`
 	HostKeyConfirmedAt *time.Time `db:"host_key_confirmed_at" json:"host_key_confirmed_at"`
 	HostFPClaim        *string    `db:"host_fp_claim" json:"-"`
+	// ReimageRequiredAt 整机租约结束后的重装闸门(T-089, docs/25 §25.7.4): 非空期间节点不能回到可售。
+	ReimageRequiredAt  *time.Time `db:"reimage_required_at" json:"reimage_required_at,omitempty"`
+	ReimagePrevFP      *string    `db:"reimage_prev_fp" json:"-"`
 	VerifyStatus       string     `db:"verify_status" json:"verify_status"`
 	Generation         int        `db:"generation" json:"-"` // 探活代次(见 ProbePayload.Generation)
 	Schedulable        bool       `db:"schedulable" json:"schedulable"`
@@ -102,7 +105,7 @@ type Node struct {
 
 const nodeColumns = `id, supplier_id, product_id, node_name, status, total_cards, available_cards, last_heartbeat_at,
 	mgmt_mode, ssh_host, ssh_port, ssh_user, mgmt_pubkey, mgmt_privkey_encrypted, host_key_fingerprint,
-	host_key_confirmed_at, host_fp_claim, verify_status, generation, schedulable, dispatch_hold, dispatch_hold_reason, verified_at, last_probe_ok_at,
+	host_key_confirmed_at, host_fp_claim, reimage_required_at, reimage_prev_fp, verify_status, generation, schedulable, dispatch_hold, dispatch_hold_reason, verified_at, last_probe_ok_at,
 	probe_fail_count, cpu_cores, mem_gb, disk_free_gb, disk_per_card_gb, disk_quota_supported,
 	driver_version, cuda_version, lease_port_start, lease_port_end, created_at, updated_at`
 

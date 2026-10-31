@@ -79,7 +79,12 @@ func NewPluginConfig(gw *accessgw.Gateway, upstreamKey []byte, upstreamUser stri
 	upstream := func(r *accessgw.Route) *libplugin.Upstream {
 		// v1.6.1 中 host/port 字段已弃用, 用 uri(tcp://host:port, IPv6 带方括号)。上游主机密钥由 VerifyHostKey 回调校验
 		// (该 RPC 优先于 known_hosts_data)。
-		return &libplugin.Upstream{Uri: "tcp://" + net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), UserName: upstreamUser,
+		// 整机交付(T-089)由主服务指定上游账户(omnis-<lease_no>, 网关已校验格式); 容器交付用默认账户。
+		user := upstreamUser
+		if r.User != "" {
+			user = r.User
+		}
+		return &libplugin.Upstream{Uri: "tcp://" + net.JoinHostPort(r.Host, strconv.Itoa(r.Port)), UserName: user,
 			Auth: libplugin.CreatePrivateKeyAuth(upstreamKey)}
 	}
 	return libplugin.SshPiperPluginConfig{

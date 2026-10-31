@@ -3,7 +3,7 @@
 **Base**: `http://localhost:8080/api/v1` | **Auth**: 供给方接口需 supplier 角色（只能操作自己商品下的节点）；运营接口需 operator/admin
 **设计**：`docs/25`（§25.4 节点接入、§25.8.1 节点状态机、§25.10 API 摘要）。本文件为正式接口契约。
 
-> **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）；S2（T-086）买家公钥、连接信息、会话记录（「买家连接」）与运营租约/会话检索（「运营接口」）。
+> **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-089）整机托管与重装确认；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）；S2（T-086）买家公钥、连接信息、会话记录（「买家连接」）与运营租约/会话检索（「运营接口」）。
 > 托管订单的下单、开通、取消退款口径见 [compute-api.md](compute-api.md)「托管订单（S2）」与 [payment-api.md](payment-api.md)「托管订单（S2）」。续租（extend/restart）、冻结/解冻的订单侧接口见 compute-api.md「托管订单续租」「托管订单冻结与解冻」；租约侧的到期、宽限、清除回执、冻结效果与挖矿特征扫描见本文「租约生命周期（S2 T-087/T-088）」。
 
 **开关**：所有接口仅在 `fleet.enabled=true` 时注册。关闭时（默认）这些路径未注册（HTTP 404），`POST /supplier/nodes` 传 `mgmt_mode:"ssh"` 返回 40001「托管履约未启用(fleet.enabled=false)」，托管商品不可提交审核与下单（40001），人工模式行为不变。
@@ -24,7 +24,7 @@
 | `verified` | 探活通过，生成卡槽，计入可售 | 卡槽停用、排空 |
 | `failed` | 完整探活未通过（节点同时置 `status=offline`） | 修复后重新发起探活 |
 | `key_mismatch` | SSH 主机指纹与已确认值不一致，停止新分配 | 核对后确认新指纹（自动继续探活） |
-| `needs_reimage` | 整机租约结束待重装（S2 写入） | 重装后调用重装确认 |
+| `needs_reimage` | 整机（`bare_metal`）租约结束待重装（S2 T-089 写入：到期/退款/取消/冻结中到期，买家曾持有 root） | 重装系统后调用重装确认（提交新主机指纹）；在此之前修改 SSH、确认指纹、发起探活、运营恢复都不会让节点回到可售 |
 | `suspended` | 运营停用 | 无（只读） |
 
 `schedulable`（是否接受新分配）独立于上表，由排空/恢复切换。`status`（online/offline）由 fleet 的 SSH 轻量探活判定，scheduler 的心跳清扫不处理 ssh 节点。
@@ -105,6 +105,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 - `expected_host_fingerprint`（可选，**推荐**）：格式同 POST /supplier/nodes，非法 40001（连接信息不保存）。提交即覆盖当前指纹并钉死为已确认（审计 `node.host_key_preconfirmed`，旧值记入 `before`）。
 - `bootstrap_password`（可选；建议与 `expected_host_fingerprint` 同时提供，或改用手动加公钥）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。存在钉死指纹（已确认或本次/建节点时提交的预期指纹）时，引导在 SSH 握手的主机密钥校验阶段比对，不一致即中止——**密码不会发出**——返回 40900「主机指纹 <实际> 与已确认/预期指纹 <钉死> 不一致: 握手阶段已中止, 一次性密码未发送…」，节点转 `key_mismatch` 并记录实际观测指纹（可经 host-key/confirm 确认，或改正连接信息/预期指纹后重试）。
 - `suspended` 节点 40900。
+- **待重装闸门**（T-089）：整机租约结束后（`needs_reimage`，库内 `reimage_required_at` 非空）可以保存新的连接信息（重装后 IP/端口可能变化），但节点**保持 `needs_reimage`**，不回 `unverified`；`expected_host_fingerprint` 等于租期内的旧指纹 → 40001「该指纹为整机租期内使用的旧主机指纹(买家曾持有 root, 旧主机私钥视为已泄露)…」（连接信息不保存）。
 
 **响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。无钉死指纹时引导成功后 `host_key.fingerprint` 为本次观测到的指纹（未确认）；有预期/已确认指纹时为该指纹且 `confirmed:true`。
 
@@ -122,6 +123,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 - 与平台观测值一致才钉死，并自动入队完整探活（`task_id` 为 0 表示 SSH 信息不全未入队）。
 - 40001 指纹不一致（返回平台观测值与核对命令）；40900 尚未观测到指纹 / `suspended`。
 - 从 `key_mismatch` 确认新指纹写审计 `node.host_key_reconfirmed`。
+- 整机待重装（`needs_reimage`，或重装后探活观测到新指纹时）→ 40900「…请重装后调用重装确认(reimage-confirm)并提交新主机指纹」；指纹等于整机租期内的旧指纹 → 40001。待重装节点只能走 reimage-confirm。
 
 ## GET /supplier/nodes/:id/probe-reports?limit= · 探活报告 ✅
 
@@ -157,9 +159,18 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 
 切换 `schedulable`（重复调用幂等），存量租约不受影响；写审计并重算库存。响应 `{"schedulable":false|true}`。
 
-## POST /supplier/nodes/:id/reimage-confirm · 重装确认 ✅
+## POST /supplier/nodes/:id/reimage-confirm · 重装确认 ✅（T-089 起须提交新指纹）
 
-仅 `needs_reimage` 可调（否则 40900）。节点 → `verifying`，清除指纹钉死后入队完整探活（重装前已在跑的探活结论作废）：新系统首次连接会再次进入「确认主机指纹」。响应 `{"task_id":125}`。
+`{"expected_host_fingerprint":"SHA256:..."}` → `{"task_id":125}`
+
+整机租约结束后，供给方在节点上**重装操作系统**（新系统会生成新的 SSH 主机密钥），按上架说明重新放行管理公钥后调用。平台据此把节点送回验收：
+
+- `expected_host_fingerprint` **必填**：新系统的 SSH 主机密钥指纹（核对命令同上架说明：`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）。缺失/格式非法 → 40001；请求体非 JSON → 40001。
+- 指纹必须**已经变化**：等于整机租期内的旧指纹（库内 `reimage_prev_fp`，缺省取当前已确认指纹）→ 40001「该指纹为整机租期内使用的旧主机指纹…」。主机密钥未变即视为未重装：买家曾持有 root，可能已读取旧主机私钥或留下后门。
+- 可调状态：`needs_reimage`；或闸门仍在、探活连到新系统后被记为指纹不符的节点。其他状态 40900「仅待重装(needs_reimage)的节点可确认重装」。节点不属于本人 40400。
+- 节点上仍有**冻结中**（`suspended`，运营核查中）的整机租约 → 40900「节点上有冻结核查中的租约…」；有其他在租/开通中的租约 → 40900。
+- 节点上停在 `purging` 的整机租约（清除任务因节点已重装连不上或指纹不符而反复失败）随重装确认**结案**：租约 → `purged`、卡槽 `draining → free`、未执行的 `stop/purge` 任务作废（`failed`），写清除回执（`executor="supplier_reimage"`，`steps=[{"step":"account","target":"omnis-<lease_no>","outcome":"reimaged"}]`，`reason`「节点已由供给方重装确认(新主机指纹), 租约账户随系统重装清除」）。
+- 成功：新指纹钉死为已确认（`host_key_confirmed_at` 写入），清除重装闸门，节点代次 +1（重装前入队/在跑的探活结论作废），节点 → `verifying` 并入队**完整探活**（`trigger=reimage_confirm`，P1–P13 全量，含压测）；探活**连接时以新指纹校验**，不一致 → `key_mismatch`，一致且全部必检项通过 → `verified` 并重新计入可售。写审计 `node.reimage_confirmed`（`before`：原 `verify_status` 与指纹；`after`：新指纹与 `finalized_leases` 结案租约号）。
 
 ---
 
@@ -219,6 +230,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ```
 
 - `gateway_host/port` 来自 `accessgw.public_host/public_port`；`login` 即租约号，换节点/续租不变。**不返回节点地址与容器端口。**
+- 整机订单（T-089）登录方式相同（`ssh -p <gateway_port> <login>@<gateway_host>`），落地为宿主机账户 `omnis-<login>`，`sudo` 免密；整机无宽限，`grace_until` 恒为 `null`，到期即断开，**家目录与买家写入的数据随节点重装清除，须在到期前自行导出**。
 - 能否登录以 `lease_state=active` 且未过 `access_until` 为准；其他状态（`pending/provisioning/parked/suspended/grace/...`）照常返回本结构，前端据 `lease_state` 提示。
 - **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单「该订单为人工交付, 没有网关连接信息」；40400 订单尚无租约。
 
@@ -251,10 +263,10 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 | 任务 | 周期 | 作用 |
 |---|---|---|
-| 到期扫描 | 30s | 在租到期 → grace；冻结中到期 → 停容器释放卡；宽限期满 → 清除 |
-| 到期提醒 | 1min | 到期前 24h / 2h / 30min 站内通知 + 容器内 `wall`；进入宽限的站内通知（需 Redis，未配置时不发提醒） |
+| 到期扫描 | 30s | 在租到期 → grace（整机无宽限 → 直接清除 + 节点待重装）；冻结中到期 → 停容器释放卡（整机：撤权限保留账户 + 节点待重装）；宽限期满 → 清除 |
+| 到期提醒 | 1min | 到期前 24h / 2h / 30min 站内通知 + 容器内 `wall`（整机只发站内通知）；进入宽限的站内通知（需 Redis，未配置时不发提醒） |
 | 挖矿特征扫描 | `fleet.mining.interval`，默认 10min | 见下文「挖矿特征扫描」 |
-| 对账 | 5min | 收尾任务补入队；在租容器与节点实况对账，节点重启后恢复 |
+| 对账 | 5min | 收尾任务补入队；在租容器与节点实况对账，节点重启后恢复（整机租约不做容器对账） |
 | 停机扫描 | 1min | 在租租约逐个判定停机开始/结束并结算补偿（见「停机认定与补偿」） |
 | 信用重算 | 10min | 重算托管供给方信用分并同步节点 `dispatch_hold` |
 
@@ -307,6 +319,31 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 - 租约 `active/parked` → `suspended`（记 `suspended_at`，刷新撤销游标，网关新登录立即被拒），入队 `kill_sessions`（优先级 1）断开现有会话。**容器不停、GPU 不释放**（保留核查现场；冻结期间仍计入供给方占用）。
 - 租约不在租（`reserved/pending/provisioning/grace/...`）：租约状态不动，只刷新撤销游标；开通中的流水线发现订单 `frozen` 即放弃。
 - 解冻见 compute-api.md「托管订单冻结与解冻」。
+
+### 整机（`bare_metal`）租约（docs/25 §25.7.4，S2 T-089）
+
+整机交付把一台节点的**全部卡**租给一个买家，买家以宿主机上的专属账户登录并拥有免密 sudo（root）。与分卡容器的差异：
+
+| 环节 | 分卡容器 | 整机 |
+|---|---|---|
+| 分配 | 单台节点凑齐 N 卡 | 只分配全部卡空闲的节点，`cards` 必须等于节点总卡数 |
+| 开通 | 建网络/数据卷/容器、放行租约端口、自检 | 宿主机建账户 `omnis-<lease_no>`（`useradd -m`，口令字段 `*` 不可口令登录）、`authorized_keys` 只写网关上游公钥并带 `from="<网关出口 IPv4>"`、`/etc/sudoers.d/omnis-<lease_no>` 免密 sudo（`visudo -cf` 校验后落盘）、自检只做 GPU UUID 核对；**不占租约端口段**（`port_claim` 为空） |
+| 网关路由 | 上游 = 节点 IP + 租约端口，上游账户 root | 上游 = 节点 IP + 节点管理 SSH 端口（宿主机 sshd），`upstream_host_key_fp` = 节点已确认主机指纹（开通时快照），上游账户 `omnis-<lease_no>`（`/auth` 返回 `upstream_user`） |
+| 冻结 | 断开会话，容器不停 | 只结束该账户的 sshd 会话进程（`kill_sessions`），买家其他进程保留作核查现场；新登录由网关拒绝 |
+| 到期 / 运营解冻时已过期 | → `grace`，停容器、保留数据卷 | **无宽限**：直接 `purging` + 入队 `purge`，节点同事务 → `needs_reimage` |
+| 冻结中到期 | 停容器释放卡，保留现场 | `stop`：撤 sudo 与公钥、结束账户全部进程，**账户与家目录保留**作核查现场（`result.account="locked"`）；节点同事务 → `needs_reimage` |
+| 取消/退款（在租或冻结中） | → `purging` | 同左，并且节点 → `needs_reimage` |
+| 清除 | 删容器/卷/网络/提交镜像 | 撤 sudo 与公钥 → 结束账户全部进程（最多 10 轮）→ `userdel -r` 删账户与家目录；买家以 root 留下的其他内容**不在清除范围**，由供给方重装兜底 |
+| 续租 | 宽限期内 restart 回原节点 | 只能在到期前 `extend`；到期后原节点待重装，`restart` 在清除完成后按全新整机分配（`purging` 期间 40900） |
+| 到期提醒 | 站内信 + 容器内 `wall` | 只发站内信（不在买家可控的宿主机上执行 `wall`） |
+| 挖矿扫描 / 在租对账 | 扫描 / 对账 | 不扫描、不做容器对账（见下文） |
+
+- 宿主机 root 操作的执行方式：管理账户只在 docker 组（不新增 sudo），经管理 SSH 通道下发 `docker run --rm --privileged --pid host --network none -v /:/host --entrypoint chroot <探针镜像> /host /bin/sh -c '<base64 脚本>'`，脚本由平台生成值（租约号、网关上游公钥、出口 IP）逐项白名单校验后拼装。宿主机须具备 `useradd/userdel/usermod/pkill/pgrep/visudo/getent` 与 `/etc/sudoers.d`，缺失时开通任务失败并给出可读原因（如「宿主机缺少 visudo…」），按任务重试/换节点。
+- 开通前提：`accessgw.egress_ips`（网关出口 IP）至少一个 IPv4（`from=` 限制来源），否则开通失败。
+- 开通中取消（买家从未拿到访问权）：只删除账户（`lease.cleanup` 回执），节点**不**转待重装。
+- 整机清除回执（`lease.purged` / `lease.cleanup`）：`container/volume/network/commit_image` 省略，新增 `"account":"omnis-<lease_no>"`；`steps=[{"step":"account","target":"omnis-<lease_no>","outcome":"removed"|"absent"|"reimaged"}]`；`port_rules`「整机租约无端口段规则…」；`erasure`「删除租约账户、家目录、sudoers 授权与网关公钥并结束账户进程; 买家以 root 身份留下的其他内容不在清除范围, 节点已转待重装(needs_reimage)…」。`stop` 任务结果 `{"container":"absent","account":"locked",...}`。
+- 清除完成后供给方收到站内信「整机节点待重装」，买家收到「算力环境已清除」。节点重装后走「重装确认」；**重装闸门**（`reimage_required_at`）存在期间修改 SSH 信息、确认指纹、发起探活、运营恢复停用都不会让节点回到可售，探活结论也不能写回 `verified`。
+- 若供给方在清除完成前就重装了系统，清除任务连接时指纹不符（节点保持 `needs_reimage`，不转 `key_mismatch`、不报运营告警，只提醒供给方提交重装确认），重装确认时该租约随之结案。
 
 ### 挖矿特征扫描（docs/25 §25.7.3，Q-42 / Q-09）
 
@@ -402,7 +439,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 ### POST /admin/nodes/:id/resume · 恢复节点 ✅
 
-→ `{"verify_status":"unverified","task_id":126}`。恢复后自动入队完整探活，**通过后才回到 `verified`**（停用期间卡槽已释放，须重新核验）。40900 节点不在停用状态。
+→ `{"verify_status":"unverified","task_id":126}`。恢复后自动入队完整探活，**通过后才回到 `verified`**（停用期间卡槽已释放，须重新核验）。停用期间整机租约已结束（重装闸门存在）的节点恢复为 `needs_reimage`、不入队探活（`task_id:0`），等供给方重装确认（T-089）。40900 节点不在停用状态。
 
 ### GET /admin/node-tasks?state=&node_id=&page=&page_size= · 节点任务 ✅
 
@@ -536,6 +573,8 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 {"code":0,"message":"success","data":{"allow":true,"upstream_host":"203.0.113.20","upstream_port":40001,"upstream_host_key_fp":"SHA256:Zq0n6n9Lr0m7y3G2b1J1p3b5fK0wQ3Xc9eN8uT4sV2A","access_until":"2026-11-27T10:00:00+08:00","cache_ttl_s":30},"request_id":"..."}
 ```
 
+整机租约（T-089）放行时多一个 `"upstream_user":"omnis-l-7f3k9q2a"`，`upstream_port` 为节点管理 SSH 端口：网关以该账户登录宿主机 sshd（仍用网关上游私钥，宿主机侧该公钥带 `from=` 网关出口 IP 限制）。字段缺省 = 网关默认上游账户（`--upstream-user`，容器交付为 `root`）。网关校验账户名（小写字母/数字/`_`/`-`，首字符字母或 `_`，≤32 位），非法即拒绝该次登录。
+
 拒绝：
 
 ```json
@@ -556,7 +595,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 |---|---|
 | 来源 IP 处于封禁期（10 分钟内密码失败 20 次 → 封 30 分钟，按规范化后的 IP） | 拒绝（所有方式） |
 | `password` 且「登录名+IP」处于锁定期（10 分钟内失败 10 次 → 锁 15 分钟） | 拒绝（公钥不受影响） |
-| 租约 `state=active`、`delivery_kind=container`、`now < access_until`、已有上游端口与主机指纹 | 才进入凭证比对 |
+| 租约 `state=active`、`delivery_kind` 为 `container` 或 `bare_metal`（T-089）、`now < access_until`、已有上游端口与主机指纹 | 才进入凭证比对 |
 | 公钥：指纹属于租约买家且 `revoked_at IS NULL` / 密码：等于订单访问凭证（常量时间比较） | 放行，`cache_ttl_s = min(30, access_until − now)` |
 | 系统身份 | 仅 `provisioning` 且路由齐全的租约放行；不计数、不受封禁 |
 

@@ -155,7 +155,8 @@ func TestMarkVerifiedRejectsFailedAndNeedsReimage(t *testing.T) {
 	}
 }
 
-// 重装确认走 needs_reimage → verifying(重置指纹 + 代次 +1): 旧系统上的在跑探活结论作废, 新系统须重新确认指纹后才 verified。
+// 重装确认走 needs_reimage → verifying(钉死供给方提交的新指纹 + 代次 +1): 必须提交新主机指纹且与旧指纹不同(T-089),
+// 探活按新指纹严格校验后直接 verified, 不再走 TOFU。
 func TestReimageConfirmGoesThroughVerifying(t *testing.T) {
 	db := setupFleetDB(t)
 	seedManaged(t, db)
@@ -163,24 +164,32 @@ func TestReimageConfirmGoesThroughVerifying(t *testing.T) {
 	s.gateway = &stubGateway{}
 	fake := newFakeNode(t, genPW)
 	id := onboardVerified(t, s, fake, "gpu-gen-4", 47560)
+	oldFP := fake.Fingerprint()
 	db.MustExec(`UPDATE supplier_nodes SET verify_status='needs_reimage', host_fp_claim=NULL WHERE id=?`, id)
 	db.MustExec(`DELETE FROM gpu_slots WHERE node_id=?`, id)
 
-	taskID, err := s.ReimageConfirm(10, id, "")
+	_, err := s.ReimageConfirm(10, id, "", "")
+	assert.Equal(t, errcode.ParamInvalid, codeOf(err), "必须提交新主机指纹")
+	_, err = s.ReimageConfirm(10, id, "SHA256:short", "")
+	assert.Equal(t, errcode.ParamInvalid, codeOf(err))
+	_, err = s.ReimageConfirm(10, id, oldFP, "")
+	assert.Equal(t, errcode.ParamInvalid, codeOf(err), "主机密钥未变 = 未重装")
+	_, err = s.ReimageConfirm(11, id, oldFP, "")
+	assert.Equal(t, errcode.NotFound, codeOf(err))
+
+	newFP := fake.RotateHostKey()
+	taskID, err := s.ReimageConfirm(10, id, newFP, "")
 	require.NoError(t, err)
 	require.NotZero(t, taskID)
 	assert.Equal(t, VerifyVerifying, verifyStatus(t, s, id))
 	done := runTasks(t, s)
 	require.Len(t, done, 1)
 	o := outcomeOf(t, done[0])
-	assert.NotEmpty(t, o.AwaitingHostKey, "重装后须重新确认指纹")
-	assert.Equal(t, VerifyUnverified, verifyStatus(t, s, id))
-	_, err = s.ConfirmHostKey(10, id, fake.Fingerprint(), "")
-	require.NoError(t, err)
-	done = runTasks(t, s)
-	require.Len(t, done, 1)
-	require.True(t, outcomeOf(t, done[0]).Pass)
+	require.True(t, o.Pass, "按提交的新指纹严格校验通过")
+	assert.Empty(t, o.AwaitingHostKey)
 	assert.Equal(t, VerifyVerified, verifyStatus(t, s, id))
+	_, err = s.ReimageConfirm(10, id, newFP, "")
+	assert.Equal(t, errcode.Conflict, codeOf(err), "仅 needs_reimage 可确认")
 }
 
 // 排队中的 port_recheck 不能顶替完整探活: 请求完整探活时新入队完整探活并作废排队复检,

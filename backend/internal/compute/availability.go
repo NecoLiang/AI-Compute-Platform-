@@ -26,11 +26,10 @@ const (
 
 // 不可下单原因(available=false 时的 reason)。
 const (
-	reasonNightlyNotOpen  = "包夜预订尚未开放(夜间日历与每晚开停机待接入), 暂不可下单"
-	reasonSoldOut         = "商品已售罄"
-	reasonNodesOffline    = "供应方算力节点已全部离线, 该商品暂不可下单"
-	reasonBareMetalNotYet = "整机托管开通尚未接入(T-089), 暂不可下单"
-	reasonNoWholeNode     = "所选卡数暂无整机余量"
+	reasonNightlyNotOpen = "包夜预订尚未开放(夜间日历与每晚开停机待接入), 暂不可下单"
+	reasonSoldOut        = "商品已售罄"
+	reasonNodesOffline   = "供应方算力节点已全部离线, 该商品暂不可下单"
+	reasonNoWholeNode    = "所选卡数暂无整机余量"
 )
 
 // 租期起算规则(lease_preview.start_rule)。
@@ -201,9 +200,6 @@ func (s *Service) orderBlocker(p *Product, qty int, managed bool, policy trading
 	}
 	if !s.leaseWired() || s.leaseHooks.Feasible == nil {
 		return errManagedLeaseNotWired.Error(), nil
-	}
-	if p.DeliveryMode == "bare_metal" {
-		return reasonBareMetalNotYet, nil
 	}
 	ok, err := s.leaseHooks.Feasible(p, qty)
 	if err != nil {

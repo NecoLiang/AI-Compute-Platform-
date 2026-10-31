@@ -123,6 +123,19 @@ func (r *gwLeaseRoute) routable() bool {
 	return r.Port != nil && r.HostKeyFP != nil && *r.HostKeyFP != "" && r.Host != nil && *r.Host != ""
 }
 
+// upstreamUser 上游登录账户: 容器租约沿用网关默认(--upstream-user, 容器内账户); 整机租约为宿主机上的
+// omnis-<lease_no>(T-089)。未知交付方式返回 ok=false(拒绝)。
+func (r *gwLeaseRoute) upstreamUser(leaseNo string) (string, bool) {
+	switch r.DeliveryKind {
+	case "container":
+		return "", true
+	case "bare_metal":
+		u, err := bareMetalUser(leaseNo)
+		return u, err == nil
+	}
+	return "", false
+}
+
 func (g *GatewayAPI) leaseRoute(login string) (*gwLeaseRoute, error) {
 	var r gwLeaseRoute
 	err := g.s.repo.db.Get(&r, `SELECT l.id, l.order_id, l.buyer_id, l.state, l.delivery_kind, l.access_until, l.upstream_port,
@@ -201,7 +214,8 @@ func (g *GatewayAPI) check(ctx context.Context, req accessgw.AuthRequest) (*acce
 		return deny, err
 	}
 	now := g.now()
-	if r.State != LeaseActive || r.DeliveryKind != "container" || r.AccessUntil == nil || !now.Before(*r.AccessUntil) || !r.routable() {
+	user, kindOK := r.upstreamUser(req.Login)
+	if r.State != LeaseActive || !kindOK || r.AccessUntil == nil || !now.Before(*r.AccessUntil) || !r.routable() {
 		return deny, nil
 	}
 	switch req.Method {
@@ -230,7 +244,7 @@ func (g *GatewayAPI) check(ctx context.Context, req accessgw.AuthRequest) (*acce
 	ttl := min(accessgw.MaxCacheTTL, r.AccessUntil.Sub(now))
 	until := *r.AccessUntil
 	return &accessgw.AuthResponse{Allow: true, UpstreamHost: upstream, UpstreamPort: *r.Port, UpstreamHostKeyFP: *r.HostKeyFP,
-		AccessUntil: &until, CacheTTLS: int(ttl / time.Second)}, nil
+		UpstreamUser: user, AccessUntil: &until, CacheTTLS: int(ttl / time.Second)}, nil
 }
 
 // upstreamIP 网关(sshpiperd)连接上游时不经过主服务的拨号钩子, 因此由主服务按目标地址策略解析并校验节点 host,
@@ -270,7 +284,8 @@ func (g *GatewayAPI) systemAuth(ctx context.Context, login string) (*accessgw.Au
 	if err != nil || r == nil {
 		return deny, err
 	}
-	if r.DeliveryKind != "container" || !r.routable() {
+	user, kindOK := r.upstreamUser(login)
+	if !kindOK || !r.routable() {
 		return deny, nil
 	}
 	switch r.State {
@@ -291,7 +306,7 @@ func (g *GatewayAPI) systemAuth(ctx context.Context, login string) (*accessgw.Au
 		return nil, err
 	}
 	return &accessgw.AuthResponse{Allow: true, System: true, UpstreamHost: upstream, UpstreamPort: *r.Port,
-		UpstreamHostKeyFP: *r.HostKeyFP, CacheTTLS: 0}, nil
+		UpstreamHostKeyFP: *r.HostKeyFP, UpstreamUser: user, CacheTTLS: 0}, nil
 }
 
 // ===== 撤销游标 =====
