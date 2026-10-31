@@ -169,6 +169,8 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
 
 `:id` 为订单号（`ORD…`/`REN…`）。只读，不写库；提交部署（T-098）时服务端会**重新判定**，不信任本结果。
 
+整机(bare_metal)租约直接 40001「整机租用不支持一键部署(引擎依赖租约容器网络与配额); 整机租约可登录主机自行部署」，见下文「部署（买家）」。
+
 | 参数 | 必填 | 说明 |
 |---|:--:|---|
 | model_id | 是 | `GET /models` 返回的 id；非 active 条目 40400 |
@@ -322,6 +324,8 @@ type LeaseSource interface {
 `fleet.enabled=false` 时以下路由**不注册**（404，行为与 v1.1 一致）。已注册但运行期缺配置时写操作返回 50000 并说明缺什么：`fleet.model_cache_dir`、`fleet.model_pull_image`（须 `ref@sha256:<64hex>`）、`fleet.engine_port_range`（默认 `41000-41999`）；日志接口另需 Redis。
 
 所有接口先校验订单归属：订单号格式非法 40001；订单不存在**或不属于当前用户**统一 40400；`deploy_no` 不属于该订单 40400。
+
+**整机租约不支持一键部署**：订单的租约为整机（`GET /orders/:id/access` 的 `delivery_kind=bare_metal`）时，`GET .../deploy-plans` 与 `POST .../deployments` 都返回 `40001`，`message` 为「整机租用不支持一键部署(引擎依赖租约容器网络与配额); 整机租约可登录主机自行部署」，无 `data`，不写部署记录、不下发节点任务。前端应按 `delivery_kind` 直接隐藏「一键部署」入口，而不是靠此错误兜底。
 
 ### 部署对象 `DeploymentView`
 
