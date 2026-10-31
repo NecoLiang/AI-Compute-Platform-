@@ -206,30 +206,14 @@ func (s *Service) effectiveSeconds(q sqlx.Queryer, o *Outage) (int, error) {
 
 // liabilityAmount floor(订单实付 × secs ÷ 订单租期秒数), 不超过实付。租期按订单计费方式快照换算。
 func (s *Service) liabilityAmount(q sqlx.Queryer, orderID int64, secs int) (*int64, error) {
-	var o compute.Order
-	if err := sqlx.Get(q, &o, `SELECT id, order_no, total_amount, duration, pricing_mode, lease_start_at
-		FROM orders WHERE id=?`, orderID); err != nil {
-		return nil, err
-	}
-	if o.LeaseStart == nil {
-		return nil, fmt.Errorf("订单 %s 无租期起点", o.OrderNo)
-	}
-	mode, err := compute.OrderPricingMode(&o)
+	paid, term, err := orderTerm(q, orderID)
 	if err != nil {
 		return nil, err
 	}
-	end, err := compute.LeaseEndAt(*o.LeaseStart, mode, o.Duration, nil)
-	if err != nil {
-		return nil, err
-	}
-	term := int64(end.Sub(*o.LeaseStart) / time.Second)
 	if term <= 0 {
-		return nil, fmt.Errorf("订单 %s 租期非法(计费方式 %s)", o.OrderNo, mode)
+		return nil, fmt.Errorf("订单 %d 无有效租期(未开始或计费方式异常)", orderID)
 	}
-	amt := o.TotalAmount * int64(secs) / term
-	if amt > o.TotalAmount {
-		amt = o.TotalAmount
-	}
+	amt := min(paid*int64(secs)/term, paid)
 	return &amt, nil
 }
 

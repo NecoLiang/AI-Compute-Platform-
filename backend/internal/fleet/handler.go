@@ -38,6 +38,10 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/admin/node-tasks/:id/retry", h.RetryTask)
 	r.GET("/admin/leases", h.AdminLeases)
 	r.GET("/admin/access-sessions", h.AdminSessions)
+	r.GET("/admin/lease-outages", h.AdminOutages)
+	r.GET("/admin/supplier-credits", h.AdminCredits)
+	r.GET("/admin/supplier-credits/:id", h.AdminCredit)
+	r.PUT("/admin/supplier-credits/:id/override", h.AdminOverrideCredit)
 }
 
 // fail 业务错误原样返回; 未分类错误记日志并返回 50000(不向前端暴露 SQL 细节)。
@@ -283,6 +287,8 @@ func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
 	r.DELETE("/user/ssh-keys/:id", h.DeleteKey)
 	r.GET("/orders/:id/access", h.OrderAccess)
 	r.GET("/orders/:id/sessions", h.OrderSessions)
+	r.GET("/orders/:id/outages", h.OrderOutages)
+	r.PUT("/orders/:id/outage-remedy", h.SetOutageRemedy)
 }
 
 func pageQuery(c *gin.Context) (int, int) {
