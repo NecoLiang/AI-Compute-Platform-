@@ -201,6 +201,25 @@ curl -X PUT http://localhost:8080/api/v1/admin/config \
 
 `active` 条目不可编辑，修改须新建条目（`revision` 变化即为新模型）；`retired` 为终态。GPU 型号库 `PUT /admin/gpu-catalog/:id` 同期新增 `compute_capability` 字段，见 [gpu-catalog-api.md](gpu-catalog-api.md)。
 
+## 模型部署（v1.2 一键部署，`fleet.enabled=true` 时注册）
+
+### GET /admin/deployments?state=&health=&page=&page_size= · 全局查看部署
+
+operator/admin。`state` ∈ `pending/checking/pulling/starting/running/restarting/stopping/stopped/failed`，`health` ∈ `unknown/healthy/degraded/unhealthy`，均可选，非法取值 40001；`page_size` 1–100（缺省 20），按 id 新→旧。
+
+```json
+{"code":0,"message":"success","data":{"list":[{"deploy_no":"d-wynew4in","order_no":"TF20261031223030ABCD",
+ "model":{"id":3,"model_key":"qwen2.5-7b-instruct","display_name":"Qwen2.5 7B Instruct"},
+ "state":"running","health":"healthy","health_reason":null,"health_reason_text":null,"tp":2,"dp":1,
+ "max_model_len":32768,"gpu_mem_util":0.9,"gpu_uuids":["GPU-6f1c…","GPU-9a02…"],"canary_enabled":true,
+ "engine_cpus":63,"engine_memory_gb":508,"access":{"base_url":"http://omnis-engine:8000/v1","served_model":"qwen2.5-7b-instruct"},
+ "cache":null,"restart_count":0,"last_restart_at":null,"next_restart_at":null,"fail_reason":null,"stop_reason":null,
+ "started_at":"2026-10-31T20:41:05+08:00","stopped_at":null,"created_at":"2026-10-31T20:30:00+08:00",
+ "updated_at":"2026-10-31T20:41:05+08:00","buyer_id":21,"node_id":1}],"total":1,"page":1,"page_size":20},"request_id":"…"}
+```
+
+字段含义同买家 `DeploymentView`（[model-deploy-api.md](model-deploy-api.md#部署对象-deploymentview)），运营列表额外带 `buyer_id`、`node_id`，不含 `events`。运营暂无代停/代重启接口（买家自助；租约冻结/到期/清除时随租约自动停止）。
+
 ---
 
 ## 告警级别

@@ -6,7 +6,7 @@
 |---|---|
 | ✅ 已实现（T-096） | 模型目录 CRUD、真机验证记录、上线/退役（运营） |
 | ✅ 已实现（T-097） | `GET /models`；`GET /orders/:id/deploy-plans` 判定函数与接口；托管租约数据源已由 `internal/fleet` 接入（仅 `fleet.enabled=true` 时注入，否则固定 50000）。F3–F6 所需数据由周期探活采集（migration 031），**数据缺失或过期时对应项判"无法判定"、`feasible=false`**，见下文"数据源接入现状"；真机采集未验收 |
-| ⏳ 未实现（T-098/T-099） | `POST/GET /orders/:id/deployments*`、`GET /admin/deployments`（依赖 S2 托管租约与节点任务） |
+| ✅ 已实现（T-098/T-099） | `POST/GET /orders/:id/deployments*`、`GET /admin/deployments`；部署流水线（`deploy_model/pull_model/stop_model` 节点任务）、60s 健康轮询、自动重启、采样 7 天清理，均挂在 `internal/fleet` 运行期上（仅 `fleet.enabled=true`）。集成测试以测试内 SSH 服务器回放；**真机 GPU/vLLM、ModelScope 拉取未验收**（docs/27 §27.9 真机验收清单） |
 
 统一信封 `{code,message,data,request_id}`；错误码只用 40001/40100/40101/40300/40400/40900/42900/50000。
 
@@ -303,6 +303,183 @@ type LeaseSource interface {
 
 **未验收**：以上数据均由测试内 SSH 服务器按真实输出格式回放验证；真实 GPU 节点上的 `nvidia-smi` 字段别名、`journalctl`/`dmesg` 时间格式与权限、`topo -m` 矩阵、缓存目录 `df` 尚未在真机验收。
 
+**运行期接入（T-098/T-099）**：`backend/internal/fleet/model_deploy_runtime.go` 实现 `modeldeploy.Runtime`，main 中 `fleetSvc.AttachModelDeploy(modelDeploySvc)` + `modelDeploySvc.SetDeployRuntime(...)`（仅 `fleet.enabled=true`）。
+
+| 运行期能力 | 来源 |
+|---|---|
+| 节点命令（`Dial`） | fleet 管理通道 SSH（与开通/探活同一把节点密钥、主机指纹校验） |
+| `LeaseRuntime` | `leases`（状态、容器/网络名、`lease_no`）+ 租约卡槽 + 节点总配额扣除预留后按卡数折算的租约完整配额（`--cpus/--memory`） |
+| 任务入队（`Enqueue`） | `node_tasks`，与部署状态迁移**同一事务**；执行体 `deploy_model/pull_model/stop_model` 注册在 fleet worker |
+| `CardHealth`（L5） | 轻探活写入 `gpu_slots` 的逐卡遥测（温度/降频/ECC，3 分钟内为新鲜）+ `gpu_xid_events` 近 1 小时致命 Xid；**健康轮询不另跑 nvidia-smi** |
+| 租约钩子 | 冻结 `lease_frozen`、到期转宽限 `lease_expired`、清除 `lease_purged`：在 fleet 租约状态迁移的同一事务内调用 `StopForLeaseTx`；租约停止/清除命令也会删除残留引擎容器 |
+| 周期任务 | 健康轮询 60s（含拉取进度跟踪 `PollPulls`）；采样清理每日一次，删除 `sampled_at < now-7d` |
+| 实时检查 | 部署任务在节点上重新执行 F3（逐卡显存）/F4（缓存目录 `df`）/F6，并核对卡 UUID 属于本租约；不以快照为准 |
+
+---
+
+## 部署（买家，订单本人）✅（T-098/T-099，仅 `fleet.enabled=true` 时注册）
+
+`fleet.enabled=false` 时以下路由**不注册**（404，行为与 v1.1 一致）。已注册但运行期缺配置时写操作返回 50000 并说明缺什么：`fleet.model_cache_dir`、`fleet.model_pull_image`（须 `ref@sha256:<64hex>`）、`fleet.engine_port_range`（默认 `41000-41999`）；日志接口另需 Redis。
+
+所有接口先校验订单归属：订单号格式非法 40001；订单不存在**或不属于当前用户**统一 40400；`deploy_no` 不属于该订单 40400。
+
+### 部署对象 `DeploymentView`
+
+`GET` 详情、`POST` 提交/停止/重启均返回此结构（列表项不含 `events`；运营列表额外带 `buyer_id`、`node_id`）：
+
+```json
+{
+  "deploy_no": "d-wynew4in",
+  "order_no": "TF20261031223030ABCD",
+  "model": {"id": 3, "model_key": "qwen2.5-7b-instruct", "display_name": "Qwen2.5 7B Instruct"},
+  "state": "running",
+  "health": "degraded",
+  "health_reason": "capacity_saturated",
+  "health_reason_text": "请求排队且 KV 缓存已满，建议降低并发、缩短上下文或增加卡数",
+  "tp": 2,
+  "dp": 1,
+  "max_model_len": 32768,
+  "gpu_mem_util": 0.9,
+  "gpu_uuids": ["GPU-6f1c…", "GPU-9a02…"],
+  "canary_enabled": true,
+  "engine_cpus": 63,
+  "engine_memory_gb": 508,
+  "access": {
+    "base_url": "http://omnis-engine:8000/v1",
+    "served_model": "qwen2.5-7b-instruct",
+    "port_forward_cmd": "ssh -p 2222 -N -L 8000:omnis-engine:8000 l-7f3k9q2a@gw.omnisline.com"
+  },
+  "cache": null,
+  "restart_count": 1,
+  "last_restart_at": "2026-10-31T21:02:11+08:00",
+  "next_restart_at": null,
+  "fail_reason": null,
+  "stop_reason": null,
+  "started_at": "2026-10-31T20:41:05+08:00",
+  "stopped_at": null,
+  "events": [
+    {"kind": "auto_restart", "reason": "container_down", "detail": null, "created_at": "2026-10-31T21:02:11.412+08:00"},
+    {"kind": "running", "reason": null, "detail": null, "created_at": "2026-10-31T20:41:05.000+08:00"}
+  ],
+  "created_at": "2026-10-31T20:30:00+08:00",
+  "updated_at": "2026-10-31T21:05:00+08:00"
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `state` | `pending/checking/pulling/starting/running/restarting/stopping/stopped/failed`（§27.6） |
+| `health` | `unknown/healthy/degraded/unhealthy`；只在 `running/restarting` 有意义 |
+| `health_reason` | `container_down` `oom_killed` `health_failed` `canary_failed` `gpu_fatal`（unhealthy）；`capacity_saturated` `preempting` `ttft_slow` `gpu_hot` `ecc_corrected_rising` `recently_restarted`（degraded）；`node_unreachable`（unknown）。`health_reason_text` 为中文说明 |
+| `access` | 仅 `starting/running/restarting` 非 null。`base_url` 在租约容器内可用；`port_forward_cmd` 仅平台配置了网关地址时给出（否则省略） |
+| `cache` | 仅 `pulling` 时非 null：`{"state":"downloading","bytes_done":8053063680,"weights_bytes":16000000000}`；`state` 取 `downloading/ready/failed/evicting` |
+| `engine_cpus/engine_memory_gb` | 引擎容器配额（租约配额对半，见 docs/27 "S5 实现口径"），启动前为 null |
+| `next_restart_at` | 已排定的自动重启时间（退避中）；为 null 表示没有等待中的重启 |
+| `fail_reason` | `failed`（以及失败清理中的 `stopping`）时的原因；引擎日志末尾经 logs 接口 `source=stored` 读取 |
+| `stop_reason` | `buyer` `lease_expired` `lease_frozen` `lease_purged`（`nightly` 预留，未启用） |
+| `events` | 最近 20 条，新→旧；`kind`：`auto_restart` `manual_restart` `resume` `stop` `fail` `running` `degraded_notice` `unhealthy_notice` |
+
+### POST /orders/:id/deployments · 提交部署
+
+```json
+{"model_id": 3, "tp": 2, "dp": 1, "max_model_len": 32768, "gpu_mem_util": 0.90,
+ "canary_enabled": true, "license_ack": true, "untested_ack": false}
+```
+
+| 字段 | 规则 |
+|---|---|
+| `model_id/tp/dp` | 必填正整数；`tp×dp` 组合须在服务端**重新**判定出的 `plans` 内 |
+| `max_model_len` | 可省略/0 = 取所选方案上限；否则须在 `[min_context_tokens, 方案上限]` |
+| `gpu_mem_util` | 数字或字符串，`0.80–0.95`、最多两位小数；省略/null = 0.90 |
+| `canary_enabled` | 省略 = true |
+| `license_ack/untested_ack` | F7/F8 需要确认时必须为 true |
+
+成功返回 `DeploymentView`（`state=pending`），同事务入队 `deploy_model`。错误：
+
+| code | 场景 | `data` |
+|---|---|---|
+| 40001 | 参数非法；判定不通过 | `{"checks":[{id,ok,level,message}]}` |
+| 40001 | F7/F8 未确认 | `{"checks":[未确认的项]}` |
+| 40001 | `tp/dp` 不在可行方案内 | `{"plans":[…]}` |
+| 40001 | 非托管订单 | — |
+| 40400 | 订单不存在/非本人；模型不存在或未上线 | — |
+| 40900 | 已有未终止部署 | `{"deploy_no":"d-…","state":"running"}`（并发提交被唯一键拦下时无 data） |
+| 40900 | 租约非 `active`；租约可用（非故障）卡数不足 | — |
+| 50000 | 运行期未接入/缺配置（见上） | — |
+
+### GET /orders/:id/deployments · 部署历史
+
+```json
+{"list": [DeploymentView…], "total": 2}
+```
+新→旧，不含 `events`，不分页（单租约部署数有限）。
+
+### GET /orders/:id/deployments/:deploy_no · 详情
+
+返回 `DeploymentView`（含 `events`）。
+
+### GET /orders/:id/deployments/:deploy_no/health?range=1h|24h|7d · 健康曲线
+
+`range` 缺省 `1h`；其他值 40001。1h = 60 秒原始点；24h = 300 秒桶；7d = 3600 秒桶。
+
+```json
+{
+  "deploy_no": "d-wynew4in",
+  "range": "24h",
+  "bucket_seconds": 300,
+  "health": "healthy",
+  "health_reason": null,
+  "health_reason_text": null,
+  "baseline_canary_ms": 148,
+  "points": [
+    {"t": "2026-10-31T20:40:00+08:00", "container_up": 1, "health_ok": 1, "models_ok": 1, "canary_ok": 0.8,
+     "canary_ms": 152, "requests_running": 3.4, "requests_waiting": 0, "kv_usage_pct": 41.25,
+     "ttft_p50_ms": 180, "ttft_p95_ms": 420, "gen_tokens_per_s": 512.3, "prompt_tokens_per_s": 2210.5,
+     "preemptions": 0, "gpu_temp_max_c": 71, "throttled": 0, "health": "healthy"}
+  ]
+}
+```
+
+降采样口径：布尔列（`container_up/health_ok/models_ok/canary_ok`）取桶内比例 0–1；`canary_ms/ttft_p50_ms` 取平均取整；`requests_*`、`kv_usage_pct`、吞吐取平均（两位小数）；`ttft_p95_ms`、`gpu_temp_max_c`、`throttled` 取桶内最大；`preemptions` 取桶内增量之和；`health` 取桶内最差。原始点（1h）各列为 0/1 或实测值。所有数值列在未采集时为 null（如 L4 指标拉取失败、卡遥测超过 3 分钟未更新、金丝雀关闭）。
+
+### GET /orders/:id/deployments/:deploy_no/logs?tail=200 · 引擎日志
+
+`tail` 缺省 200，范围 1–1000（否则 40001）。每买家每部署每分钟 6 次（Redis 固定窗口），超出 42900。每次调用写审计 `audit_logs.action='model_deploy.view_logs'`（`target_type=model_deployment`，`after_value={"deploy_no","tail"}`，含 IP）。
+
+```json
+{"deploy_no": "d-wynew4in", "source": "live", "lines": ["INFO 10-31 20:41:02 api_server.py:… Started server process", "…"]}
+```
+
+`source=live`：部署处于 `starting/running/restarting` 时经管理通道 `docker logs --tail`；`source=stored`：节点不可达、容器已不存在或部署已结束时返回失败时留存的日志末尾（可能为空数组）。
+
+### POST /orders/:id/deployments/:deploy_no/stop · 停止
+
+返回 `DeploymentView`。可停止的状态 → `stopping`（`stop_reason=buyer`）并入队 `stop_model`（删除引擎容器、归还租约容器完整配额后 → `stopped`）。已是 `stopping/stopped/failed` 时直接返回当前状态（幂等）。
+
+### POST /orders/:id/deployments/:deploy_no/restart · 重启
+
+返回 `DeploymentView`。
+
+| 当前状态 | 行为 |
+|---|---|
+| `running` | → `restarting`（`manual_restart` 事件，`restart_count+1`），入队 `deploy_model` 重建引擎 |
+| `restarting` 且在退避等待 | 跳过等待立即重启 |
+| `stopped/failed` | 恢复：→ `pending`，重新走 checking/pulling/starting（`resume` 事件）；租约须 `active`，否则 40900；该租约已有其它未终止部署 40900 |
+| `pending/checking/pulling/starting/restarting`（进行中） | 幂等，返回当前状态 |
+| `stopping` | 40900 |
+
+手动重启不计入"1 小时 3 次"自动重启上限。
+
+## 部署（运营，operator/admin）✅
+
+### GET /admin/deployments?state=&health=&page=&page_size= · 全局查看
+
+`state/health` 可选，取值同上，非法 40001；`page_size` 1–100（缺省 20）。按 id 新→旧。
+
+```json
+{"list": [DeploymentView（含 buyer_id、node_id，不含 events）…], "total": 37, "page": 1, "page_size": 20}
+```
+
 ---
 
 ## 数据迁移
@@ -310,5 +487,7 @@ type LeaseSource interface {
 `backend/migrations/030_model_deployment.up.sql`：`gpu_catalog.compute_capability`、`supplier_nodes.model_cache_gb`，新建 `model_catalog`、`model_catalog_verifications`、`node_model_cache`、`model_deployments`、`deployment_health_samples`（结构同 docs/27 §27.7）。
 
 `backend/migrations/031_probe_telemetry.up.sql`（探活遥测，F3–F6 数据源）：`gpu_slots` 加逐卡遥测列（`vram_used_mb`/`vram_total_mb`/`temp_c`/`power_w`/`throttle_reasons`/`ecc_*`/`telemetry_at`）与两两拓扑（`topo_links`/`topo_at`）；`supplier_nodes` 加 Xid 覆盖区间（`xid_scan_ok_at`/`xid_covered_from`/`xid_scan_note`）与缓存目录容量（`cache_free_bytes`/`cache_total_bytes`/`cache_observed_at`/`cache_note`/`cache_source`）；新建 `gpu_xid_events`。down 为直接删除：全部是可由下一轮探活重新采集的遥测，不含业务数据（停机认定用 `leases.resource_alert` 与 T-105 自己的表）。
+
+`backend/migrations/035_model_deploy_runtime.up.sql`（T-098/T-099 运行期）：`model_deployments` 追加 `state_changed_at`、`next_restart_at`、`engine_cpus/engine_memory_gb`、`lease_cpus/lease_memory_gb`（租约**完整**配额，停止时据此归还）、`monitor_state`（跨轮判定状态 JSON）、`stop_reason` 与 `idx_order/idx_lease/idx_node_model`；`node_model_cache` 追加 `pull_container/pull_started_at`；新建 `deployment_events`。
 
 `030_model_deployment.down.sql` 无条件 `SIGNAL SQLSTATE '45000'`：部署记录、真机验证记录与健康采样属于业务数据，回退须经审计归档，禁止自动删除。
