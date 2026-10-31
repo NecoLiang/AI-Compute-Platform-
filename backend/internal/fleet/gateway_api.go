@@ -58,6 +58,7 @@ func NewGatewayAPI(s *Service, rdb *redis.Client, hmacSecret, selftestFP string)
 	if !strings.HasPrefix(selftestFP, "SHA256:") {
 		return nil, errors.New("系统自检身份指纹缺失")
 	}
+	s.gwWatch = true
 	return &GatewayAPI{s: s, rdb: rdb, secret: []byte(hmacSecret), selftestFP: selftestFP, now: time.Now}, nil
 }
 

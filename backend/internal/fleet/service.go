@@ -96,6 +96,10 @@ type Service struct {
 	taskTTL        time.Duration           // 任务锁租约, 0 = taskLeaseTTL(测试可缩短)
 	taskBeat       time.Duration           // 心跳续期间隔, 0 = taskHeartbeat
 
+	// gwWatch 本进程挂载了访问网关内部接口(NewGatewayAPI), 停机扫描据网关心跳认定 gateway_down; startedAt 进程启动时刻(启动宽限)。
+	gwWatch   bool
+	startedAt time.Time
+
 	// modelDeploy 一键部署(docs/27, T-098/T-099); nil = 未接入(AttachModelDeploy 未调用), 租约钩子与周期任务不涉及部署。
 	modelDeploy *modeldeploy.Service
 }
@@ -113,6 +117,7 @@ func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.A
 		cfg: cfg, gw: gw, gwEgress: gw.EgressIPs, credKey: credKey,
 		dialer:    dialer,
 		benchSecs: 60, sampleN: 6, sampleGap: 10,
+		startedAt: time.Now(),
 	}
 	s.registerExecutor(KindProvision, taskExecutor{timeout: provisionTimeout, run: s.runProvisionTask, onDead: s.onProvisionDead})
 	s.registerLeaseExecutors()

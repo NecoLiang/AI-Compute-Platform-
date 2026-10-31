@@ -238,6 +238,11 @@ func (s *Service) evaluateLease(ctx context.Context, leaseID int64, upObserved b
 		_, err := s.startOutage(leaseID, cause, detail, start)
 		return err
 	}
+	if since, down := s.gatewayDownSince(ctx, now); down {
+		// 网关失联期间对账 Up 观测也不结束(买家仍无法经网关登录)。
+		_, err := s.startOutage(leaseID, OutageGatewayDown, "访问网关自 "+since.Format("2006-01-02 15:04:05")+" 起未向主服务上报", since)
+		return err
+	}
 	if l.DeliveryKind == "container" && !upObserved {
 		return nil // 容器租约等对账确认恢复
 	}

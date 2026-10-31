@@ -399,7 +399,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | `full_probe_failed` | 12h 定时完整探活（或其他完整探活）未通过，节点 `verify_status=failed` | 停机扫描发现时刻（≤ 1min 延迟） | 供给方修复后重新发起完整探活并通过 | supplier |
 | `gpu_fault` | 轻量探活写入的租约 `resource_alert`（卡掉线 / UUID 变化 / ECC 等；对账自身写的告警不算） | 发现时刻 | 告警清除 | supplier |
 | `container_down` | 对账：容器缺失 / 非运行态 / 重启失败 / 读不到容器列表 | 对账观测时刻 | 对账确认容器在跑 | supplier |
-| `gateway_down` | 对账重启容器后经访问网关自检时，网关未接入、连不上或网关主机指纹不符 | 对账观测时刻 | 对账确认容器在跑（重启并通过网关自检） | platform |
+| `gateway_down` | ① 对账重启容器后经访问网关自检时，网关未接入、连不上或网关主机指纹不符；② 网关心跳失联：网关每 5s 经验签调用主服务内部接口，最后一次请求早于 3 分钟（主服务启动后 3 分钟内、从未收到网关请求时不认定） | ① 对账观测时刻；② 最后一次网关请求时间 | 网关恢复上报，且（容器租约）对账确认容器在跑 | platform |
 | `wrong_freeze` | 运营解冻时认定误冻结（`POST /admin/orders/:id/unfreeze` `wrong_freeze:true`） | 冻结时刻 `suspended_at` | 解冻时刻（直接记已结束的一段） | platform |
 | `provision_delay` / `night_unpark_failed` | 包夜计费未开放（T-094/T-095），S2 不产生 | — | — | — |
 

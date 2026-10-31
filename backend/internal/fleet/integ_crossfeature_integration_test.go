@@ -3,9 +3,11 @@ package fleet
 import (
 	"context"
 	"testing"
+	"time"
 
 	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/modeldeploy"
+	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/errcode"
 
 	"github.com/stretchr/testify/assert"
@@ -123,4 +125,51 @@ func TestCrossSettleBlockedOnUnknownOutageAmount(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "outage_amount_unknown", blocked)
 	assert.False(t, e.settleReady(t, e.order.ID))
+}
+
+// 网关存活(check 5): 网关验签请求刷新心跳; 心跳超过 gatewayStaleAfter 未刷新 → 在租租约记 gateway_down(平台责任,
+// 从最后一次心跳算起); 主服务启动宽限期内与心跳未知时不认定; 网关失联期间对账 Up 不结束, 恢复上报后结束。
+func TestCrossGatewayHeartbeatOutage(t *testing.T) {
+	e := newGWEnv(t, true)
+	ctx := context.Background()
+	e.s.SetRedis(e.rdb)
+	e.s.cfg.Outage = config.FleetOutage{MinMinutes: 5, RefundRatio: 0.10, RefundSingleHours: 2, MaxSupplierMinutes30d: 360}
+	e.db.MustExec(`UPDATE leases SET provisioned_at=NOW()-INTERVAL 1 HOUR WHERE id=?`, e.lease.ID)
+	require.NoError(t, e.rdb.Del(ctx, gatewayHeartbeatKey).Err())
+
+	_, err := e.client.Revocations(ctx, "")
+	require.NoError(t, err)
+	ms, err := e.rdb.Get(ctx, gatewayHeartbeatKey).Int64()
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), time.UnixMilli(ms), 5*time.Second)
+
+	stale := time.Now().Add(-20 * time.Minute)
+	e.rdb.Set(ctx, gatewayHeartbeatKey, stale.UnixMilli(), 0)
+	e.s.OutageRound(ctx)
+	assert.Empty(t, e.outages(t), "主服务启动宽限期内不认定")
+
+	e.s.startedAt = time.Now().Add(-time.Hour)
+	require.NoError(t, e.rdb.Del(ctx, gatewayHeartbeatKey).Err())
+	e.s.OutageRound(ctx)
+	assert.Empty(t, e.outages(t), "从未收到网关请求(心跳未知)不认定")
+
+	e.rdb.Set(ctx, gatewayHeartbeatKey, stale.UnixMilli(), 0)
+	e.s.OutageRound(ctx)
+	rows := e.outages(t)
+	require.Len(t, rows, 1)
+	assert.Equal(t, OutageGatewayDown, rows[0].Cause)
+	assert.Equal(t, "platform", rows[0].Liable)
+	assert.WithinDuration(t, stale, rows[0].StartedAt, 2*time.Second)
+	assert.Nil(t, rows[0].EndedAt)
+
+	e.recoverContainer(t)
+	require.Nil(t, e.outages(t)[0].EndedAt, "网关仍失联: 容器在跑也不结束")
+
+	_, err = e.client.Revocations(ctx, "")
+	require.NoError(t, err)
+	e.recoverContainer(t)
+	rows = e.outages(t)
+	require.Len(t, rows, 1)
+	require.NotNil(t, rows[0].EndedAt, "网关恢复上报 + 对账确认在跑 → 结束")
+	require.NotNil(t, rows[0].Counted)
 }

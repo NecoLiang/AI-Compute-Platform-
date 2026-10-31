@@ -56,6 +56,7 @@ func (g *GatewayAPI) verify(c *gin.Context) {
 		g.reject(c, "nonce 重放")
 		return
 	}
+	g.touchGatewayHeartbeat(c.Request.Context())
 	c.Next()
 }
 
