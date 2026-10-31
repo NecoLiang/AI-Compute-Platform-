@@ -1066,7 +1066,9 @@ type PlaceOrderReq struct {
 	Quantity  int   `json:"quantity"`
 	Duration  int   `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
 	// PricingMode v1.2: 零租多价格商品选择计费方式; 省略取商品展示主价方式(兼容旧前端)。
-	PricingMode       string `json:"pricing_mode"`
+	PricingMode string `json:"pricing_mode"`
+	// NightStartDate 包夜必填(YYYY-MM-DD, Asia/Shanghai): 首晚窗口开始的日期; duration 为晚数(docs/26 §26.6)。
+	NightStartDate    string `json:"night_start_date"`
 	ComplianceAgreed  bool   `json:"compliance_agreed"`
 	ComplianceVersion string `json:"compliance_version"`
 }
@@ -1240,8 +1242,24 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	}
 
 	// 参数与价格的预校验(事务外, 失败不占用交易配置锁); 事务内以锁定的费率按同一纯函数重算。
-	if _, err := QuoteOrder(p, req.PricingMode, req.Quantity, req.Duration, 0); err != nil {
+	pre, err := QuoteOrder(p, req.PricingMode, req.Quantity, req.Duration, 0)
+	if err != nil {
 		return nil, err
+	}
+	// 包夜: 起始夜晚必填并校验可订范围(当晚截止为窗口开始后 2 小时, Q-36), 窗口与起始夜晚快照进订单。
+	var nightStart *time.Time
+	var nightWin NightWindow
+	if pre.Price.PricingMode == PricingNightly {
+		if nightWin, err = NightOrderWindow(p); err != nil {
+			return nil, err
+		}
+		d, err := ParseNightStartDate(strings.TrimSpace(req.NightStartDate), pre.Duration, nightWin, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		nightStart = &d
+	} else if strings.TrimSpace(req.NightStartDate) != "" {
+		return nil, errcode.New(errcode.ParamInvalid, "night_start_date 仅适用于包夜计费")
 	}
 	tx, err := s.beginManagedAware(managed)
 	if err != nil {
@@ -1279,6 +1297,13 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		Status:           "pending_payment",
 		PaymentExpires:   &expires,
 		ComplianceAgreed: req.ComplianceAgreed,
+	}
+	if nightStart != nil {
+		if price.PricingMode != PricingNightly {
+			return nil, fmt.Errorf("商品计费方式已变化, 请刷新后重新下单")
+		}
+		startMin, endMin := nightWin.StartMin, nightWin.EndMin
+		o.NightStartDate, o.NightStartMin, o.NightEndMin = nightStart, &startMin, &endMin
 	}
 
 	if managed {

@@ -32,9 +32,11 @@ var (
 	// ErrPricingModeDisabled 该计费方式未开放或已停用。续租时映射为 40900(提示重新下单),
 	// 下单时由调用方改写为 40001 参数错误。
 	ErrPricingModeDisabled = errors.New("该计费方式已停用，请重新下单")
-	// errNightlyNotWired 包夜下单/续租依赖夜间预订防重与每晚开停机(docs/24 T-094/T-095), 未接入前明确 50000,
-	// 不落成按小时或全天交付的订单。
-	errNightlyNotWired = errcode.New(errcode.InternalError, "包夜计费的下单与续租尚未接入(docs/26 §26.6, T-094/T-095), 暂不可下单或续租")
+	// errNightlyNotWired 包夜续租(在同一组卡上追加后续晚, docs/26 §26.6.3)尚未实现, 明确 50000,
+	// 不落成按小时或全天交付的续租单。
+	errNightlyNotWired = errcode.New(errcode.InternalError, "包夜订单暂不支持续租(追加晚数尚未接入, docs/26 §26.6.3), 请重新下单")
+	// errNightlyHooksNotWired 包夜预订/日历依赖 fleet 注入的夜间钩子(T-094), 未注入时明确 50000。
+	errNightlyHooksNotWired = errcode.New(errcode.InternalError, "包夜预订模块未接入(fleet 未注入夜间预订/日历钩子), 暂不可预订包夜")
 	// ErrOrderPricingModeMissing 订单缺计费方式快照(orders.pricing_mode 为空)。028 回填后不应出现,
 	// 出现即数据异常, 返回 50000 由平台核对, 不猜测按商品当前方式计算租期或报价。
 	ErrOrderPricingModeMissing = errors.New("订单缺少计费方式快照, 无法计算租期或续租报价, 请联系平台核对")

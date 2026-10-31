@@ -34,6 +34,7 @@ func (h *Handler) RegisterMarketRoutes(r *gin.RouterGroup) {
 	r.GET("/trading-config", h.GetTradingConfig)
 	r.GET("/products/:id", h.GetProduct)
 	r.GET("/products/:id/availability", h.ProductAvailability)
+	r.GET("/products/:id/night-calendar", h.ProductNightCalendar)
 }
 
 func (h *Handler) RegisterAuthenticatedRoutes(r *gin.RouterGroup) {
@@ -192,6 +193,36 @@ func (h *Handler) GetProduct(c *gin.Context) {
 		"credit":        credit,
 		"supplier_name": supplierName,
 	})
+}
+
+// ProductNightCalendar GET /products/:id/night-calendar?cards=&from=&days= (docs/26 §26.9): 包夜每晚单节点最多可订卡数。
+func (h *Handler) ProductNightCalendar(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.NotFound, "商品不存在")
+		return
+	}
+	cards, err := nonNegativeIntQuery(c, "cards")
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	days, err := positiveIntQuery(c, "days", 0)
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	out, err := h.svc.NightCalendar(c.Request.Context(), c.GetInt64("user_id"), id, cards, strings.TrimSpace(c.Query("from")), days)
+	if err != nil {
+		code := ErrToCode(err)
+		msg := err.Error()
+		if code == errcode.NotFound {
+			msg = "商品不存在"
+		}
+		response.Error(c, code, msg)
+		return
+	}
+	response.Success(c, out)
 }
 
 // ProductAvailability GET /products/:id/availability (docs/26 §26.9): 报价 + 可租性, 只计算不预留。
