@@ -168,7 +168,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 - `expected_host_fingerprint` **必填**：新系统的 SSH 主机密钥指纹（核对命令同上架说明：`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）。缺失/格式非法 → 40001；请求体非 JSON → 40001。
 - 指纹必须**已经变化**：等于整机租期内的旧指纹（库内 `reimage_prev_fp`，缺省取当前已确认指纹）→ 40001「该指纹为整机租期内使用的旧主机指纹…」。主机密钥未变即视为未重装：买家曾持有 root，可能已读取旧主机私钥或留下后门。
 - 可调状态：`needs_reimage`；或闸门仍在、探活连到新系统后被记为指纹不符的节点。其他状态 40900「仅待重装(needs_reimage)的节点可确认重装」。节点不属于本人 40400。
-- 节点上仍有**冻结中**（`suspended`，运营核查中）的整机租约 → 40900「节点上有冻结核查中的租约…」；有其他在租/开通中的租约 → 40900。
+- 节点上仍有**冻结中**（`suspended`，运营核查中）的整机租约 → 40900「节点上的租约 l-… 处于冻结核查中, 现场须保留, 待运营结案后再重装确认」；有其他在租/开通中的租约 → 40900。
 - 节点上停在 `purging` 的整机租约（清除任务因节点已重装连不上或指纹不符而反复失败）随重装确认**结案**：租约 → `purged`、卡槽 `draining → free`、未执行的 `stop/purge` 任务作废（`failed`），写清除回执（`executor="supplier_reimage"`，`steps=[{"step":"account","target":"omnis-<lease_no>","outcome":"reimaged"}]`，`reason`「节点已由供给方重装确认(新主机指纹), 租约账户随系统重装清除」）。
 - 成功：新指纹钉死为已确认（`host_key_confirmed_at` 写入），清除重装闸门，节点代次 +1（重装前入队/在跑的探活结论作废），节点 → `verifying` 并入队**完整探活**（`trigger=reimage_confirm`，P1–P13 全量，含压测）；探活**连接时以新指纹校验**，不一致 → `key_mismatch`，一致且全部必检项通过 → `verified` 并重新计入可售。写审计 `node.reimage_confirmed`（`before`：原 `verify_status` 与指纹；`after`：新指纹与 `finalized_leases` 结案租约号）。
 
@@ -460,7 +460,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
   {"id":5,"lease_no":"l-4g7bq4xc","order_id":88,"buyer_id":21,"product_id":12,"node_id":7,"cards":2,
    "delivery_kind":"container","state":"active","upstream_port":40000,
    "upstream_host_key_fp":"SHA256:...","container_name":"omnis-l-4g7bq4xc","volume_name":"omnis-l-4g7bq4xc-data",
-   "access_until":"2026-11-28T10:00:00+08:00","access_changed_at":"2026-10-28T10:00:00+08:00","grace_until":null,
+   "access_until":"2026-11-28T10:00:00+08:00","access_changed_at":"2026-10-28T10:00:00+08:00","grace_until":null,"suspended_at":null,
    "provisioned_at":"2026-10-28T10:00:00+08:00","purged_at":null,"fail_reason":null,
    "resource_alert":null,"outage_remedy":"extend",
    "created_at":"2026-10-28T09:58:00+08:00","updated_at":"2026-10-28T10:00:00+08:00"}],

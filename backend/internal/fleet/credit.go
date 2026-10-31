@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jmoiron/sqlx"
 
@@ -312,6 +313,9 @@ func (s *Service) AdminOverrideCredit(operatorID, supplierID int64, mode, reason
 	}
 	if mode != "auto" && reason == "" {
 		return nil, errcode.New(errcode.ParamInvalid, "放行或停调度必须填写理由")
+	}
+	if utf8.RuneCountInString(reason) > 254 {
+		return nil, errcode.New(errcode.ParamInvalid, "理由不得超过 254 字")
 	}
 	if _, err := s.AdminSupplierCredit(supplierID); err != nil { // 校验存在 + 确保行已建
 		return nil, err

@@ -416,7 +416,7 @@ type LeaseSource interface {
 
 ### GET /orders/:id/deployments/:deploy_no · 详情
 
-返回 `DeploymentView`（含 `events`）。
+返回 `DeploymentView`（含 `events`，最近 20 条；列表接口不带 `events` 字段）。
 
 ### GET /orders/:id/deployments/:deploy_no/health?range=1h|24h|7d · 健康曲线
 

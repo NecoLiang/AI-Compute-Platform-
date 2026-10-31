@@ -103,7 +103,7 @@ curl "http://localhost:8080/api/v1/admin/risk/alerts?level=high&page=1&page_size
 
 ## 托管节点（v1.2，`fleet.enabled=true`）
 
-完整契约见 [managed-rental-api.md](managed-rental-api.md#运营接口)。
+完整契约见 [managed-rental-api.md](managed-rental-api.md#运营接口)。租约列表 `GET /admin/leases`、访问会话 `GET /admin/access-sessions` 等运营接口只在该文档中定义。
 
 ### GET /admin/nodes · 节点总览
 托管节点附带 `managed`（最近探活结论 / 卡槽统计 / 指纹确认状态）。
@@ -151,6 +151,8 @@ docs/25 §25.7.6「供给方约束」的运营发起路径（买家自助申请�
 | 部分退款通道未打开（`fleet.outage.yeepay_partial_refund_confirmed=false` 或未接入） | 50000 |
 
 ### GET /admin/payment/partial-refunds · 部分退款列表（S2 T-106）
+> 本接口属 payment 模块，**不受 `fleet.enabled` 影响、始终注册**（放在本节仅因与停机补偿/违约退款相关）。
+
 `?status=pending|processing|success|failed&order_no=&page=&page_size=`（`page_size` ≤ 100），按 id 倒序，分页信封 `{list,total,page,page_size}`。`list[]`：
 
 ```json

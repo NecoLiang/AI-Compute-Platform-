@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -430,6 +431,8 @@ func TestCreditStopsDispatch(t *testing.T) {
 	assert.Equal(t, errcode.ParamInvalid, codeOf(err), "放行须填理由")
 	_, err = s.AdminOverrideCredit(1, 20, "pause", "x", "127.0.0.1")
 	assert.Equal(t, errcode.ParamInvalid, codeOf(err))
+	_, err = s.AdminOverrideCredit(1, 20, "allow", strings.Repeat("理", 255), "127.0.0.1")
+	assert.Equal(t, errcode.ParamInvalid, codeOf(err), "理由超过 254 字须 40001 而不是静默截断")
 	_, err = s.AdminSupplierCredit(999)
 	assert.Equal(t, errcode.NotFound, codeOf(err))
 	d, err := s.AdminOverrideCredit(1, 20, "allow", "已核实为探活镜像问题", "127.0.0.1")
