@@ -36,40 +36,6 @@ func (s *Service) Verify(supplierID, nodeID int64) (int64, error) {
 	return taskID, err
 }
 
-// ReimageConfirm 整机租约结束后供给方确认已重装: 重置指纹钉死并入队完整探活(新系统须重新确认指纹)。
-func (s *Service) ReimageConfirm(supplierID, nodeID int64, ip string) (int64, error) {
-	var taskID int64
-	err := s.inTx(func(tx *sqlx.Tx) error {
-		n, err := s.ownedNode(tx, supplierID, nodeID)
-		if err != nil {
-			return err
-		}
-		if n.VerifyStatus != VerifyNeedsReimage {
-			return errcode.New(errcode.Conflict, "仅待重装(needs_reimage)的节点可确认重装")
-		}
-		// 代次 +1: 重装前入队/在跑的探活(针对旧系统)结论作废。
-		ok, err := affected(tx.Exec(`UPDATE supplier_nodes SET host_key_fingerprint=NULL, host_key_confirmed_at=NULL, host_fp_claim=NULL,
-			generation=generation+1
-			WHERE id=? AND mgmt_mode='ssh' AND verify_status='needs_reimage'`, nodeID))
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errcode.New(errcode.Conflict, "节点状态已变化, 请刷新后重试")
-		}
-		if err := s.repo.audit(tx, supplierID, "node.reimage_confirmed", "supplier_node", nodeID,
-			map[string]any{"fingerprint": n.HostKeyFingerprint}, nil, ip); err != nil {
-			return err
-		}
-		if !n.sshReady() {
-			return nil
-		}
-		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "reimage_confirm", 5)
-		return err
-	})
-	return taskID, err
-}
-
 // ProbeReports 探活报告(不含凭证), limit 默认 10、最大 50。
 func (s *Service) ProbeReports(supplierID, nodeID int64, limit int) ([]ProbeReport, error) {
 	if _, err := s.getOwned(supplierID, nodeID); err != nil {

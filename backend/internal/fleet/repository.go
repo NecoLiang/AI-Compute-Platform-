@@ -130,8 +130,11 @@ func (r *Repository) confirmHostKey(tx *sqlx.Tx, id int64, fp string) (bool, err
 }
 
 // markKeyMismatch 钉死指纹与观测不一致: 停止新分配, 新指纹记为待确认, 释放指纹占用。只写回同一代次的观测。
+// 整机重装闸门在时(供给方已重装、收尾任务连到新系统)保持 needs_reimage: 只能经重装确认(提交新指纹)回到可售路径。
 func (r *Repository) markKeyMismatch(tx *sqlx.Tx, id int64, gen int, pinned, observed string) (bool, error) {
-	return affected(tx.Exec(`UPDATE supplier_nodes SET verify_status='key_mismatch', host_fp_claim=NULL, status='offline',
+	return affected(tx.Exec(`UPDATE supplier_nodes SET
+		verify_status=CASE WHEN reimage_required_at IS NULL THEN 'key_mismatch' ELSE 'needs_reimage' END,
+		host_fp_claim=NULL, status='offline',
 		host_key_fingerprint=?, host_key_confirmed_at=NULL
 		WHERE id=? AND mgmt_mode='ssh' AND host_key_fingerprint=? AND host_key_confirmed_at IS NOT NULL
 		  AND verify_status<>'suspended' AND generation=?`, observed, id, pinned, gen))

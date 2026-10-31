@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
-	"tokenfactory/pkg/errcode"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -43,7 +42,7 @@ func (s *Service) wrongFreeze(leaseID int64, frozenAt, unfrozenAt time.Time) {
 }
 
 // leaseFeasible 只读可行性(GET /products/:id/availability): 与 reserveSlotsTx 相同的候选规则
-// (allocCandidates), 但不加锁不写库。整机交付(bare_metal)未接入, 由 compute 侧先行拦截。
+// (allocCandidates), 但不加锁不写库。整机交付(bare_metal)要求整机全部空闲且卡数 = 节点总卡数。
 func (s *Service) leaseFeasible(p *compute.Product, cards int) (bool, error) {
 	if p == nil || cards <= 0 {
 		return false, nil
@@ -61,11 +60,7 @@ func (s *Service) reserveLeaseTx(tx *sqlx.Tx, o *compute.Order, p *compute.Produ
 		return fmt.Errorf("订单尚未写入, 无法建租约")
 	}
 	kind := p.DeliveryMode
-	if kind == "bare_metal" {
-		// 整机托管的开通(物理机交付、带外重装)属 T-089, 未接入前不接受下单, 避免收款后无法交付。
-		return errcode.New(errcode.InternalError, "整机托管开通尚未接入(T-089), 暂不可下单")
-	}
-	if kind != "container" {
+	if kind != "container" && kind != "bare_metal" {
 		return fmt.Errorf("托管商品交付方式非法: %q", kind)
 	}
 	l := &Lease{OrderID: o.ID, BuyerID: o.BuyerID, ProductID: p.ID, Cards: o.Quantity, DeliveryKind: kind}

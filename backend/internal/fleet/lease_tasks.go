@@ -92,7 +92,8 @@ func (r *Repository) moveLeaseSlotsOnNode(tx *sqlx.Tx, leaseID, nodeID int64, fr
 // StopOutcome stop 任务结果(node_tasks.result)。GPUs 为容器原卡, restart 续租优先在原卡上 docker start。
 type StopOutcome struct {
 	LeaseNo    string   `json:"lease_no"`
-	Container  string   `json:"container"` // stopped / absent
+	Container  string   `json:"container"`         // stopped / absent
+	Account    string   `json:"account,omitempty"` // 整机(T-089): locked = 已撤权限并结束进程, 账户保留
 	GPUs       []string `json:"gpus,omitempty"`
 	FreedSlots int64    `json:"freed_slots"`
 }
@@ -128,21 +129,34 @@ func (s *Service) runStopTask(ctx context.Context, t *Task) (any, error) {
 		return nil, err
 	}
 	defer client.Close()
-	cmd, err := stopContainerCommand(l.LeaseNo)
-	if err != nil {
-		return nil, errTaskAborted{err.Error()}
-	}
-	out, err := runRemote(ctx, client, cmd, stopTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("停止租约容器失败: %w", err)
-	}
-	exists, gpus, err := parseStopped(out)
-	if err != nil {
-		return nil, err
-	}
-	res := StopOutcome{LeaseNo: l.LeaseNo, Container: "absent", GPUs: gpus}
-	if exists {
-		res.Container = "stopped"
+	var res StopOutcome
+	if l.DeliveryKind == "bare_metal" {
+		// 整机(T-089): 撤 sudo 与网关公钥、结束账户全部进程, 账户与家目录保留(冻结中到期的核查现场)。
+		tag, _, err := s.bareMetalTeardown(ctx, client, l.LeaseNo, true)
+		if err != nil {
+			return nil, err
+		}
+		res = StopOutcome{LeaseNo: l.LeaseNo, Container: "absent"}
+		if tag == "locked" {
+			res.Account = "locked"
+		}
+	} else {
+		cmd, err := stopContainerCommand(l.LeaseNo)
+		if err != nil {
+			return nil, errTaskAborted{err.Error()}
+		}
+		out, err := runRemote(ctx, client, cmd, stopTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("停止租约容器失败: %w", err)
+		}
+		exists, gpus, err := parseStopped(out)
+		if err != nil {
+			return nil, err
+		}
+		res = StopOutcome{LeaseNo: l.LeaseNo, Container: "absent", GPUs: gpus}
+		if exists {
+			res.Container = "stopped"
+		}
 	}
 	err = s.inTx(func(tx *sqlx.Tx) error {
 		cur, err := s.repo.lockLease(tx, l.ID)
@@ -189,6 +203,7 @@ type PurgeReceipt struct {
 	Container    string      `json:"container"`
 	Volume       string      `json:"volume"`
 	Network      string      `json:"network"`
+	Account      string      `json:"account,omitempty"` // 整机租约(T-089): 宿主机租约账户
 	CommitImage  string      `json:"commit_image,omitempty"`
 	UpstreamPort *int        `json:"upstream_port,omitempty"`
 	PortRules    string      `json:"port_rules"`
@@ -225,13 +240,21 @@ func (s *Service) runPurgeTask(ctx context.Context, t *Task) (any, error) {
 	if !ValidLeaseNo(l.LeaseNo) {
 		return nil, errTaskAborted{"租约号非法"}
 	}
-	commit := deref(l.CommitImage)
-	steps, err := s.purgeResources(ctx, t.NodeID, containerNameOf(l.LeaseNo), volumeNameOf(l.LeaseNo), networkNameOf(l.LeaseNo), commit)
-	if err != nil {
-		return nil, err
+	var steps []PurgeStep
+	var receipt PurgeReceipt
+	if l.DeliveryKind == "bare_metal" {
+		if steps, err = s.bareMetalPurgeSteps(ctx, t.NodeID, l.LeaseNo); err != nil {
+			return nil, err
+		}
+		receipt = s.bareMetalReceipt(l, t.NodeID, steps, pl.Reason)
+	} else {
+		commit := deref(l.CommitImage)
+		if steps, err = s.purgeResources(ctx, t.NodeID, containerNameOf(l.LeaseNo), volumeNameOf(l.LeaseNo), networkNameOf(l.LeaseNo), commit); err != nil {
+			return nil, err
+		}
+		receipt = s.receiptFor(l, t.NodeID, steps, pl.Reason)
 	}
 	out := PurgeOutcome{LeaseNo: l.LeaseNo, Steps: steps}
-	receipt := s.receiptFor(l, t.NodeID, steps, pl.Reason)
 	var purged bool
 	err = s.inTx(func(tx *sqlx.Tx) error {
 		cur, err := s.repo.lockLease(tx, l.ID)
@@ -262,10 +285,17 @@ func (s *Service) runPurgeTask(ctx context.Context, t *Task) (any, error) {
 	}
 	if purged {
 		slog.Info("租约已清除", "lease_no", l.LeaseNo, "node_id", t.NodeID, "freed", out.FreedSlots)
+		what := "容器与数据卷已删除(逻辑删除)"
+		if l.DeliveryKind == "bare_metal" {
+			what = "整机租约账户及其家目录已删除, 访问已撤销"
+		}
 		if o, err := s.products.ManagedOrderByID(l.OrderID); err == nil && o != nil {
 			s.notifyLink(o.BuyerID, "算力环境已清除",
-				fmt.Sprintf("订单 %s 的租用环境(租约 %s)已按规则清除, 容器与数据卷已删除(逻辑删除)。", o.OrderNo, l.LeaseNo),
+				fmt.Sprintf("订单 %s 的租用环境(租约 %s)已按规则清除, %s。", o.OrderNo, l.LeaseNo, what),
 				"/console/buyer/orders/"+o.OrderNo)
+		}
+		if l.DeliveryKind == "bare_metal" {
+			s.notifyReimage(t.NodeID, l.LeaseNo)
 		}
 	}
 	return out, nil
@@ -277,23 +307,34 @@ func (s *Service) runCleanupOnly(ctx context.Context, t *Task, pl LeaseTaskPaylo
 	if l.NodeID == t.NodeID && !containsStr(leaseTerminal, l.State) && l.State != LeasePurging {
 		return nil, errTaskAborted{fmt.Sprintf("租约 %s 已回到节点 #%d(%s), 同名资源属于当前环境, 不做残留清理", l.LeaseNo, t.NodeID, l.State)}
 	}
-	c, v := pl.ContainerName, pl.VolumeName
-	if c == "" {
-		c = containerNameOf(l.LeaseNo)
-	}
-	if v == "" {
-		v = volumeNameOf(l.LeaseNo)
-	}
-	if err := checkLeaseRes(c, v); err != nil {
-		return nil, errTaskAborted{err.Error()}
-	}
-	steps, err := s.purgeResources(ctx, t.NodeID, c, v, networkNameOf(l.LeaseNo), "")
-	if err != nil {
-		return nil, err
+	var steps []PurgeStep
+	var receipt PurgeReceipt
+	var err error
+	if l.DeliveryKind == "bare_metal" {
+		// 整机开通失败/换节点: 旧节点上可能已建好租约账户(买家未拿到过访问, 不需要重装), 删除即可。
+		if steps, err = s.bareMetalPurgeSteps(ctx, t.NodeID, l.LeaseNo); err != nil {
+			return nil, err
+		}
+		receipt = s.bareMetalReceipt(l, t.NodeID, steps, pl.Reason)
+		receipt.UpstreamPort = nil
+	} else {
+		c, v := pl.ContainerName, pl.VolumeName
+		if c == "" {
+			c = containerNameOf(l.LeaseNo)
+		}
+		if v == "" {
+			v = volumeNameOf(l.LeaseNo)
+		}
+		if err := checkLeaseRes(c, v); err != nil {
+			return nil, errTaskAborted{err.Error()}
+		}
+		if steps, err = s.purgeResources(ctx, t.NodeID, c, v, networkNameOf(l.LeaseNo), ""); err != nil {
+			return nil, err
+		}
+		receipt = s.receiptFor(l, t.NodeID, steps, pl.Reason)
+		receipt.Container, receipt.Volume, receipt.UpstreamPort = c, v, nil
 	}
 	out := PurgeOutcome{LeaseNo: l.LeaseNo, CleanupOnly: true, Steps: steps}
-	receipt := s.receiptFor(l, t.NodeID, steps, pl.Reason)
-	receipt.Container, receipt.Volume, receipt.UpstreamPort = c, v, nil
 	err = s.inTx(func(tx *sqlx.Tx) error {
 		if _, err := s.repo.lockLease(tx, l.ID); err != nil {
 			return err
@@ -406,6 +447,9 @@ func (s *Service) runKillSessionsTask(ctx context.Context, t *Task) (any, error)
 		return nil, err
 	}
 	defer client.Close()
+	if l.DeliveryKind == "bare_metal" {
+		return s.bareMetalKillSessions(ctx, client, l)
+	}
 	cmd, err := killSessionsCommand(l.LeaseNo)
 	if err != nil {
 		return nil, errTaskAborted{err.Error()}

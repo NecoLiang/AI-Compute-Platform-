@@ -403,6 +403,15 @@ func (s *Service) handleKeyMismatch(nodeID int64, gen int, pinned, observed stri
 	if n == nil {
 		return
 	}
+	if n.ReimageRequiredAt != nil {
+		// 整机待重装节点指纹变化 = 供给方已重装, 属预期: 不告警, 提示走重装确认。
+		slog.Info("待重装整机节点主机指纹已变化(疑已重装), 等待重装确认", "node_id", nodeID, "observed", observed)
+		s.notify(n.SupplierID, "节点主机指纹已变化, 请提交重装确认",
+			fmt.Sprintf("节点「%s」检测到新的 SSH 主机指纹 %s。如已完成重装, 请在机器上执行 %s 核对后, 在节点页提交重装确认并填写该指纹。",
+				n.NodeName, observed, fingerprintCheckCommand), nodeID)
+		s.refreshHealth(n)
+		return
+	}
 	slog.Error("运营告警: 托管节点主机指纹变化, 已停止新分配", "node_id", nodeID, "pinned", pinned, "observed", observed)
 	s.notify(n.SupplierID, "节点主机指纹发生变化",
 		fmt.Sprintf("节点「%s」的 SSH 主机指纹与已确认值不一致(已确认 %s, 本次 %s), 平台已停止向其分配新租约。"+

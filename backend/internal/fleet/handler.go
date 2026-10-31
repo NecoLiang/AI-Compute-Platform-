@@ -205,7 +205,14 @@ func (h *Handler) ReimageConfirm(c *gin.Context) {
 	if !ok {
 		return
 	}
-	taskID, err := h.svc.ReimageConfirm(c.GetInt64("user_id"), id, c.ClientIP())
+	var req struct {
+		ExpectedHostFingerprint string `json:"expected_host_fingerprint"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, "expected_host_fingerprint 必填")
+		return
+	}
+	taskID, err := h.svc.ReimageConfirm(c.GetInt64("user_id"), id, req.ExpectedHostFingerprint, c.ClientIP())
 	if err != nil {
 		fail(c, err)
 		return
