@@ -293,7 +293,7 @@ func nightStats(nodes []*nightNode, d time.Time, k int) (sum, maxNode int) {
 	return sum, maxNode
 }
 
-// nightStock 夜间窗口商品派生库存: 可订范围前 30 晚中, 未预订卡合计最多的一晚及单节点最多可订卡数的最大值。
+// nightStock 夜间窗口商品派生库存: 可订的第一晚起 NightCalendarMaxDays(31)晚中, 未预订卡合计最多的一晚及单节点最多可订卡数的最大值。
 func (r *Repository) nightStock(q sqlx.Queryer, productID int64, w compute.NightWindow, now time.Time) (free, maxNode int, err error) {
 	first := compute.FirstBookableNight(now, w)
 	nodes, err := r.nightMatrix(q, productID, first, compute.NightCalendarMaxDays)

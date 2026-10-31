@@ -118,6 +118,24 @@ func TestNightlyConcurrentDoubleBookingAndCalendar(t *testing.T) {
 	assert.Equal(t, 0, cal[0].MaxCards)
 	assert.Equal(t, 4, cal[1].MaxCards)
 
+	// 日历上限与起始夜晚上限对齐: 缺省 from 查满上限晚数, 必含最后一个可选起始夜晚(今天起第 30 天), 且该晚可作为起始夜晚下单校验通过。
+	sh, err := time.LoadLocation("Asia/Shanghai")
+	require.NoError(t, err)
+	now := time.Now()
+	lastStart := compute.NightDate(now.In(sh)).AddDate(0, 0, compute.NightStartAheadDays).Format(dateLayout)
+	cal, err = comp.NightCalendar(context.Background(), 32, leaseProductID, 0, "", compute.NightCalendarMaxDays)
+	require.NoError(t, err)
+	require.Len(t, cal, compute.NightCalendarMaxDays)
+	got = map[string]int{}
+	for _, n := range cal {
+		got[n.NightDate] = n.MaxCards
+	}
+	assert.Equal(t, 4, got[lastStart], "最后一个可选起始夜晚须出现在日历中且可订")
+	_, err = compute.ParseNightStartDate(lastStart, 1, w, now)
+	assert.NoError(t, err)
+	_, err = comp.NightCalendar(context.Background(), 32, leaseProductID, 0, "", compute.NightCalendarMaxDays+1)
+	assert.Equal(t, 40001, codeOf(err))
+
 	// 关单: 预订全部释放, 可再订。
 	require.NoError(t, comp.CancelOrder(o.OrderNo))
 	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=(SELECT id FROM leases WHERE order_id=?)`, o.ID))

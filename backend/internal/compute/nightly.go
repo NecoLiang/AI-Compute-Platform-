@@ -23,8 +23,9 @@ const (
 	NightStartAheadDays = 30
 	// NightHorizonDays 可订范围的最后一晚(今天起第 60 天): 第 30 天起订最多 31 晚。
 	NightHorizonDays = 60
-	// NightCalendarMaxDays 夜间日历单次最多查询 30 晚(§26.9)。
-	NightCalendarMaxDays = 30
+	// NightCalendarMaxDays 夜间日历单次最多查询 31 晚: 自今天起查满即覆盖今天..今天起第 30 天,
+	// 最后一个可选起始夜晚(NightStartAheadDays)也能在日历上选到(§26.9 原写 30 晚, 差一晚)。
+	NightCalendarMaxDays = NightStartAheadDays + 1
 	// NightCalendarDefaultDays 夜间日历缺省查询晚数。
 	NightCalendarDefaultDays = 14
 )
@@ -116,7 +117,7 @@ func nightLeasePreview(start time.Time, nights int, w NightWindow, now time.Time
 }
 
 // NightCalendar GET /products/:id/night-calendar: 自 from 起 days 晚, 每晚单节点最多可订卡数(不加锁快照, 下单以预订唯一键为准)。
-// from 为空取可订的第一晚; days 缺省 14、上限 30; cards>0 时只统计能容纳该卡数的节点(max_cards 不足 cards 记 0)。
+// from 为空取可订的第一晚; days 缺省 14、上限 31; cards>0 时只统计能容纳该卡数的节点(max_cards 不足 cards 记 0)。
 // 已截止或超出可订范围的晚 max_cards=0。每用户每分钟与 availability 共用 30 次限流。
 func (s *Service) NightCalendar(ctx context.Context, userID, productID int64, cards int, fromStr string, days int) ([]NightAvailability, error) {
 	if err := s.allowAvailability(ctx, userID); err != nil {

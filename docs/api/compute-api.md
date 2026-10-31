@@ -197,7 +197,7 @@ curl -H "Authorization: Bearer <token>" \
 |------|------|:--:|------|
 | cards | int | — | 计划卡数；> 0 时只统计能一次容纳该卡数的节点，`max_cards` 不足 `cards` 的晚记 0。省略或 0 = 不限 |
 | from | string | — | `YYYY-MM-DD`（Asia/Shanghai），省略取可订的第一晚；须在昨天 ~ 今天起 60 天内，否则 40001 |
-| days | int | — | 1-30，缺省 14 |
+| days | int | — | 1-31，缺省 14；超出 40001。上限 31 = 今天起第 0~30 天，省略 `from` 查满 31 晚即可覆盖全部可选起始夜晚 |
 
 **夜晚标识**：`night_date` = 窗口**开始**那天的日期。跨零点窗口（如 22:00-06:00）的 11-03 晚 = 11-03 22:00 至 11-04 06:00；11-04 01:00 仍属 11-03 晚。
 
@@ -210,6 +210,7 @@ curl -H "Authorization: Bearer <token>" \
 ],"request_id":"..."}
 ```
 - 已截止（当晚窗口开始满 2 小时，Q-36）或超出可订范围（今天起 60 天）的晚 `max_cards=0`。
+- **起始夜晚**（`night_start_date`）只能选今天起第 30 天及以前的晚；日历中更晚的晚 `max_cards` 照常返回（可作为多晚订单的后续晚），前端选择起始夜晚时须自行限制到今天起第 30 天。
 - 同一订单所有晚使用**同一组卡**（容器跨晚复用、数据不丢），故连续 N 晚能否下单不等于每晚 `max_cards` 的最小值：同机同卡须每晚都空闲。连续多晚以 `GET /products/:id/availability?pricing_mode=nightly&night_start_date=&duration=N&cards=` 为准。
 
 **限流**：与 availability 共用每用户每分钟 30 次（同一 Redis key），超出 42900；Redis 未装配 50000。
