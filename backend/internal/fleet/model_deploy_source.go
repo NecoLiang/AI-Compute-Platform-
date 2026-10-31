@@ -118,6 +118,8 @@ func (m *ModelDeployLeases) ManagedLeaseSnapshot(ctx context.Context, buyerID in
 
 	now := time.Now()
 	snap := &modeldeploy.LeaseSnapshot{
+		LeaseID:     l.ID,
+		OrderID:     o.ID,
 		LeaseNo:     l.LeaseNo,
 		NodeID:      l.NodeID,
 		GPUModel:    p.GpuModel,

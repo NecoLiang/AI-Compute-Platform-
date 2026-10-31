@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"tokenfactory/pkg/errcode"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // Error 带错误码的业务错误, handler 按 Code 原样返回。
@@ -32,6 +34,11 @@ type Service struct {
 	gpus   GPUSpecLookup
 	leases LeaseSource // nil 直到 S2 fleet 接入; 见 SetLeaseSource
 	now    func() time.Time
+
+	// 一键部署运行期(T-098/T-099), 见 SetDeployRuntime。未注入时提交部署 50000。
+	rt       Runtime
+	notifier Notifier
+	rdb      *redis.Client
 }
 
 func NewService(repo *Repository, gpus GPUSpecLookup) *Service {

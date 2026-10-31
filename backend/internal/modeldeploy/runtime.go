@@ -63,6 +63,7 @@ type TaskSpec struct {
 	LeaseID      *int64
 	DeploymentID *int64
 	Kind         string
+	Priority     int // 0 = 表默认 5; 小者优先
 	MaxAttempts  int // 0 = 表默认
 	Payload      any
 }
