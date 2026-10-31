@@ -103,6 +103,8 @@ func (s *Service) evaluateOrder(ctx context.Context, req PlanRequest) (*orderEva
 		return nil, newErr(errcode.NotFound, "订单不存在")
 	case errors.Is(err, ErrNotManaged):
 		return nil, newErr(errcode.ParamInvalid, "该订单不是托管租用, 不支持一键部署")
+	case errors.Is(err, ErrBareMetalLease):
+		return nil, newErr(errcode.ParamInvalid, "整机租用不支持一键部署(引擎依赖租约容器网络与配额); 整机租约可登录主机自行部署")
 	case errors.Is(err, ErrLeaseNotActive):
 		return nil, newErr(errcode.Conflict, "托管租约未处于运行中, 暂不能部署")
 	case err != nil:

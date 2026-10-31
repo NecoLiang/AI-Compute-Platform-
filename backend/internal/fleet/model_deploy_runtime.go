@@ -126,6 +126,10 @@ func (d *deployRuntime) LeaseRuntime(ctx context.Context, leaseID int64) (*model
 	if err != nil || l == nil {
 		return nil, err
 	}
+	if l.DeliveryKind != "container" {
+		// 提交时已拒绝(ErrBareMetalLease); 这里兜底: 整机没有租约容器/网络, 不能按容器租约下发引擎或归还配额。
+		return nil, &modeldeploy.AbortError{Msg: fmt.Sprintf("租约 %s 为整机交付(%s), 一键部署仅支持容器租约", l.LeaseNo, l.DeliveryKind)}
+	}
 	n, err := s.repo.getNode(s.repo.db, l.NodeID)
 	if err != nil {
 		return nil, err

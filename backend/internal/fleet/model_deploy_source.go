@@ -85,6 +85,9 @@ func (m *ModelDeployLeases) ManagedLeaseSnapshot(ctx context.Context, buyerID in
 	if l == nil {
 		return nil, fmt.Errorf("%w: 订单 %s 尚无租约", modeldeploy.ErrLeaseNotActive, orderNo)
 	}
+	if l.DeliveryKind != "container" {
+		return nil, fmt.Errorf("%w: 租约 %s 交付方式 %s", modeldeploy.ErrBareMetalLease, l.LeaseNo, l.DeliveryKind)
+	}
 	if l.State != LeaseActive {
 		return nil, fmt.Errorf("%w: 租约 %s 状态 %s", modeldeploy.ErrLeaseNotActive, l.LeaseNo, l.State)
 	}

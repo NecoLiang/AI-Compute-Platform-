@@ -20,6 +20,9 @@ var (
 	ErrOrderNotFound  = errors.New("order not found or not owned by buyer") // → 40400
 	ErrNotManaged     = errors.New("order is not a managed rental")         // → 40001
 	ErrLeaseNotActive = errors.New("managed lease is not active")           // → 40900
+	// ErrBareMetalLease 整机(bare_metal)租约: 引擎容器须接入租约容器网络 omnis-l-<lease_no>-net 并从租约容器划出
+	// CPU/内存配额(docs/27 §27.4.1), 整机交付没有租约容器与网络, 一键部署不适用 → 40001。
+	ErrBareMetalLease = errors.New("one-click deploy requires a container lease")
 )
 
 // LeaseSnapshot 某托管租约在判定时刻的实时状态。

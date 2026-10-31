@@ -246,7 +246,7 @@ M1 为 `error`：“目录条目 … 参数超出合理范围(…), 无法判定
 
 | 码 | 场景 |
 |---|---|
-| 40001 | 订单号格式无效；model_id 缺失/非法；gpu_mem_util 格式或范围错误；订单不是托管租用 |
+| 40001 | 订单号格式无效；model_id 缺失/非法；gpu_mem_util 格式或范围错误；订单不是托管租用；整机(bare_metal)租约（引擎依赖租约容器网络与 CPU/内存配额，整机不支持一键部署） |
 | 40400 | 订单不存在或不属于当前用户；模型不存在或未上线 |
 | 40900 | 托管租约未处于 active |
 | 50000 | 托管租约数据源未接入（`fleet.enabled=false`）；租约卡槽数与卡数不一致、节点/商品缺失等数据不一致；内部错误 |
@@ -259,7 +259,7 @@ M1 为 `error`：“目录条目 … 参数超出合理范围(…), 无法判定
 type LeaseSource interface {
     ManagedLeaseSnapshot(ctx context.Context, buyerID int64, orderNo string, modelID int64) (*LeaseSnapshot, error)
 }
-// 哨兵错误(可 %w 包装): ErrOrderNotFound→40400, ErrNotManaged→40001, ErrLeaseNotActive→40900
+// 哨兵错误(可 %w 包装): ErrOrderNotFound→40400, ErrNotManaged→40001, ErrBareMetalLease→40001, ErrLeaseNotActive→40900
 ```
 
 实现方负责订单归属、托管履约与租约 active 校验；卡数据取自 `gpu_slots`（lease_id 归属）与最近一次探活/采样，不得用商品声明值代替。快照字段：`GPUModel`（型号库 model_name）、`DriverVersion`、`NVLink`、`Cards[]{VRAMTotalBytes,VRAMUsedBytes,Faulty,FatalXidLastHour}`、`ModelCached`、`CacheFreeBytes`、`CacheEvictableBytes`、`Unknown`。
@@ -401,7 +401,7 @@ type LeaseSource interface {
 | 40001 | 参数非法；判定不通过 | `{"checks":[{id,ok,level,message}]}` |
 | 40001 | F7/F8 未确认 | `{"checks":[未确认的项]}` |
 | 40001 | `tp/dp` 不在可行方案内 | `{"plans":[…]}` |
-| 40001 | 非托管订单 | — |
+| 40001 | 非托管订单；整机(bare_metal)租约不支持一键部署 | — |
 | 40400 | 订单不存在/非本人；模型不存在或未上线 | — |
 | 40900 | 已有未终止部署 | `{"deploy_no":"d-…","state":"running"}`（并发提交被唯一键拦下时无 data） |
 | 40900 | 租约非 `active`；租约可用（非故障）卡数不足 | — |
