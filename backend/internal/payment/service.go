@@ -24,6 +24,8 @@ type Service struct {
 	onPaid func(tx *sqlx.Tx, order *compute.Order) error
 	// 续租收款校验/落账(SetRenewalHooks); nil 时回退 compute 包级函数。
 	validateRenewal, applyRenewal RenewalPaymentFunc
+	// partialRefunds 部分退款通道(EnablePartialRefunds, 仅 fleet.outage.yeepay_partial_refund_confirmed=true 时打开)。
+	partialRefunds bool
 }
 
 // Gateway is the external payment boundary (易宝). Every result that moves

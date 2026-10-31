@@ -60,6 +60,7 @@ services:
       - ./migrations/031_probe_telemetry.up.sql:/docker-entrypoint-initdb.d/031.sql:ro
       - ./migrations/032_lease_suspended_at.up.sql:/docker-entrypoint-initdb.d/032.sql:ro
       - ./migrations/033_outage_credit.up.sql:/docker-entrypoint-initdb.d/033.sql:ro
+      - ./migrations/037_partial_refund_settlement.up.sql:/docker-entrypoint-initdb.d/037.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 5s

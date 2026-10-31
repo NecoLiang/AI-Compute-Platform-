@@ -25,19 +25,23 @@ type Payment struct {
 }
 
 type Settlement struct {
-	ID              int64      `db:"id" json:"id"`
-	SettlementID    string     `db:"settlement_id" json:"settlement_id"`
-	OrderNo         string     `db:"order_no" json:"order_no"`
-	PayeeType       string     `db:"payee_type" json:"payee_type"`
-	PayeeID         int64      `db:"payee_id" json:"payee_id"`
-	Amount          int64      `db:"amount" json:"amount"` // fen
-	Status          string     `db:"status" json:"status"`
-	DivideRequestID *string    `db:"divide_request_id" json:"-"`
-	DivideDetailNo  *string    `db:"divide_detail_no" json:"-"`
-	LedgerNo        *string    `db:"ledger_no" json:"-"`
-	FailReason      string     `db:"fail_reason" json:"fail_reason"`
-	CreatedAt       time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt       *time.Time `db:"updated_at" json:"updated_at"`
+	ID              int64   `db:"id" json:"id"`
+	SettlementID    string  `db:"settlement_id" json:"settlement_id"`
+	OrderNo         string  `db:"order_no" json:"order_no"`
+	PayeeType       string  `db:"payee_type" json:"payee_type"`
+	PayeeID         int64   `db:"payee_id" json:"payee_id"`
+	Amount          int64   `db:"amount" json:"amount"` // fen
+	Status          string  `db:"status" json:"status"`
+	DivideRequestID *string `db:"divide_request_id" json:"-"`
+	DivideDetailNo  *string `db:"divide_detail_no" json:"-"`
+	LedgerNo        *string `db:"ledger_no" json:"-"`
+	FailReason      string  `db:"fail_reason" json:"fail_reason"`
+	// RefundDeduction 已成功部分退款从本行扣减的金额(分, 037); 收款时锁定的应结 = Amount + RefundDeduction。
+	RefundDeduction int64 `db:"refund_deduction" json:"refund_deduction"`
+	// PlatformCompensation 仅供给方行: 平台责任退款超出平台费而从供给方应结扣下、由平台另行补偿的金额(分, 记账)。
+	PlatformCompensation int64      `db:"platform_compensation" json:"platform_compensation"`
+	CreatedAt            time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt            *time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // Merchant 供给方在易宝开通的分账接收商编。
