@@ -137,8 +137,16 @@ func (s *Service) settleOutageTx(tx *sqlx.Tx, ord *compute.Order, l *Lease, id i
 	if !ok {
 		return fmt.Errorf("停机段 %d 结算守卫未命中", id)
 	}
-	slog.Warn("停机补偿: 待退费(T-106)", "lease_no", l.LeaseNo, "outage_id", id, "seconds", secs, "amount", liab)
+	slog.Warn("停机补偿: 待退费(T-106)", "lease_no", l.LeaseNo, "outage_id", id, "seconds", secs, "amount_fen", amountLogValue(liab))
 	return nil
+}
+
+// amountLogValue 日志里输出金额值(分); 未核定(nil)输出 "unknown", 不打印指针地址。
+func amountLogValue(p *int64) any {
+	if p == nil {
+		return "unknown"
+	}
+	return *p
 }
 
 // extendable 顺延的前提: 租约仍在租期内(在租/停放/冻结)且订单未终结。

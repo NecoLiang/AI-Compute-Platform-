@@ -160,3 +160,10 @@ func TestRentableOnNode(t *testing.T) {
 		assert.Equal(t, c.want, rentableOnNode(c.free, c.total, c.quota, c.wholeMachine), "%+v", c)
 	}
 }
+
+// 停机待退费日志输出金额值而非指针地址; 未核定输出 unknown。
+func TestAmountLogValue(t *testing.T) {
+	v := int64(1234)
+	assert.Equal(t, int64(1234), amountLogValue(&v))
+	assert.Equal(t, "unknown", amountLogValue(nil))
+}
