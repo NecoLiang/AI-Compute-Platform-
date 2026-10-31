@@ -38,6 +38,7 @@ type FleetConfig struct {
 	ModelCacheDir string
 	Grace         FleetGrace
 	Outage        FleetOutage
+	Credit        FleetCredit
 	Probe         FleetProbe
 	Mining        FleetMining
 }
@@ -72,11 +73,18 @@ type FleetOutage struct {
 	MinMinutes        int
 	RefundRatio       float64
 	RefundSingleHours int
-	// MaxSupplierMinutes30d 30 天内单节点供给方责任停机超过该分钟数即自动停调度(schedulable=0)。
+	// MaxSupplierMinutes30d 30 天内单节点供给方责任停机超过该分钟数即自动停调度
+	// (S2 实现口径: 写 supplier_nodes.dispatch_hold=1, 不改供给方自己的 schedulable 开关)。
 	MaxSupplierMinutes30d int
 	// YeepayPartialRefundConfirmed 易宝"多次部分退款/待分账部分退回"能力书面确认前保持 false:
 	// 停机补偿只开放顺延, 退费分支返回 50000(docs/25 §25.7.6)。
 	YeepayPartialRefundConfirmed bool
+}
+
+// FleetCredit 供给方信用分(T-105/T-023)。分数低于 StopBelow 时该供给方全部节点 dispatch_hold=1,
+// 不再分配新托管租约; 运营可在后台覆盖为 allow/stop。
+type FleetCredit struct {
+	StopBelow int
 }
 
 type FleetProbe struct {
@@ -120,7 +128,8 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 			MaxSupplierMinutes30d:        v.GetInt("fleet.outage.max_supplier_minutes_30d"),
 			YeepayPartialRefundConfirmed: v.GetBool("fleet.outage.yeepay_partial_refund_confirmed"),
 		},
-		Probe: FleetProbe{MinPerfRatio: v.GetFloat64("fleet.probe.min_perf_ratio")},
+		Credit: FleetCredit{StopBelow: v.GetInt("fleet.credit.stop_below")},
+		Probe:  FleetProbe{MinPerfRatio: v.GetFloat64("fleet.probe.min_perf_ratio")},
 		Mining: FleetMining{
 			Interval:     v.GetDuration("fleet.mining.interval"),
 			ProcessNames: cleanList(v.GetStringSlice("fleet.mining.process_names")),
@@ -182,6 +191,9 @@ func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
 	}
 	if f.Outage.MaxSupplierMinutes30d <= 0 {
 		f.Outage.MaxSupplierMinutes30d = 360
+	}
+	if f.Credit.StopBelow <= 0 {
+		f.Credit.StopBelow = 60
 	}
 	if f.Probe.MinPerfRatio <= 0 {
 		f.Probe.MinPerfRatio = 0.7
