@@ -62,6 +62,21 @@ type PlanRequest struct {
 // DeployPlans GET /orders/:id/deploy-plans: 对订单本人的托管 active 租约做实时可行性判定。
 // 只读, 不写库; 提交部署(T-098)时服务端会重新判定, 不信任本结果。
 func (s *Service) DeployPlans(ctx context.Context, req PlanRequest) (*Result, error) {
+	ev, err := s.evaluateOrder(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return ev.res, nil
+}
+
+// orderEval 一次实时判定的全部输入与结果(提交部署复用, 不信任前端传回的方案)。
+type orderEval struct {
+	entry *ModelEntry
+	snap  *LeaseSnapshot
+	res   *Result
+}
+
+func (s *Service) evaluateOrder(ctx context.Context, req PlanRequest) (*orderEval, error) {
 	if !orderNoPattern.MatchString(req.OrderNo) {
 		return nil, newErr(errcode.ParamInvalid, "订单号格式无效")
 	}
@@ -116,7 +131,7 @@ func (s *Service) DeployPlans(ctx context.Context, req PlanRequest) (*Result, er
 	if err != nil {
 		return nil, err
 	}
-	return &res, nil
+	return &orderEval{entry: entry, snap: snap, res: &res}, nil
 }
 
 // buildInput 把目录条目与租约快照组装成判定输入(纯映射, 无 I/O)。

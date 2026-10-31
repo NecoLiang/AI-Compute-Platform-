@@ -45,7 +45,7 @@ func stopContainerCommand(leaseNo string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "if docker inspect --type container " + c + " >/dev/null 2>&1; then " +
+	return removeLeaseEnginesPrefix(leaseNo) + "if docker inspect --type container " + c + " >/dev/null 2>&1; then " +
 		"docker stop -t 30 " + c + " >/dev/null && echo \"@@stopped $(docker inspect --type container -f '" + gpuIDsFormat + "' " + c + ")\"; " +
 		"else echo @@absent; fi", nil
 }
@@ -178,7 +178,8 @@ func purgeContainerCommand(name string) (string, error) {
 	if err := checkLeaseRes(name); err != nil {
 		return "", err
 	}
-	return "if id=$(docker inspect --type container -f '{{.Id}}' " + name + " 2>/dev/null); then " +
+	return removeLeaseEnginesPrefix(strings.TrimPrefix(name, "omnis-")) +
+		"if id=$(docker inspect --type container -f '{{.Id}}' " + name + " 2>/dev/null); then " +
 		"docker rm -f " + name + " >/dev/null && echo \"@@removed $id\"; else echo @@absent; fi", nil
 }
 

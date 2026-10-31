@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,11 +37,18 @@ type FleetConfig struct {
 	// ModelCacheDir 节点上的模型权重缓存目录(docs/27 §27.4.3), 轻量探活与完整探活读取其所在文件系统容量作为
 	// 一键部署可行性 F4 的输入。只允许 /[A-Za-z0-9._/-]、不含 ".."(会直接进入节点命令)。默认 /data/omnis-models。
 	ModelCacheDir string
-	Grace         FleetGrace
-	Outage        FleetOutage
-	Credit        FleetCredit
-	Probe         FleetProbe
-	Mining        FleetMining
+	// EnginePortStart/EnginePortEnd 一键部署引擎容器在节点上绑定 127.0.0.1 的端口区间(docs/27 §27.4.1),
+	// 配置 fleet.engine_port_range: "41000-41999"(默认)。
+	EnginePortStart int
+	EnginePortEnd   int
+	// ModelPullImage 拉取模型权重的容器镜像(ref@sha256, 平台镜像仓库; 须含 modelscope CLI 与 sha256sum)。
+	// 可选: 未配置时一键部署提交返回 50000 并说明缺少该配置, 其余 fleet 功能不受影响。
+	ModelPullImage string
+	Grace          FleetGrace
+	Outage         FleetOutage
+	Credit         FleetCredit
+	Probe          FleetProbe
+	Mining         FleetMining
 }
 
 // FleetMining 挖矿特征扫描(docs/25 §25.7.3, Q-42)。平台维护的特征清单; 均有内置默认值, 配置即整体替换。
@@ -116,6 +124,7 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 		SelftestKeyFile:     strings.TrimSpace(v.GetString("fleet.selftest_key_file")),
 		DenyCIDRs:           cleanList(v.GetStringSlice("fleet.deny_cidrs")),
 		ModelCacheDir:       strings.TrimSpace(v.GetString("fleet.model_cache_dir")),
+		ModelPullImage:      strings.TrimSpace(v.GetString("fleet.model_pull_image")),
 		Grace: FleetGrace{
 			Short:   v.GetDuration("fleet.grace.short"),
 			Long:    v.GetDuration("fleet.grace.long"),
@@ -139,6 +148,15 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 	}
 	if err := v.UnmarshalKey("fleet.base_images", &f.BaseImages); err != nil {
 		return fmt.Errorf("fleet.base_images 格式错误(应为 [{name, ref}] 列表): %w", err)
+	}
+	if r := strings.TrimSpace(v.GetString("fleet.engine_port_range")); r != "" {
+		a, b, ok := strings.Cut(r, "-")
+		start, err1 := strconv.Atoi(strings.TrimSpace(a))
+		end, err2 := strconv.Atoi(strings.TrimSpace(b))
+		if !ok || err1 != nil || err2 != nil || start <= 0 || end <= 0 {
+			return fmt.Errorf("fleet.engine_port_range 格式错误(应为 \"41000-41999\"): %q", r)
+		}
+		f.EnginePortStart, f.EnginePortEnd = start, end
 	}
 	gw := AccessGWConfig{
 		PublicHost:         strings.TrimSpace(v.GetString("accessgw.public_host")),
@@ -200,6 +218,9 @@ func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
 	}
 	if f.ModelCacheDir == "" {
 		f.ModelCacheDir = "/data/omnis-models"
+	}
+	if f.EnginePortStart == 0 && f.EnginePortEnd == 0 {
+		f.EnginePortStart, f.EnginePortEnd = 41000, 41999
 	}
 	if gw.PublicPort <= 0 {
 		gw.PublicPort = 2222
@@ -313,6 +334,12 @@ func validateFleet(cfg *Config) error {
 	}
 	if !modelCacheDirRe.MatchString(f.ModelCacheDir) || strings.Contains(f.ModelCacheDir, "..") {
 		invalid = append(invalid, "fleet.model_cache_dir 须为绝对路径, 仅含字母数字与 ._/-, 不含 ..")
+	}
+	if f.EnginePortStart < 1024 || f.EnginePortEnd > 65535 || f.EnginePortStart > f.EnginePortEnd {
+		invalid = append(invalid, "fleet.engine_port_range 须为 \"起-止\", 1024 ≤ 起 ≤ 止 ≤ 65535")
+	}
+	if f.ModelPullImage != "" && !IsDigestRef(f.ModelPullImage) {
+		invalid = append(invalid, "fleet.model_pull_image 须按 digest 固定(…@sha256:<64hex>)")
 	}
 	if len(missing) == 0 && len(invalid) == 0 {
 		return nil

@@ -102,6 +102,16 @@
 - 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。（S2 T-087/T-088）`lease_state=grace` 时提示「租期已结束，宽限期至 `grace_until`，可续租恢复（restart），逾期清除数据」；`suspended`（订单 `frozen`）时提示「订单已冻结，暂停登录，容器与数据保留，请联系客服」；`purging/purged` 时提示数据已清除。整机订单（商品 `delivery_mode=bare_metal`，T-089）没有宽限期：连接信息卡片提示「登录后为宿主机账户 `omnis-<login>`，可 `sudo`；到期即断开并清除，数据请在到期前导出」，不展示 grace 文案。续租按钮同样只看 `actions.can_renew`，`mode`(extend/restart) 由报价接口返回。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
 - 🆕 托管订单「停机与补偿」卡片（S2 T-105）：`GET /orders/:id/outages` 列出停机段（`ongoing` 标进行中，`counted=false` 标「不足 5 分钟不补偿」）、已顺延分钟 `extended_minutes`、待退费 `pending_refund_amount`（分）；补偿方式切换 `PUT /orders/:id/outage-remedy` `{remedy:"extend"|"refund"}`，仅 `can_change_remedy=true` 时可点，「退费」仅 `refund_eligible=true` 时可点；`refund_available=false` 时点退费返回 50000「易宝部分退款能力未确认，暂只支持顺延补偿」并记录意向（`refund_requested_at`），页面应提示「已记录退费申请，当前按顺延补偿」。契约见 [compute-api.md](compute-api.md#托管订单停机与补偿s2-t-105)。T-106：开关 `fleet.outage.yeepay_partial_refund_confirmed=true` 后退费真实执行（停机结束即原路部分退款，`remedy_applied_at` 非空即已退成功），`refund_available=true`；开关打开前只记录意向的买家需重新选择「退费」，不会自动转换
 
+### 订单详情 · 一键部署（v1.2，`fleet.enabled=true`，托管订单，页面待建，建议 `/console/buyer/orders/[orderId]/deploy`）🆕
+- 模型选择：`GET /models`（目录 active 条目，含许可证与已验证卡型）
+- 方案判定：`GET /orders/:id/deploy-plans?model_id=&gpu_mem_util=` → `{feasible, plans[], checks[]}`；`checks` 中 `level=error` 的项直接展示原因；F7（许可证）/F8（卡型未实测）要求勾选确认
+- 提交：`POST /orders/:id/deployments`；40900 且 `data.deploy_no` 存在时跳转到该部署；40001 时展示 `data.checks` / `data.plans`
+- 部署列表与详情：`GET /orders/:id/deployments`、`GET .../:deploy_no`（`state` 进度条 pending→checking→pulling→starting→running；`pulling` 时用 `cache.bytes_done/weights_bytes` 画下载进度；`access.base_url` / `access.port_forward_cmd` 展示访问方式；`events` 为重启记录）。进行中状态建议 5–10s 轮询
+- 健康曲线：`GET .../:deploy_no/health?range=1h|24h|7d`（TTFT、吞吐、排队、KV 占用、卡温度；`health_reason_text` 作为当前原因文案）
+- 日志：`GET .../:deploy_no/logs?tail=200`（每分钟 6 次，42900 时提示稍后再试；`source=stored` 时标注"失败时留存的日志"）
+- 操作：`POST .../:deploy_no/stop`、`POST .../:deploy_no/restart`（`stopped/failed` 时按钮文案为"恢复"）
+- 契约见 [model-deploy-api.md](model-deploy-api.md#部署买家订单本人t-098t-099仅-fleetenabledtrue-时注册)
+
 ### `/console/buyer/invoices` 发票 ✅
 - `GET/PUT /invoices/title`、`GET /invoices/billable-orders`、`POST /invoices/apply`、`GET /invoices?status`、`GET /invoices/:invoice_no/download`(PDF 二进制)
 
@@ -184,6 +194,7 @@
 | `/admin/settings` | `GET/PUT /admin/config`；`GET/POST/PUT /admin/gpu-catalog` ⬜（型号库维护界面待接，字段见 gpu-catalog-api.md） | ✅ |
 | `/admin/cms` | `GET/POST /admin/cms/notices` | ✅ |
 | 节点总览（建议并入 `/admin/settings` 或新页）🆕 | `GET /admin/nodes?status`、`GET /admin/schedule-advice?order_no=`、`POST /admin/blockchain/requeue-failed`(存证死信补推) | 🆕 |
+| 模型目录与部署（v1.2，页面待建）🆕 | `GET/POST/PUT /admin/model-catalog[/:id]`、`POST /admin/model-catalog/:id/verifications\|activate\|retire`；`GET /admin/deployments?state&health&page&page_size`（仅 `fleet.enabled=true`），见 [admin-api.md](admin-api.md#模型部署v12-一键部署fleetenabledtrue-时注册) | 🆕 后端就绪 |
 | 托管节点运维（v1.2，`fleet.enabled=true`，页面待建）🆕 | `GET /admin/nodes`（托管节点带 `managed` 摘要）、`POST /admin/nodes/:id/suspend\|resume`、`GET /admin/node-tasks?state&node_id`、`POST /admin/node-tasks/:id/retry`、`GET /admin/leases?state&node_id&buyer_id`（租约检索，含 `resource_alert`）、`GET /admin/access-sessions?lease_no&ip`（登录会话检索），见 [managed-rental-api.md](managed-rental-api.md#运营接口) | 🆕 后端就绪 |
 | 停机与供给方信用（v1.2 S2 T-105，页面待建）🆕 | `GET /admin/lease-outages?lease_no&order_no&cause&supplier_id&open=1&refund_pending=1`（停机检索，含 `detail`、`liability_amount` 分；`refund_pending=1` 即待退费队列）、`GET /admin/supplier-credits?stopped=1`（按分数升序）、`GET /admin/supplier-credits/:id`（含节点 `dispatch_hold` 与 30 天停机分钟）、`PUT /admin/supplier-credits/:id/override` `{mode:auto\|allow\|stop, reason}`（allow/stop 必填理由），见 [admin-api.md](admin-api.md#供给方信用s2-t-105) | 🆕 后端就绪 |
 | 部分退款与违约退款（v1.2 S2 T-106，页面待建）🆕 | `GET /admin/payment/partial-refunds?status&order_no`（托管订单停机补偿 / 供给方违约部分退款，含状态、易宝退款单号、失败原因）、`POST /admin/supplier-breach-refunds` `{order_no, reason}`（供给方违约未使用部分退款，开关未打开时 50000），见 [admin-api.md](admin-api.md#post-adminsupplier-breach-refunds--供给方违约未使用部分退款s2-t-106)；分账扣减口径见 [payment-api.md](payment-api.md#租期末结算与部分退款s2-t-106docs24-d-10docs25-25776) | 🆕 后端就绪 |

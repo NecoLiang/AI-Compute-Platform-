@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/internal/scheduler"
 	"tokenfactory/pkg/config"
 	tfcrypto "tokenfactory/pkg/crypto"
@@ -94,6 +95,9 @@ type Service struct {
 	extraExecutors map[string]taskExecutor // probe 之外的任务执行器(T-084 provision 等), 启动前注册
 	taskTTL        time.Duration           // 任务锁租约, 0 = taskLeaseTTL(测试可缩短)
 	taskBeat       time.Duration           // 心跳续期间隔, 0 = taskHeartbeat
+
+	// modelDeploy 一键部署(docs/27, T-098/T-099); nil = 未接入(AttachModelDeploy 未调用), 租约钩子与周期任务不涉及部署。
+	modelDeploy *modeldeploy.Service
 }
 
 // NewService credKey 为 security.credential_key 解析后的 32 字节密钥; 为空时涉及管理私钥的操作返回 50000。

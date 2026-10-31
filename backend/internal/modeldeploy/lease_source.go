@@ -24,6 +24,9 @@ var (
 
 // LeaseSnapshot 某托管租约在判定时刻的实时状态。
 type LeaseSnapshot struct {
+	// LeaseID/OrderID 租约主键与其原订单 id(提交部署时写入 model_deployments)。
+	LeaseID  int64
+	OrderID  int64
 	LeaseNo  string
 	NodeID   int64
 	GPUModel string // gpu_catalog.model_name, 用于取 compute_capability 与匹配验证记录(F1/F8)

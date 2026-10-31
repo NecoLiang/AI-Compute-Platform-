@@ -79,11 +79,11 @@ type Node struct {
 	HostKeyConfirmedAt *time.Time `db:"host_key_confirmed_at" json:"host_key_confirmed_at"`
 	HostFPClaim        *string    `db:"host_fp_claim" json:"-"`
 	// ReimageRequiredAt 整机租约结束后的重装闸门(T-089, docs/25 §25.7.4): 非空期间节点不能回到可售。
-	ReimageRequiredAt  *time.Time `db:"reimage_required_at" json:"reimage_required_at,omitempty"`
-	ReimagePrevFP      *string    `db:"reimage_prev_fp" json:"-"`
-	VerifyStatus       string     `db:"verify_status" json:"verify_status"`
-	Generation         int        `db:"generation" json:"-"` // 探活代次(见 ProbePayload.Generation)
-	Schedulable        bool       `db:"schedulable" json:"schedulable"`
+	ReimageRequiredAt *time.Time `db:"reimage_required_at" json:"reimage_required_at,omitempty"`
+	ReimagePrevFP     *string    `db:"reimage_prev_fp" json:"-"`
+	VerifyStatus      string     `db:"verify_status" json:"verify_status"`
+	Generation        int        `db:"generation" json:"-"` // 探活代次(见 ProbePayload.Generation)
+	Schedulable       bool       `db:"schedulable" json:"schedulable"`
 	// DispatchHold 平台按信用/停机自动停调度(T-105, 不接新托管租约; 与供给方自己的 schedulable 排空互不覆盖)。
 	DispatchHold       bool       `db:"dispatch_hold" json:"dispatch_hold"`
 	DispatchHoldReason *string    `db:"dispatch_hold_reason" json:"dispatch_hold_reason"`

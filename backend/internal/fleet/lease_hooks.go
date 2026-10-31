@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/internal/modeldeploy"
 
 	"github.com/jmoiron/sqlx"
 )
@@ -203,6 +204,9 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 func (s *Service) purgeTx(tx *sqlx.Tx, l *Lease, reason string) error {
 	from := l.State
 	if err := s.mustTransition(tx, l, LeasePurging, ""); err != nil {
+		return err
+	}
+	if err := s.stopDeploymentsTx(tx, l.ID, modeldeploy.StopLeasePurged); err != nil {
 		return err
 	}
 	if l.DeliveryKind == "bare_metal" {
