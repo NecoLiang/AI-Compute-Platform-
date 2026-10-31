@@ -1045,6 +1045,9 @@ type SupplierOrder struct {
 	GPUModel    string `db:"gpu_model" json:"gpu_model"`
 	ProductType string `db:"product_type" json:"product_type"`
 	PricingMode string `db:"pricing_mode" json:"pricing_mode"`
+	// SettleReadyAt 供给方视角输出 managed 订单"可分账"时点(Order 内同名字段 json:"-" 对买家隐藏);
+	// 由 service 从 Order.SettleReadyAt 复制, 不参与扫描。manual 订单恒为 null。
+	SettleReadyAt *time.Time `db:"-" json:"settle_ready_at"`
 }
 
 // ListSupplierOrders 履约订单列表。

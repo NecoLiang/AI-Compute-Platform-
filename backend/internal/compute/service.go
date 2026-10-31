@@ -1644,6 +1644,7 @@ func (s *Service) ListSupplierOrders(supplierID int64, status string, page, page
 	}
 	// ponytail: one lease lookup per row (20 by default); use a bulk join if larger pages become common.
 	for i := range list {
+		list[i].SettleReadyAt = list[i].Order.SettleReadyAt
 		lease, mode, err := s.currentLeaseOrder(s.db, &list[i].Order, list[i].PricingMode)
 		if err != nil {
 			return nil, 0, nil, err

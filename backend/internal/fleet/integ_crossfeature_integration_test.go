@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -193,10 +194,22 @@ func TestCrossSupplierSettlementRowsExposeSettleGate(t *testing.T) {
 	require.EqualValues(t, 1, total)
 	assert.Equal(t, "managed", list[0].FulfillmentMode)
 	assert.Nil(t, list[0].SettleReadyAt, "租期未结束: 分账闸门未开")
+	orders, _, _, err := e.comp.ListSupplierOrders(supplierID, "", 1, 20)
+	require.NoError(t, err)
+	require.Len(t, orders, 1)
+	assert.Equal(t, "managed", orders[0].FulfillmentMode)
+	assert.Nil(t, orders[0].SettleReadyAt, "供给方订单列表同样带出分账闸门")
 
 	e.purge(t)
 	e.s.SettleRound(context.Background())
 	require.True(t, e.settleReady(t, e.order.ID))
+	orders, _, _, err = e.comp.ListSupplierOrders(supplierID, "", 1, 20)
+	require.NoError(t, err)
+	require.NotNil(t, orders[0].SettleReadyAt)
+	raw, err := json.Marshal(orders[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"settle_ready_at":"`)
+	assert.Contains(t, string(raw), `"fulfillment_mode":"managed"`)
 	rows, err := repo.GetSettlementsByOrder(supplierID, e.order.OrderNo)
 	require.NoError(t, err)
 	require.NotEmpty(t, rows)

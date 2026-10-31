@@ -412,6 +412,12 @@ POST 使用 `multipart/form-data`，`business_license` 必须为 PDF/JPG/PNG 且
 
 ## GET /supplier/products · 我的商品 ✅ supplier
 ## GET /supplier/orders · 供给方订单 ✅ supplier
+
+每行为订单对象（与买家订单同字段）+ `gpu_model`、`product_type`、`pricing_mode`（订单快照）、可空 `current_lease`（见下文「到期后续租」），以及：
+
+- `fulfillment_mode`：`manual` / `managed`（下单时商品履约模式快照）。
+- `settle_ready_at`（v1.2，可空时间戳）：仅供给方视角输出。`managed` 订单在租期结束（清除完成、停机补偿结算落地）后写入，非空才进入分账；为 `null` 时前端展示「平台托管 · 租期结束后分账」。`manual` 订单恒为 `null`。买家订单接口不输出该字段。
+
 ## GET /supplier/qualifications · 我的资质 ✅ supplier
 ## POST /supplier/qualifications · 提交资质 ✅ supplier
 
