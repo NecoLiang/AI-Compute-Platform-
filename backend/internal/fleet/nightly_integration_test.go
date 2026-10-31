@@ -503,3 +503,26 @@ func TestManagedScheduleEditLockedWhileInUse(t *testing.T) {
 	require.NoError(t, e.db.Get(&got, `SELECT night_start_min FROM products WHERE id=?`, leaseProductID))
 	assert.Equal(t, shifted, got)
 }
+
+// 包夜系列中途退款: 已开始的晚(本晚)保留作履约记录, 尚未开始的晚释放预订, 其他买家可再订。
+func TestNightlyRefundMidSeriesReleasesFutureNights(t *testing.T) {
+	e, w := newNightEnv(t)
+	e.outcome(t, runOne(t, e.s))
+	require.Equal(t, LeaseActive, e.leaseNow(t).State)
+	d := compute.NightDateOf(time.Now(), w)
+	require.Equal(t, 4, countRows(t, e.db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=?`, e.lease.ID))
+
+	tx := e.db.MustBegin()
+	o, err := e.comp.GetOrder(e.order.OrderNo)
+	require.NoError(t, err)
+	require.NoError(t, e.s.releaseLeaseTx(tx, o, "refunded"))
+	require.NoError(t, tx.Commit())
+
+	assert.Equal(t, 2, countRows(t, e.db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=? AND night_date=?`, e.lease.ID, d.Format(dateLayout)))
+	assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=? AND night_date>?`, e.lease.ID, d.Format(dateLayout)))
+	assert.Equal(t, []string{"active"}, nightStates(t, e.db, e.lease.ID))
+
+	o2, err := placeNight(e.comp, 21, 2, d.AddDate(0, 0, 1), 1)
+	require.NoError(t, err, "释放的次晚可再订")
+	assert.Equal(t, 2, countRows(t, e.db, `SELECT COUNT(*) FROM night_bookings WHERE lease_id=(SELECT id FROM leases WHERE order_id=?)`, o2.ID))
+}

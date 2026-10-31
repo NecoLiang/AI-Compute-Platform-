@@ -90,6 +90,15 @@ func TestPickSlots(t *testing.T) {
 	// b. 无单组够用: 按组空闲数降序整组拼接, 最后一组按 gpu_index 取足。
 	free = slotsOf(map[string][]int{"g0": {0, 1}, "g1": {4, 5, 6}, "g2": {7}})
 	assert.Equal(t, []int{4, 5, 6, 0}, indexes(pickSlots(free, 4)))
+	// 平台分卡集合 {1,2,4,6,8} 在 8 卡双 NVLink 组(各 4 卡)上: 6 卡 = 整组 4 + 另一组前 2; 8 卡 = 两组全部; 1 卡取组名小者。
+	free8 := slotsOf(map[string][]int{"g0": {0, 1, 2, 3}, "g1": {4, 5, 6, 7}})
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5}, indexes(pickSlots(free8, 6)))
+	assert.Equal(t, []int{0, 1, 2, 3, 4, 5, 6, 7}, indexes(pickSlots(free8, 8)))
+	assert.Equal(t, []int{0}, indexes(pickSlots(free8, 1)))
+	// 已租出 g0 的 2 卡后: 4 卡优先取完整的 g1, 不跨组。
+	free8 = slotsOf(map[string][]int{"g0": {2, 3}, "g1": {4, 5, 6, 7}})
+	assert.Equal(t, []int{4, 5, 6, 7}, indexes(pickSlots(free8, 4)))
+	assert.Equal(t, []int{4, 5, 6, 7, 2, 3}, indexes(pickSlots(free8, 6)))
 	// 不足 k / k 非法。
 	assert.Nil(t, pickSlots(free, 7))
 	assert.Nil(t, pickSlots(free, 0))
