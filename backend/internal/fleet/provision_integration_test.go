@@ -53,9 +53,15 @@ func gpuListL(uuids ...string) string {
 // newProvEnv 1 台 2 卡节点(接到 fakeNode), 买家下 2 卡单并支付 → 一个待执行的 provision 任务。
 func newProvEnv(t *testing.T, withGateway bool) *provEnv {
 	t.Helper()
+	return newProvEnvKind(t, "container", withGateway)
+}
+
+// newProvEnvKind 同 newProvEnv, 商品交付方式可选(container / bare_metal)。
+func newProvEnvKind(t *testing.T, kind string, withGateway bool) *provEnv {
+	t.Helper()
 	db := setupFleetDB(t)
 	s := newTestFleet(t, db)
-	nodes := seedLeaseMarket(t, db, s, "container", 1, 2, 1)
+	nodes := seedLeaseMarket(t, db, s, kind, 1, 2, 1)
 	e := &provEnv{db: db, s: s, node: nodes[0], fake: newFakeNode(t, "")}
 
 	pub, enc, err := generateNodeKey(e.node, s.credKey)

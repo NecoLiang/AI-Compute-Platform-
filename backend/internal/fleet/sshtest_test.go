@@ -34,6 +34,7 @@ type fakeNode struct {
 	authorized []ssh.PublicKey
 	overrides  map[string]fakeReply // 命令前缀 → 覆盖返回
 	hooks      map[string]func()
+	handlers   map[string]func(cmd string) fakeReply // 命令前缀 → 按命令内容生成返回(模拟有状态的宿主机)
 	cmds       []string
 	pwLogins   int
 	pwTries    int // 收到的密码/键盘交互认证次数(含失败): 用于断言密码根本没有发出
@@ -285,6 +286,12 @@ func (f *fakeNode) exec(cmd string) fakeReply {
 			return r
 		}
 	}
+	for p, fn := range f.handlers {
+		if strings.HasPrefix(cmd, p) {
+			f.mu.Unlock()
+			return fn(cmd)
+		}
+	}
 	xid := strings.Join(f.xidLines, "\n")
 	f.mu.Unlock()
 	if strings.HasPrefix(cmd, "umask 077;") {
@@ -339,6 +346,16 @@ func (f *fakeNode) installKey(cmd string) fakeReply {
 func (f *fakeNode) Authorize(key ssh.PublicKey) {
 	f.mu.Lock()
 	f.authorized = append(f.authorized, key)
+	f.mu.Unlock()
+}
+
+// Handle 以前缀匹配的命令交给 fn 生成返回(Override 优先)。
+func (f *fakeNode) Handle(prefix string, fn func(cmd string) fakeReply) {
+	f.mu.Lock()
+	if f.handlers == nil {
+		f.handlers = map[string]func(string) fakeReply{}
+	}
+	f.handlers[prefix] = fn
 	f.mu.Unlock()
 }
 
