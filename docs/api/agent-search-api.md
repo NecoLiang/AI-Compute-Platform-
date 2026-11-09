@@ -52,13 +52,16 @@ curl -X POST http://localhost:8080/api/v1/market/agent-search \
   "requirement":{"purpose":"72B 大模型在线推理","gpu_models":["A100-80G","H100"],"card_count":2,
     "pricing_mode":"monthly","duration_hint":1,"budget_fen_max":10000000,"region":""},
   "matches":[{
-    "product":{"id":1,"gpu_model":"A100-80G","stock":16,"unit_price":1200000,"region":"华北-廊坊","...":"..."},
+    "product":{"id":1,"gpu_model":"A100-80G","stock":16,"unit_price":1200000,"region":"华北-廊坊","prices":[],"...":"..."},
+    "quote":{"pricing_mode":"monthly","unit_price":1200000,"min_duration":1},
     "score":90,
     "reasons":["GPU 型号 A100-80G 符合需求","库存 16 可满足算力推定的 2 卡需求",
-      "预估费用 24000.00 元在预算内","计费模式匹配(monthly)"]
+      "预估费用 24000.00 元在预算内","计费模式匹配(monthly, 单价 12000.00 元/卡/月)"]
   }]
 }}
 ```
+
+计费方式匹配与下单取价同一规则（v1.2 多价格）：零租商品命中任一**已启用**价格行即算匹配（不只看展示主价 `product.pricing_mode`），非零租商品看商品自身计费方式。`quote` 是本次匹配采用的价格（分/卡或分/台/周期）：需求指定了 `pricing_mode` 时为该方式的价格，未指定时为展示主价；商品未开放该方式、需询价时为 `null`。预算估算与 `reasons` 中的单价都按 `quote`，前端商品卡展示价格应优先取 `quote`。
 
 **响应（与算力无关的问题 → 拒答，不输出分析）**
 ```json

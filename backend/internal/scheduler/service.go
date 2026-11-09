@@ -10,6 +10,7 @@ package scheduler
 // 调度: 给交付/运营环节输出「节点调度建议」。打分透明可解释, 每一分都有依据:
 //   40 健康度(在线状态) + 30 容量适配(best-fit, 优先恰好容纳、减少碎片)
 //   + 20 负载(GPU 利用率低者优先) + 10 稳定性(近 24h 心跳在线率)
+//   托管商品(docs/26 §26.5.5)的容量与碎片按 gpu_slots 计算, 权重不变; 人工商品沿用节点上报的 available_cards。
 
 import (
 	"context"
@@ -20,9 +21,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/pkg/errcode"
 )
 
 const (
@@ -41,11 +44,44 @@ type Notifier interface {
 type Service struct {
 	repo     *Repository
 	notifier Notifier
+	managed  ManagedNodes
 }
 
 func NewService(repo *Repository) *Service { return &Service{repo: repo} }
 
 func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+
+// ManagedNodeReq 托管节点(mgmt_mode=ssh)注册参数, 沿用 POST /supplier/nodes(docs/25 §25.10)。
+type ManagedNodeReq struct {
+	ProductID      int64
+	NodeName       string
+	TotalCards     int
+	DiskPerCardGB  int
+	LeasePortStart int
+	LeasePortEnd   int
+	// ExpectedHostFingerprint 供给方在机器上执行 ssh-keygen -lf 得到的 SHA256 指纹(可选): 填写即预先钉死,
+	// 首次连接(含一次性密码引导)在握手阶段比对, 不一致则中止且不发送任何凭证。
+	ExpectedHostFingerprint string
+}
+
+// ManagedNodes 托管节点的生命周期由 fleet 负责, main 在 fleet.enabled=true 时注入。
+// 未注入时: 注册托管节点 40001, 删除托管节点 50000, 管理端列表不附加探活结论。
+type ManagedNodes interface {
+	RegisterManagedNode(supplierID int64, req ManagedNodeReq) (any, error)
+	DeleteManagedNode(supplierID, nodeID int64) error
+	// ManagedNodeExtras 按节点 ID 返回附加信息(最近探活结论等), 供运营列表展示。
+	ManagedNodeExtras(nodeIDs []int64) (map[int64]any, error)
+}
+
+func (s *Service) SetManagedNodes(m ManagedNodes) { s.managed = m }
+
+// RegisterManagedNode 托管节点注册: 委托 fleet。
+func (s *Service) RegisterManagedNode(supplierID int64, req ManagedNodeReq) (any, error) {
+	if s.managed == nil {
+		return nil, errcode.New(errcode.ParamInvalid, "托管履约未启用(fleet.enabled=false): 暂不支持添加 ssh 托管节点")
+	}
+	return s.managed.RegisterManagedNode(supplierID, req)
+}
 
 // ===== 节点注册与心跳 =====
 
@@ -60,6 +96,13 @@ func (s *Service) RegisterNode(supplierID, productID int64, nodeName string, tot
 	}
 	if owner == 0 || owner != supplierID {
 		return nil, "", fmt.Errorf("商品不存在或不属于当前供应方")
+	}
+	mode, err := s.repo.ProductFulfillmentMode(productID)
+	if err != nil {
+		return nil, "", err
+	}
+	if mode == "managed" {
+		return nil, "", fmt.Errorf("托管商品只能添加 ssh 托管节点(mgmt_mode=ssh)")
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -119,6 +162,17 @@ func (s *Service) DeleteNode(id, supplierID int64) error {
 	if err != nil {
 		return err
 	}
+	if n != nil && n.SupplierID == supplierID && n.MgmtMode == "ssh" {
+		// 托管节点删除要校验在租卡槽、释放卡 UUID 与主机指纹占用、重算派生库存(docs/25 §25.4.2)。
+		if s.managed == nil {
+			return errcode.New(errcode.InternalError, "托管履约模块未启用(fleet.enabled=false), 无法删除托管节点")
+		}
+		if err := s.managed.DeleteManagedNode(supplierID, id); err != nil {
+			return err
+		}
+		s.refreshProductHealth(n.ProductID, n.SupplierID)
+		return nil
+	}
 	ok, err := s.repo.DeleteNode(id, supplierID)
 	if err != nil {
 		return err
@@ -139,7 +193,29 @@ func (s *Service) ListAllNodes(status string, page, pageSize int) ([]Node, int64
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 20
 	}
-	return s.repo.ListAllNodes(status, page, pageSize)
+	list, total, err := s.repo.ListAllNodes(status, page, pageSize)
+	if err != nil || s.managed == nil {
+		return list, total, err
+	}
+	var ids []int64
+	for _, n := range list {
+		if n.MgmtMode == "ssh" {
+			ids = append(ids, n.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return list, total, nil
+	}
+	extras, err := s.managed.ManagedNodeExtras(ids)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range list {
+		if x, ok := extras[list[i].ID]; ok {
+			list[i].Managed = x
+		}
+	}
+	return list, total, nil
 }
 
 // ===== 探活 sweep =====
@@ -183,6 +259,11 @@ func (s *Service) sweepOnce() {
 	}
 }
 
+// RefreshProductHealth 供 fleet 在托管节点状态变化后触发健康度聚合(口径与心跳节点一致)。
+func (s *Service) RefreshProductHealth(productID, supplierID int64) {
+	s.refreshProductHealth(productID, supplierID)
+}
+
 // refreshProductHealth 聚合健康度; 发生跨越可用性边界的变化时通知供应方。
 func (s *Service) refreshProductHealth(productID, supplierID int64) {
 	prev, next, err := s.repo.UpdateProductHealth(productID)
@@ -224,6 +305,10 @@ type NodeAdvice struct {
 	Score          int      `json:"score"`
 	Verdict        string   `json:"verdict"` // recommended / alternative / unavailable
 	Reasons        []string `json:"reasons"`
+	// CapacitySource 容量口径: heartbeat=节点上报的 available_cards(人工商品); gpu_slots=按卡槽计算(托管商品, docs/26 §26.5.5)。
+	CapacitySource string `json:"capacity_source"`
+	// MaxGroupFree 托管节点同一拓扑组内最大可用卡数(碎片指标); 人工商品为 null。
+	MaxGroupFree *int `json:"max_group_free"`
 }
 
 type ScheduleAdvice struct {
@@ -271,16 +356,131 @@ func (s *Service) Advise(orderNo string, requesterSupplierID int64) (*ScheduleAd
 		advice.Summary = "该商品未注册算力节点, 无法给出调度建议; 请供应方先注册节点并接入心跳"
 		return advice, nil
 	}
+	mode, err := s.repo.ProductFulfillmentMode(o.ProductID)
+	if err != nil {
+		return nil, err
+	}
+	var slots map[int64]nodeSlots
+	wholeMachine := false
+	if mode == "managed" {
+		delivery, leaseID, err := s.repo.ManagedOrderContext(o.OrderNo, o.ProductID)
+		if err != nil {
+			return nil, err
+		}
+		groups, err := s.repo.ManagedSlotGroups(o.ProductID, leaseID)
+		if err != nil {
+			return nil, err
+		}
+		slots, wholeMachine = groupSlots(groups), delivery == "bare_metal"
+	}
 	for _, n := range nodes {
 		beats := 0
 		if b, err := s.repo.HeartbeatCount24h(n.ID); err == nil {
 			beats = b
 		}
-		advice.Nodes = append(advice.Nodes, scoreNode(n, needCards, beats))
+		if slots != nil {
+			advice.Nodes = append(advice.Nodes, scoreManagedNode(n, slots[n.ID], needCards, beats, wholeMachine))
+			continue
+		}
+		a := scoreNode(n, needCards, beats)
+		a.CapacitySource = capacityHeartbeat
+		advice.Nodes = append(advice.Nodes, a)
 	}
 	sort.SliceStable(advice.Nodes, func(i, j int) bool { return advice.Nodes[i].Score > advice.Nodes[j].Score })
 	advice.Summary = summarize(advice.Nodes, needCards)
 	return advice, nil
+}
+
+const (
+	capacityHeartbeat = "heartbeat"
+	capacitySlots     = "gpu_slots"
+)
+
+// nodeSlots 一台托管节点的卡槽汇总。Available=空闲 + 本订单租约已占(建议给本订单时这些卡可用)。
+type nodeSlots struct {
+	Total, Free, Own int
+	Quota            bool
+	Groups           []SlotGroup
+}
+
+func (c nodeSlots) available() int { return c.Free + c.Own }
+
+func (c nodeSlots) maxGroupAvailable() int {
+	m := 0
+	for _, g := range c.Groups {
+		m = max(m, g.Free+g.Own)
+	}
+	return m
+}
+
+func groupSlots(groups []SlotGroup) map[int64]nodeSlots {
+	out := map[int64]nodeSlots{}
+	for _, g := range groups {
+		c := out[g.NodeID]
+		c.Total += g.Total
+		c.Free += g.Free
+		c.Own += g.Own
+		c.Quota = c.Quota || g.Quota
+		c.Groups = append(c.Groups, g)
+		out[g.NodeID] = c
+	}
+	return out
+}
+
+// scoreManagedNode 托管商品节点打分(docs/26 §26.5.5): 容量与碎片按 gpu_slots 计算, 打分权重与 scoreNode 相同。
+// 可调度条件与下单时的卡槽分配候选一致(verified + schedulable + online; 无磁盘配额或整机交付只能整机出租)。
+func scoreManagedNode(n Node, c nodeSlots, needCards, beats24h int, wholeMachine bool) NodeAdvice {
+	n.AvailableCards, n.TotalCards = c.available(), c.Total
+	maxGroup := c.maxGroupAvailable()
+	slotReasons := []string{fmt.Sprintf("卡槽: 可用 %d/共 %d 卡, 拓扑组可用分布 %s, 同组最多 %d 卡", c.available(), c.Total, groupSummary(c.Groups), maxGroup)}
+	if c.Own > 0 {
+		slotReasons = append(slotReasons, fmt.Sprintf("该订单租约已在本节点预留 %d 张卡", c.Own))
+	}
+	if needCards > 0 && c.available() >= needCards {
+		if maxGroup >= needCards {
+			slotReasons = append(slotReasons, fmt.Sprintf("%d 卡可在同一拓扑组内分配", needCards))
+		} else {
+			slotReasons = append(slotReasons, fmt.Sprintf("%d 卡需跨拓扑组拼接, 卡间通信带宽较低", needCards))
+		}
+	}
+	unavailable := func(reason string) NodeAdvice {
+		return NodeAdvice{NodeID: n.ID, NodeName: n.NodeName, Status: n.Status, AvailableCards: n.AvailableCards,
+			TotalCards: n.TotalCards, Verdict: "unavailable", Reasons: append([]string{reason}, slotReasons...),
+			CapacitySource: capacitySlots, MaxGroupFree: &maxGroup}
+	}
+	if n.Status != "offline" {
+		switch {
+		case n.VerifyStatus != "verified":
+			return unavailable(fmt.Sprintf("节点未通过验收(%s), 不可调度", n.VerifyStatus))
+		case !n.Schedulable:
+			return unavailable("节点已暂停调度")
+		case n.Status != "online":
+			return unavailable("托管节点非在线状态, 不可调度")
+		case c.Total == 0:
+			return unavailable("节点尚无卡槽记录(未完成接入自检)")
+		case wholeMachine && (c.available() != c.Total || needCards != c.Total):
+			return unavailable(fmt.Sprintf("整机交付需整台 %d 卡全部空闲且订单卡数等于整机卡数", c.Total))
+		case !wholeMachine && !c.Quota && needCards != c.Total:
+			return unavailable(fmt.Sprintf("节点不支持磁盘配额, 只能整机(%d 卡)出租", c.Total))
+		case !wholeMachine && !c.Quota && c.available() != c.Total:
+			return unavailable("节点不支持磁盘配额, 只能整机出租, 当前非全部空闲")
+		}
+	}
+	a := scoreNode(n, needCards, beats24h)
+	a.Reasons = append(a.Reasons, slotReasons...)
+	a.CapacitySource, a.MaxGroupFree = capacitySlots, &maxGroup
+	return a
+}
+
+func groupSummary(groups []SlotGroup) string {
+	parts := make([]string, 0, len(groups))
+	for _, g := range groups {
+		parts = append(parts, fmt.Sprintf("%s:%d", g.TopoGroup, g.Free+g.Own))
+	}
+	if len(parts) == 0 {
+		return "无"
+	}
+	return strings.Join(parts, " ")
 }
 
 // scoreNode 透明打分: 40 健康 + 30 容量适配(best-fit) + 20 负载 + 10 稳定性。

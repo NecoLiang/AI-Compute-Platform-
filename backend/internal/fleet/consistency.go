@@ -1,0 +1,147 @@
+package fleet
+
+import (
+	"fmt"
+	"math"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// CatalogEntry P5/P13 用到的 gpu_catalog 字段。
+type CatalogEntry struct {
+	ModelName           string   `db:"model_name"`
+	Vendor              string   `db:"vendor"`
+	VRAMGB              *int     `db:"vram_gb"`
+	ProbeBaselineTFLOPS *float64 `db:"probe_baseline_tflops"`
+}
+
+var memSuffixRe = regexp.MustCompile(`(?i)[-\s]?(\d+)\s*G(B)?$`)
+var tokenSplitRe = regexp.MustCompile(`[^A-Z0-9]+`)
+var memSizeTokenRe = regexp.MustCompile(`^\d+GB?$`)
+
+// modelNoise 型号比对时忽略的 token: 品牌前缀、显存类型、板卡形态。显存容量另由 vramMatches 核对。
+// 其余 token(含 D / TI / S / NVL 等后缀)都区分型号: "RTX 4090 D"、"V100S"、"H100 NVL" 是不同 SKU。
+var modelNoise = map[string]bool{
+	"NVIDIA": true, "TESLA": true, "GEFORCE": true, "QUADRO": true,
+	"HBM2": true, "HBM2E": true, "HBM3": true, "HBM3E": true,
+	"PCIE": true, "SXM": true, "SXM2": true, "SXM3": true, "SXM4": true, "SXM5": true,
+}
+
+// modelTokens 归一型号(商品型号与 nvidia-smi 名称同一规则): 大写后按非字母数字切分,
+// 去掉显存容量(80G / 80GB)与 modelNoise 中的 token, 保留顺序。
+func modelTokens(model string) []string {
+	var out []string
+	for _, t := range tokenSplitRe.Split(strings.ToUpper(strings.TrimSpace(model)), -1) {
+		if t == "" || modelNoise[t] || memSizeTokenRe.MatchString(t) {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// memFromModel 从 "H100-80G" 取 80, 作为 catalog 未填 vram_gb 时的期望显存。
+func memFromModel(model string) int {
+	m := memSuffixRe.FindStringSubmatch(strings.TrimSpace(model))
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// ModelMatches 归一后的 token 序列必须完全相同(CR-S1: 不再是子集匹配):
+// "H100-80G" 匹配 "NVIDIA H100 80GB HBM3" / "NVIDIA H100 PCIe"; "A100-80G" 匹配 "NVIDIA A100-SXM4-80GB";
+// "RTX 4090-24G" 匹配 "NVIDIA GeForce RTX 4090", 不匹配 "NVIDIA GeForce RTX 4090 D"(多出 D)与 "4090D"。
+func ModelMatches(productModel, smiName string) bool {
+	want, have := modelTokens(productModel), modelTokens(smiName)
+	if len(want) == 0 || len(want) != len(have) {
+		return false
+	}
+	for i := range want {
+		if want[i] != have[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// vramMatches 显存误差 ≤ 3%。GDDR 卡开启 ECC 时可见显存少 1/16(如 A40/L40S 48G → 46068 MiB),
+// 同样视为一致(docs/25 P5 的实现细化)。
+func vramMatches(gotMiB, wantGB int) bool {
+	want := float64(wantGB) * 1024
+	if math.Abs(float64(gotMiB)-want)/want <= 0.03 {
+		return true
+	}
+	eccWant := want * 15 / 16
+	return math.Abs(float64(gotMiB)-eccWant)/eccWant <= 0.03
+}
+
+// CheckConsistency P5: 型号、卡数、显存逐项比对, 返回全部差异(空=一致)。
+func CheckConsistency(productModel string, cat *CatalogEntry, declaredCards int, gpus []GPU) []string {
+	var diffs []string
+	if cat == nil {
+		return []string{fmt.Sprintf("gpu_catalog 未收录商品型号 %q, 无法核对", productModel)}
+	}
+	if !strings.EqualFold(cat.Vendor, "NVIDIA") {
+		return []string{fmt.Sprintf("型号 %q 厂商为 %s, 托管探活当前仅支持 NVIDIA", productModel, cat.Vendor)}
+	}
+	if len(gpus) != declaredCards {
+		diffs = append(diffs, fmt.Sprintf("卡数不一致: 声明 %d 张, 实测 %d 张", declaredCards, len(gpus)))
+	}
+	wantGB := 0
+	if cat.VRAMGB != nil {
+		wantGB = *cat.VRAMGB
+	} else {
+		wantGB = memFromModel(cat.ModelName)
+	}
+	for _, g := range gpus {
+		if !ModelMatches(cat.ModelName, g.Name) {
+			diffs = append(diffs, fmt.Sprintf("GPU%d 型号不一致: 商品 %s, 实测 %s", g.Index, cat.ModelName, g.Name))
+			continue
+		}
+		if wantGB > 0 && !vramMatches(g.MemoryMiB, wantGB) {
+			diffs = append(diffs, fmt.Sprintf("GPU%d 显存不一致: 期望 %dGB, 实测 %d MiB(误差超过 3%%)", g.Index, wantGB, g.MemoryMiB))
+		}
+	}
+	if wantGB == 0 {
+		diffs = append(diffs, fmt.Sprintf("gpu_catalog 型号 %s 未填写显存, 无法核对显存", cat.ModelName))
+	}
+	return diffs
+}
+
+// ResourceReq P8 按卡切分的最低要求。
+type ResourceReq struct {
+	Cards         int
+	ReserveCPU    int
+	ReserveMemGB  int
+	DiskPerCardGB int // 0 = 未声明(整机交付)
+}
+
+// 每卡最低切分额度: 1 核 / 4 GB 内存。低于此无法给租约容器分配可用资源。
+const (
+	minCPUPerCard   = 1
+	minMemGBPerCard = 4
+)
+
+// CheckResources P8: 扣除主机保留后按卡切分是否足够, 返回不足项(空=满足)。
+func CheckResources(h HostInfo, r ResourceReq) []string {
+	var diffs []string
+	if h.Arch != "x86_64" {
+		diffs = append(diffs, fmt.Sprintf("仅支持 x86_64, 实测 %s", h.Arch))
+	}
+	if r.Cards <= 0 {
+		return append(diffs, "节点声明卡数为 0")
+	}
+	if cpu := h.CPUCores - r.ReserveCPU; cpu < r.Cards*minCPUPerCard {
+		diffs = append(diffs, fmt.Sprintf("CPU 不足: %d 核扣除保留 %d 核后不足每卡 %d 核", h.CPUCores, r.ReserveCPU, minCPUPerCard))
+	}
+	if mem := h.MemGB - r.ReserveMemGB; mem < r.Cards*minMemGBPerCard {
+		diffs = append(diffs, fmt.Sprintf("内存不足: %dGB 扣除保留 %dGB 后不足每卡 %dGB", h.MemGB, r.ReserveMemGB, minMemGBPerCard))
+	}
+	if r.DiskPerCardGB > 0 && h.DiskFreeGB < r.DiskPerCardGB*r.Cards {
+		diffs = append(diffs, fmt.Sprintf("数据盘不足: %s 可用 %dGB, 需要 %d 卡 × %dGB", h.DiskPath, h.DiskFreeGB, r.Cards, r.DiskPerCardGB))
+	}
+	return diffs
+}

@@ -55,25 +55,28 @@ func (h *Handler) AdminList(c *gin.Context) {
 }
 
 type modelReq struct {
-	Vendor          string   `json:"vendor" binding:"required"`
-	ModelName       string   `json:"model_name" binding:"required"`
-	Origin          string   `json:"origin" binding:"required"`
-	Grade           string   `json:"grade" binding:"required"`
-	VRAMGB          *int     `json:"vram_gb"`
-	VRAMType        *string  `json:"vram_type"`
-	FP16TFLOPS      *float64 `json:"fp16_tflops"`
-	Interconnect    *string  `json:"interconnect"`
-	SecureCertified bool     `json:"secure_certified"`
-	SpecSource      *string  `json:"spec_source"`
-	Status          string   `json:"status"`
-	SortWeight      int      `json:"sort_weight"`
+	Vendor        string   `json:"vendor" binding:"required"`
+	ModelName     string   `json:"model_name" binding:"required"`
+	Origin        string   `json:"origin" binding:"required"`
+	Grade         string   `json:"grade" binding:"required"`
+	VRAMGB        *int     `json:"vram_gb"`
+	VRAMType      *string  `json:"vram_type"`
+	FP16TFLOPS    *float64 `json:"fp16_tflops"`
+	ProbeBaseline *float64 `json:"probe_baseline_tflops"`
+	Interconnect  *string  `json:"interconnect"`
+	// ComputeCapability 可空; 未填写的型号不放行一键部署(docs/27 §27.2)。
+	ComputeCapability *string `json:"compute_capability"`
+	SecureCertified   bool    `json:"secure_certified"`
+	SpecSource        *string `json:"spec_source"`
+	Status            string  `json:"status"`
+	SortWeight        int     `json:"sort_weight"`
 }
 
 func (r modelReq) toModel() *GPUModel {
 	return &GPUModel{
 		Vendor: r.Vendor, ModelName: r.ModelName, Origin: r.Origin, Grade: r.Grade,
-		VRAMGB: r.VRAMGB, VRAMType: r.VRAMType, FP16TFLOPS: r.FP16TFLOPS,
-		Interconnect: r.Interconnect, SecureCertified: r.SecureCertified,
+		VRAMGB: r.VRAMGB, VRAMType: r.VRAMType, FP16TFLOPS: r.FP16TFLOPS, ProbeBaselineTFLOPS: r.ProbeBaseline,
+		Interconnect: r.Interconnect, ComputeCapability: r.ComputeCapability, SecureCertified: r.SecureCertified,
 		SpecSource: r.SpecSource, Status: r.Status, SortWeight: r.SortWeight,
 	}
 }

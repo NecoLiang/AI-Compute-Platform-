@@ -37,6 +37,7 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/admin/payment/list", h.ListPayments)
 	r.GET("/admin/payment/refunds", h.ListRefunds)
 	r.POST("/admin/payment/refunds/:order_no", h.ExecuteRefund)
+	r.GET("/admin/payment/partial-refunds", h.ListPartialRefunds)
 	r.GET("/admin/payment/merchants", h.ListMerchants)
 	r.PUT("/admin/payment/merchants/:user_id", h.BindMerchant)
 }
@@ -219,4 +220,27 @@ func paymentErrorCode(err error) int {
 		return errcode.InternalError
 	}
 	return compute.ErrToCode(err)
+}
+
+// ListPartialRefunds 托管订单部分退款(停机补偿 / 供给方违约, T-106)。
+func (h *Handler) ListPartialRefunds(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 || size > 100 {
+		size = 20
+	}
+	list, total, err := h.svc.ListPartialRefunds(c.Query("status"), c.Query("order_no"), page, size)
+	if err != nil {
+		var ce *errcode.CodedError
+		if errors.As(err, &ce) {
+			response.Error(c, ce.Code, ce.Msg)
+			return
+		}
+		response.Error(c, errcode.InternalError, "部分退款列表读取失败")
+		return
+	}
+	response.SuccessPage(c, list, total, page, size)
 }

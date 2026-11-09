@@ -70,9 +70,11 @@ const invoiceColumns = `id, invoice_no, buyer_id, company_name, tax_no, bank_nam
 	amount_fen, invoice_type, status, tax_invoice_no, pdf_filename, reject_reason,
 	applied_at, issued_at, created_at, updated_at`
 
-const billableOrderColumns = `o.id, o.order_no, o.status, o.quantity, o.total_amount,
+// pricing_mode 只取订单快照(028 已回填存量订单), 不回退商品当前展示方式: 商品重提后展示方式会变 (CR M1)。
+// total_amount 为开票金额 = 实付 − 已成功的部分退款(托管订单停机补偿/供给方违约, T-106; 人工订单无部分退款, 等于实付)。
+const billableOrderColumns = `o.id, o.order_no, o.status, o.quantity, o.total_amount - ` + succeededPartialRefunds + ` AS total_amount,
 	COALESCE(p.gpu_model,'') AS gpu_model, COALESCE(p.product_type,'') AS product_type,
-	COALESCE(p.pricing_mode,'') AS pricing_mode, o.created_at`
+	COALESCE(o.pricing_mode,'') AS pricing_mode, o.created_at`
 
 // ===== Repository =====
 
@@ -112,7 +114,15 @@ func (r *Repository) UpsertTitle(t *InvoiceTitle) error {
 
 // billableWhere 可开票口径: 已付款状态 + 未被任何 pending/issued 发票占用。
 // rejected 发票不占用订单, 其关联订单可重新申请。
+// succeededPartialRefunds 订单已成功的部分退款合计(分)。
+const succeededPartialRefunds = `COALESCE((SELECT SUM(pr.amount) FROM payment_refunds pr
+	WHERE pr.order_no = o.order_no AND pr.status = 'success'), 0)`
+
+// 部分退款未终结(pending/processing/failed 待重试)时开票金额未定, 暂不可开票; 实付已全部部分退回的不可开票。
+// 已开票订单之后再发生部分退款按现行红冲流程处理(docs/25 §25.7.6)。
 const billableWhere = `o.buyer_id = ? AND o.status IN ('paid','provisioning','active','completed')
+	AND o.total_amount > ` + succeededPartialRefunds + `
+	AND NOT EXISTS (SELECT 1 FROM payment_refunds pr WHERE pr.order_no = o.order_no AND pr.status <> 'success')
 	AND NOT EXISTS (
 		SELECT 1 FROM invoice_orders io JOIN invoices i ON i.id = io.invoice_id
 		WHERE io.order_id = o.id AND i.status IN ('pending','issued')

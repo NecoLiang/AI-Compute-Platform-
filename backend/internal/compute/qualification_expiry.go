@@ -2,6 +2,7 @@ package compute
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -114,7 +115,10 @@ func requireUnexpiredQualifications(db sqlx.Queryer, userID int64) error {
 		return err
 	}
 	if expired {
-		return fmt.Errorf("供给方资质已过期，请更新资质并通过审核后再交易")
+		return errQualificationExpired
 	}
 	return nil
 }
+
+// errQualificationExpired 供给方资质过期(40001 业务提示); availability 据此给出不可下单原因。
+var errQualificationExpired = errors.New("供给方资质已过期，请更新资质并通过审核后再交易")

@@ -20,6 +20,12 @@ type Service struct {
 	db         *sqlx.DB
 	yeepay     Gateway
 	onRefunded func(orderNo string) error
+	// onPaid 托管订单收款确认的同事务钩子(compute.OnOrderPaidTx → fleet 入队开通, docs/25 §25.5.1)。
+	onPaid func(tx *sqlx.Tx, order *compute.Order) error
+	// 续租收款校验/落账(SetRenewalHooks); nil 时回退 compute 包级函数。
+	validateRenewal, applyRenewal RenewalPaymentFunc
+	// partialRefunds 部分退款通道(EnablePartialRefunds, 仅 fleet.outage.yeepay_partial_refund_confirmed=true 时打开)。
+	partialRefunds bool
 }
 
 // Gateway is the external payment boundary (易宝). Every result that moves
@@ -48,6 +54,32 @@ func NewService(repo *Repository, db *sqlx.DB, gateway ...Gateway) *Service {
 
 // SetRefundHook 退款成功后回调订单域(释放余量、吊销凭证、通知买家)。
 func (s *Service) SetRefundHook(fn func(orderNo string) error) { s.onRefunded = fn }
+
+// SetPaidHook 收款确认后在同一事务内回调订单域。托管订单必须接入, 否则确认收款失败(重试由回调/补单驱动)。
+func (s *Service) SetPaidHook(fn func(tx *sqlx.Tx, order *compute.Order) error) { s.onPaid = fn }
+
+// RenewalPaymentFunc 续租收款校验/落账(order 为续租单, parent 为原订单)。
+type RenewalPaymentFunc func(tx *sqlx.Tx, order, parent *compute.Order, r *compute.Renewal) error
+
+// SetRenewalHooks 注入 compute.Service 的续租收款校验/落账(托管原订单经租约钩子, docs/25 §25.7.2)。
+// 未注入时回退 compute 包级函数: 人工订单行为不变, 托管原订单返回 50000。
+func (s *Service) SetRenewalHooks(validate, apply RenewalPaymentFunc) {
+	s.validateRenewal, s.applyRenewal = validate, apply
+}
+
+func (s *Service) validateRenewalTx(tx *sqlx.Tx, order, parent *compute.Order, r *compute.Renewal) error {
+	if s.validateRenewal != nil {
+		return s.validateRenewal(tx, order, parent, r)
+	}
+	return compute.ValidateRenewalPaymentTx(tx, order, parent, r)
+}
+
+func (s *Service) applyRenewalTx(tx *sqlx.Tx, order, parent *compute.Order, r *compute.Renewal) error {
+	if s.applyRenewal != nil {
+		return s.applyRenewal(tx, order, parent, r)
+	}
+	return compute.ApplyRenewalPaymentTx(tx, order, parent, r)
+}
 
 type PayReq struct {
 	OrderNo string `json:"order_no"`
@@ -118,7 +150,7 @@ func (s *Service) Pay(buyerID int64, req PayReq) (*PayResp, error) {
 	if s.yeepay.Configured() && !slices.Contains(s.yeepay.PayChannels(), req.Channel) {
 		return nil, fmt.Errorf("该支付方式暂未开通, 请选择其他支付方式")
 	}
-	if err := compute.ValidateRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
+	if err := s.validateRenewalTx(tx, renewalOrder, parent, renewal); err != nil {
 		return nil, err
 	}
 	var paid int
@@ -223,6 +255,13 @@ func (s *Service) HandleNotify(kind, raw string) error {
 		if err != nil {
 			return err
 		}
+		partial, err := s.isPartialRefundRequest(result.RequestID)
+		if err != nil {
+			return err
+		}
+		if partial {
+			return s.applyPartialRefundResult(result)
+		}
 		return s.applyRefundResult(result)
 	case NotifyNetIn:
 		result, err := parseNetInNotify(content)
@@ -284,7 +323,7 @@ func (s *Service) confirmPayment(r *PaymentResult) error {
 	}
 	payable := order.Status == "pending_payment"
 	if payable {
-		switch err := compute.ValidateRenewalPaymentTx(tx, renewalOrder, parent, renewal); {
+		switch err := s.validateRenewalTx(tx, renewalOrder, parent, renewal); {
 		case errors.Is(err, compute.ErrRenewalConflict):
 			payable = false
 		case err != nil:
@@ -308,8 +347,17 @@ func (s *Service) confirmPayment(r *PaymentResult) error {
 	if _, err := tx.Exec("UPDATE orders SET status='paid' WHERE order_no=?", r.OrderNo); err != nil {
 		return err
 	}
-	if err := compute.ApplyRenewalPaymentTx(tx, renewalOrder, parent, renewal); err != nil {
+	if err := s.applyRenewalTx(tx, renewalOrder, parent, renewal); err != nil {
 		return err
+	}
+	if renewal == nil && renewalOrder.FulfillmentMode == compute.FulfillmentManaged {
+		if s.onPaid == nil {
+			return fmt.Errorf("托管订单 %s 收款钩子未接入(fleet 未启用), 无法确认收款", r.OrderNo)
+		}
+		renewalOrder.Status = "paid"
+		if err := s.onPaid(tx, renewalOrder); err != nil {
+			return err
+		}
 	}
 	// 应结记录在收款时按下单时锁定的佣金生成; 实际分账在清算入账且交付确认后发起。
 	for _, item := range []struct {
@@ -373,6 +421,32 @@ func splitEligible(orderStatus string, parentStatus *string) bool {
 	return parentStatus == nil || *parentStatus == "active" || *parentStatus == "completed"
 }
 
+func isManagedFamily(order, parent *compute.Order) bool {
+	root := order
+	if parent != nil {
+		root = parent
+	}
+	return root.FulfillmentMode == compute.FulfillmentManaged
+}
+
+// splitRowsOpen 两行应结都还未发起分账(pending/failed)。
+func splitRowsOpen(rows []Settlement) bool {
+	for _, r := range rows {
+		if r.Status != "pending" && r.Status != "failed" {
+			return false
+		}
+	}
+	return true
+}
+
+func managedSettleBlocked(order, parent *compute.Order) bool {
+	root := order
+	if parent != nil {
+		root = parent
+	}
+	return root.FulfillmentMode == compute.FulfillmentManaged && root.SettleReadyAt == nil
+}
+
 // trySplit 对一笔已清算、未退款、交付已确认的订单发起分账: 供给方应得部分分到其易宝商编,
 // 剩余部分(平台服务费)随分账解冻到平台收款商编。请求号先落库再请求易宝, 结果不明时按请求号查询。
 func (s *Service) trySplit(orderNo string) error {
@@ -392,6 +466,10 @@ func (s *Service) trySplit(orderNo string) error {
 	if !splitEligible(order.Status, parentStatus) {
 		return nil
 	}
+	// 托管订单: 激活(active)不代表可分账, 须等租期末结算(settle_ready_at, T-106)。续租看母单。
+	if managedSettleBlocked(order, parent) {
+		return nil
+	}
 	var pay Payment
 	if err := tx.Get(&pay, "SELECT * FROM payments WHERE order_no=? AND status='paid' ORDER BY id DESC LIMIT 1 FOR UPDATE", orderNo); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -406,6 +484,17 @@ func (s *Service) trySplit(orderNo string) error {
 	if err := tx.Select(&rows, "SELECT * FROM settlements WHERE order_no=? FOR UPDATE", orderNo); err != nil {
 		return err
 	}
+	managed := isManagedFamily(order, parent)
+	if managed {
+		// 托管订单: 按已成功的部分退款重算两行应结(T-106); 有未终结的部分退款时本轮不分账。
+		if !splitRowsOpen(rows) {
+			return nil
+		}
+		ok, err := adjustManagedSplitTx(tx, &pay, rows)
+		if err != nil || !ok {
+			return err
+		}
+	}
 	var supplier *Settlement
 	var total int64
 	for i := range rows {
@@ -414,11 +503,19 @@ func (s *Service) trySplit(orderNo string) error {
 			supplier = &rows[i]
 		}
 	}
-	if supplier == nil || len(rows) != 2 || total != pay.Amount {
+	if supplier == nil || len(rows) != 2 || (!managed && total != pay.Amount) {
 		return fmt.Errorf("订单 %s 应结记录与支付金额不一致", orderNo)
 	}
 	if supplier.Status != "pending" && supplier.Status != "failed" {
 		return nil
+	}
+	if managed && total == 0 {
+		// 实付已通过部分退款全部退回买家: 无可分资金, 两行应结关闭。
+		if _, err := tx.Exec(`UPDATE settlements SET status='cancelled', fail_reason='实付已全部部分退款'
+			WHERE order_no=? AND status IN ('pending','failed')`, orderNo); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if supplier.Amount <= 0 {
 		return fmt.Errorf("订单 %s 供给方应结金额无效", orderNo)
@@ -564,6 +661,18 @@ func (s *Service) submitRefund(orderNo string) (string, error) {
 			back = append(back, DivideBackItem{LedgerNo: *row.LedgerNo, DivideDetailNo: *row.DivideDetailNo, Amount: row.Amount})
 		}
 	}
+	// 托管订单的部分退款(停机补偿/违约, T-106): 处理中时等终态; 已成功的从全额退款中扣除, 只退剩余。
+	refunded, err := partialRefundProcessingTx(tx, pay.ID)
+	if err != nil {
+		return "", err
+	}
+	if refunded < 0 {
+		return "pending", nil
+	}
+	amount := pay.Amount - refunded
+	if amount <= 0 {
+		return "", fmt.Errorf("订单 %s 已通过部分退款退完实付, 需人工处理", orderNo)
+	}
 	requestID := newRequestID("R", orderNo)
 	if _, err := tx.Exec("UPDATE payments SET refund_status='processing',refund_request_id=? WHERE id=?", requestID, pay.ID); err != nil {
 		return "", err
@@ -571,7 +680,7 @@ func (s *Service) submitRefund(orderNo string) (string, error) {
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
-	result, err := s.yeepay.Refund(RefundOrder{OrderNo: orderNo, RequestID: requestID, Amount: pay.Amount, Reason: pay.RefundReason, DivideBack: back})
+	result, err := s.yeepay.Refund(RefundOrder{OrderNo: orderNo, RequestID: requestID, Amount: amount, Reason: pay.RefundReason, DivideBack: back})
 	if err != nil {
 		if bizCode(err) != "" {
 			return "failed", s.applyRefundResult(&RefundResult{OrderNo: orderNo, RequestID: requestID, Status: "FAILED", FailReason: err.Error()})
@@ -625,8 +734,17 @@ func (s *Service) applyRefundResult(r *RefundResult) error {
 	if pay.Status == "refunded" {
 		return tx.Commit()
 	}
-	if r.Amount > 0 && r.Amount != pay.Amount {
-		return fmt.Errorf("易宝退款金额与支付金额不一致: order=%s", orderNo)
+	refunded, _, err := partialRefundTotals(tx, pay.ID)
+	if err != nil {
+		return err
+	}
+	if r.Amount > 0 && r.Amount != pay.Amount-refunded {
+		return fmt.Errorf("易宝退款金额与支付金额(扣除已成功部分退款)不一致: order=%s", orderNo)
+	}
+	// 尚未提交的部分退款由全额退款覆盖, 不再提交(处理中的部分退款在 submitRefund 已等待终态)。
+	if _, err := tx.Exec(`UPDATE payment_refunds SET status='failed', last_error='订单已全额退款, 本笔不再提交'
+		WHERE payment_id=? AND status IN ('pending','failed')`, pay.ID); err != nil {
+		return err
 	}
 	if _, err := tx.Exec("UPDATE payments SET status='refunded',refund_status='success',refunded_at=NOW() WHERE id=?", pay.ID); err != nil {
 		return err
@@ -663,6 +781,7 @@ func (s *Service) RunJobs() error {
 	keep(s.syncClearing())
 	keep(s.queueCancelledPaidRefunds())
 	keep(s.syncDivides())
+	keep(s.runPartialRefunds())
 	keep(s.runSplits())
 	keep(s.runRefunds())
 	return firstErr
@@ -992,14 +1111,14 @@ func (s *Service) GetOrderPayments(buyerID int64, orderNo string) ([]Payment, er
 	return append(list, *p), nil
 }
 
-func (s *Service) GetOrderSettlements(supplierID int64, orderNo string) ([]Settlement, error) {
+func (s *Service) GetOrderSettlements(supplierID int64, orderNo string) ([]SupplierSettlement, error) {
 	return s.repo.GetSettlementsByOrder(supplierID, orderNo)
 }
 
 var settlementStatuses = map[string]bool{"pending": true, "processing": true, "success": true, "failed": true, "cancelled": true, "reversed": true}
 
 // ListSupplierSettlements 供给方结算流水(按商品归属)。
-func (s *Service) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]Settlement, int64, error) {
+func (s *Service) ListSupplierSettlements(supplierID int64, status string, page, pageSize int) ([]SupplierSettlement, int64, error) {
 	if status != "" && !settlementStatuses[status] {
 		return nil, 0, fmt.Errorf("invalid status")
 	}

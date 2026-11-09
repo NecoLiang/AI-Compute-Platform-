@@ -9,9 +9,9 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-func intp(v int) *int          { return &v }
-func f64p(v float64) *float64  { return &v }
-func strp(s string) *string    { return &s }
+func intp(v int) *int         { return &v }
+func f64p(v float64) *float64 { return &v }
+func strp(s string) *string   { return &s }
 
 // ===== 纯校验单测 =====
 
@@ -26,11 +26,21 @@ func TestValidate(t *testing.T) {
 		{Vendor: "v", ModelName: "x", Origin: "domestic", Grade: "旗舰"},
 		{Vendor: "v", ModelName: "x", Origin: "domestic", Grade: "consumer", VRAMGB: intp(-1)},
 		{Vendor: "v", ModelName: "x", Origin: "domestic", Grade: "consumer", FP16TFLOPS: f64p(0)},
+		{Vendor: "v", ModelName: "x", Origin: "domestic", Grade: "consumer", ComputeCapability: strp("sm_90")},
+		{Vendor: "v", ModelName: "x", Origin: "domestic", Grade: "consumer", ComputeCapability: strp("9")},
 	}
 	for i, m := range cases {
 		if err := validate(m); err == nil {
 			t.Errorf("用例 %d 应校验失败: %+v", i, m)
 		}
+	}
+	cc := &GPUModel{Vendor: "NVIDIA", ModelName: "H100-80G", Origin: "international", Grade: "datacenter", ComputeCapability: strp(" 9.0 ")}
+	if err := validate(cc); err != nil || *cc.ComputeCapability != "9.0" {
+		t.Fatalf("compute_capability 应去空白后通过: %v", err)
+	}
+	blank := &GPUModel{Vendor: "NVIDIA", ModelName: "H100-80G", Origin: "international", Grade: "datacenter", ComputeCapability: strp("  ")}
+	if err := validate(blank); err != nil || blank.ComputeCapability != nil {
+		t.Fatalf("空 compute_capability 应视为未登记(NULL): %v", err)
 	}
 }
 
@@ -60,8 +70,8 @@ func setupCatalogDB(t *testing.T) *Service {
 		vendor VARCHAR(32) NOT NULL, model_name VARCHAR(64) NOT NULL,
 		origin ENUM('domestic','international') NOT NULL,
 		grade ENUM('datacenter','consumer') NOT NULL DEFAULT 'datacenter',
-		vram_gb INT NULL, vram_type VARCHAR(16) NULL, fp16_tflops DECIMAL(8,1) NULL,
-		interconnect VARCHAR(32) NULL, secure_certified TINYINT(1) NOT NULL DEFAULT 0,
+		vram_gb INT NULL, vram_type VARCHAR(16) NULL, fp16_tflops DECIMAL(8,1) NULL, probe_baseline_tflops DECIMAL(8,1) NULL,
+		interconnect VARCHAR(32) NULL, compute_capability VARCHAR(8) NULL, secure_certified TINYINT(1) NOT NULL DEFAULT 0,
 		spec_source VARCHAR(255) NULL,
 		status ENUM('enabled','disabled') NOT NULL DEFAULT 'enabled',
 		sort_weight INT NOT NULL DEFAULT 0,
@@ -126,6 +136,21 @@ func TestCatalog_CRUDAndFilters(t *testing.T) {
 	adminList, _ := svc.AdminList(Filter{})
 	if len(adminList) != 2 || adminList[1].SpecSource == nil {
 		t.Fatalf("管理端应含 disabled 且带 spec_source: %+v", adminList)
+	}
+
+	// compute_capability: 未登记 → found 且为空; 登记后可查; 型号不存在 → found=false
+	if cc, found, err := svc.ComputeCapabilityByModel("昇腾910B"); err != nil || !found || cc != "" {
+		t.Fatalf("未登记算力架构应 found 且为空: %q %v %v", cc, found, err)
+	}
+	a100.ComputeCapability = strp("8.0")
+	if _, err := svc.Update(a100.ID, a100); err != nil {
+		t.Fatalf("Update cc: %v", err)
+	}
+	if cc, found, err := svc.ComputeCapabilityByModel("A100-80G"); err != nil || !found || cc != "8.0" {
+		t.Fatalf("登记后应可查: %q %v %v", cc, found, err)
+	}
+	if _, found, err := svc.ComputeCapabilityByModel("不存在"); err != nil || found {
+		t.Fatalf("不存在型号应 found=false: %v %v", found, err)
 	}
 
 	// 更新不存在的 id

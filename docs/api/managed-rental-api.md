@@ -1,0 +1,696 @@
+# 托管零租 Managed Rental API
+
+**Base**: `http://localhost:8080/api/v1` | **Auth**: 供给方接口需 supplier 角色（只能操作自己商品下的节点）；运营接口需 operator/admin
+**设计**：`docs/25`（§25.4 节点接入、§25.8.1 节点状态机、§25.10 API 摘要）。本文件为正式接口契约。
+
+> **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-089）整机托管与重装确认；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）；S2（T-086）买家公钥、连接信息、会话记录（「买家连接」）与运营租约/会话检索（「运营接口」）。
+> 托管订单的下单、开通、取消退款口径见 [compute-api.md](compute-api.md)「托管订单（S2）」与 [payment-api.md](payment-api.md)「托管订单（S2）」。续租（extend/restart）、冻结/解冻的订单侧接口见 compute-api.md「托管订单续租」「托管订单冻结与解冻」；租约侧的到期、宽限、清除回执、冻结效果与挖矿特征扫描见本文「租约生命周期（S2 T-087/T-088）」。
+
+**开关**：所有接口仅在 `fleet.enabled=true` 时注册。关闭时（默认）这些路径未注册（HTTP 404），`POST /supplier/nodes` 传 `mgmt_mode:"ssh"` 返回 40001「托管履约未启用(fleet.enabled=false)」，托管商品不可提交审核与下单（40001），人工模式行为不变。
+
+**通用口径**
+- 信封 `{code,message,data,request_id}`；错误码只用 40001 / 40100 / 40101 / 40300 / 40400 / 40900 / 42900 / 50000。
+- 他人节点、不存在的节点统一 40400「节点不存在或不属于当前供应方」（不泄露存在性）。
+- 外部依赖缺失（`security.credential_key`、`accessgw.egress_ips` 等）返回 50000 并写明缺什么，不降级、不伪造成功。
+- 节点 JSON 不含任何凭证：管理私钥、公钥原文、`node_key_hash`、`host_fp_claim` 均不出接口。一次性引导密码不落库、不进日志、不进审计。
+- 时间为 ISO8601（Asia/Shanghai）；可空为 `null`。
+
+### 节点状态 `verify_status`
+
+| 值 | 含义 | 供给方可做 |
+|---|---|---|
+| `unverified` | 新建 / 修改了 SSH 信息 / 首次连接待确认指纹 / 运营恢复后 | 填 SSH、发起探活、确认指纹 |
+| `verifying` | 完整探活排队或执行中 | 等待（重复发起返回同一任务） |
+| `verified` | 探活通过，生成卡槽，计入可售 | 卡槽停用、排空 |
+| `failed` | 完整探活未通过（节点同时置 `status=offline`） | 修复后重新发起探活 |
+| `key_mismatch` | SSH 主机指纹与已确认值不一致，停止新分配 | 核对后确认新指纹（自动继续探活） |
+| `needs_reimage` | 整机（`bare_metal`）租约结束待重装（S2 T-089 写入：到期/退款/取消/冻结中到期，买家曾持有 root） | 重装系统后调用重装确认（提交新主机指纹）；在此之前修改 SSH、确认指纹、发起探活、运营恢复都不会让节点回到可售 |
+| `suspended` | 运营停用 | 无（只读） |
+
+`schedulable`（是否接受新分配）独立于上表，由排空/恢复切换。`status`（online/offline）由 fleet 的 SSH 轻量探活判定，scheduler 的心跳清扫不处理 ssh 节点。
+
+### 卡槽状态 `gpu_slots.state`
+
+`free` 可售 / `withheld` 供给方停用 / `faulty` 健康或压测不通过 / `reserved`、`leased`、`draining`（S2 租约使用）。
+商品派生库存 = `verified` 且 `schedulable=1` 且 `status=online` 的节点上 `free` 卡槽数；库存为 0 时托管商品 `active→sold_out`，恢复后 `sold_out→active`（`draft`/审核中/下架状态不受影响）。
+
+---
+
+## POST /supplier/nodes · 添加托管节点 ✅
+
+沿用 docs/23 的注册接口；传 `mgmt_mode:"ssh"` 即为托管节点。商品必须是本人的 `fulfillment_mode=managed` 商品。
+
+```
+curl -X POST http://localhost:8080/api/v1/supplier/nodes \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"product_id":12,"node_name":"bj-h100-01","total_cards":8,"mgmt_mode":"ssh",
+       "disk_per_card_gb":200,"lease_port_start":40000,"lease_port_end":40099,
+       "expected_host_fingerprint":"SHA256:Hq3w5kQe0Q8m1c2vFq9yZ7x5pW1n8uT4rL6sK2jD0aE"}'
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `product_id` | 是 | 本人托管商品 |
+| `node_name` | 是 | ≤ 64 字，同商品下唯一（重复 40900） |
+| `total_cards` | 是 | 1–64；探活 P5 核对 |
+| `mgmt_mode` | 是 | `"ssh"`；缺省/`"push"` 走原心跳节点逻辑（托管商品拒绝 push 节点 40001） |
+| `disk_per_card_gb` | 分卡容器商品必填 | 每卡数据盘 GB，探活 P8 核对 |
+| `lease_port_start/end` | 否 | 默认 40000–40099；须在 1024–65535、跨度 ≤ 1000、端口数 ≥ 卡数+1（含探活自检端口） |
+| `expected_host_fingerprint` | 否（**推荐**） | 在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 输出的第二列，格式 `SHA256:` + 43 位 base64（无 `=`），首尾空白忽略，其余格式 40001。提交即钉死为已确认指纹（审计 `node.host_key_preconfirmed`）：平台首次连接（含一次性密码引导）就在握手阶段比对，不一致即中止、**不发送任何凭证**；一致则首次探活无需再确认指纹 |
+
+> **推荐上架方式**：手动把 `authorized_keys_line` 加入管理账户 + 提交 `expected_host_fingerprint`。平台全程不接触密码，首次连接即校验主机身份。不提供预期指纹时为 TOFU：平台先连接、记录观测指纹，再由供给方确认；此时若使用 `bootstrap_password`，密码会在指纹确认**之前**发给首次握手到的主机。
+
+**响应**：`{"code":0,"data":{"node":{Node}}}`。平台为该节点生成专属 ed25519 管理密钥（私钥 AES-256-GCM 加密入库），不返回 `node_key`。
+**错误**：40001 参数 / 商品非托管；40400 商品不存在或非本人；40900 同名；50000 `security.credential_key` 未配置。
+
+`Node` 字段：`id, supplier_id, product_id, node_name, status, total_cards, available_cards, last_heartbeat_at, mgmt_mode, ssh_host, ssh_port, ssh_user, host_key_fingerprint, host_key_confirmed_at, verify_status, schedulable, dispatch_hold, dispatch_hold_reason, verified_at, last_probe_ok_at, probe_fail_count, cpu_cores, mem_gb, disk_free_gb, disk_per_card_gb, disk_quota_supported, driver_version, cuda_version, lease_port_start, lease_port_end, created_at, updated_at`。
+
+## GET /supplier/nodes · 我的节点 ✅ / DELETE /supplier/nodes/:id · 删除 ✅
+
+列表沿用 docs/23，托管节点带 `mgmt_mode:"ssh"`、`verify_status`、`schedulable`、`dispatch_hold`、`dispatch_hold_reason`。
+`dispatch_hold=true` 表示平台按供给方信用或该节点停机累计**自动停调度**（不分配新托管租约，已在租的不受影响；原因见 `dispatch_hold_reason`，变化时站内通知供给方），与供给方自己的排空（`schedulable=false`）互不覆盖；解除见「停机认定与补偿 · 供给方信用与停调度」。
+删除托管节点：存在 `reserved/leased/draining` 卡槽或绑定租约的卡槽时 40900「节点上有进行中的租约」；否则同一事务内删除卡槽、作废排队与执行中的任务、释放指纹占用、删除节点并重算商品库存。管理密钥随节点作废。
+
+## GET /supplier/nodes/:id/onboarding · 上架说明 ✅
+
+```json
+{"code":0,"data":{
+  "node_id":7,"verify_status":"unverified",
+  "authorized_keys_line":"from=\"198.51.100.10,198.51.100.11\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... omnis-node-7",
+  "controller_egress_ips":["198.51.100.10","198.51.100.11"],
+  "gateway_egress_ips":["192.0.2.20"],
+  "lease_port_start":40000,"lease_port_end":40099,
+  "ssh_host":null,"ssh_port":null,"ssh_user":null,
+  "host_key":{"fingerprint":null,"confirmed":false,"confirmed_at":null,
+              "check_command":"ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"},
+  "firewall_scripts":{"debian":"#!/bin/sh\nset -e\n...","rhel":"#!/bin/sh\nset -e\n..."},
+  "requirements":["Linux x86_64 + systemd; NVIDIA 驱动 ≥ 535.104", "..."]
+}}
+```
+
+- `authorized_keys_line` 供给方追加到管理账户 `~/.ssh/authorized_keys`（推荐方式，无需提交密码）。`from=` 限定为控制面出口 IP（`fleet.controller_egress_ips`，只接受单个 IP，不接受 CIDR）。
+- `firewall_scripts` 在 `DOCKER-USER` 链按 `conntrack --ctorigdstport` 只放行网关出口 IP 访问租约端口段，幂等（先删后加），附发行版持久化命令。
+- 50000：`accessgw.egress_ips` 未配置（无法生成放行规则）或节点缺少管理公钥。
+
+## PUT /supplier/nodes/:id/ssh · 连接信息 / 一次性引导 ✅
+
+```
+curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"host":"203.0.113.10","port":22,"user":"root",
+       "expected_host_fingerprint":"SHA256:Hq3w5kQe0Q8m1c2vFq9yZ7x5pW1n8uT4rL6sK2jD0aE"}'
+```
+
+- 保存后节点回到 `unverified`，作废排队中与进行中的探活任务（进行中的探活结论按节点代次作废，不会改动节点状态）；`host` 或 `port` 变化时清除指纹钉死（需重新确认）。**首次**填写连接信息（此前无 host）不算变化，建节点时提交的 `expected_host_fingerprint` 保留。`verified` 节点修改后立即退出可售。
+- `host`：节点的**公网** IP 或域名。平台按目标地址拒绝名单校验（回环、RFC1918、CGNAT `100.64.0.0/10`（含云元数据 `100.100.100.200`）、链路本地（含 `169.254.169.254`）、ULA `fc00::/7`、组播、保留/文档段，以及运营配置的 `fleet.deny_cidrs`）：IP 直接判断，域名在提交时解析，任一解析结果命中即拒绝 → 40001「host 不允许: 须为节点的公网地址…」；域名无法解析 → 40001「host 无法解析…」；`localhost` 40001。拒绝提示不回显解析出的地址。之后每次连接还会在拨号时按实际地址再校验一次（防 DNS rebinding）。`user`：小写字母数字下划线短横线，≤32 位。
+- `expected_host_fingerprint`（可选，**推荐**）：格式同 POST /supplier/nodes，非法 40001（连接信息不保存）。提交即覆盖当前指纹并钉死为已确认（审计 `node.host_key_preconfirmed`，旧值记入 `before`）。
+- `bootstrap_password`（可选；建议与 `expected_host_fingerprint` 同时提供，或改用手动加公钥）：平台用它登录**一次**，幂等写入管理公钥行后丢弃；不重试。失败时连接信息已保存，返回 40001「一次性密码登录安装公钥失败: <原因>…」，原因只取「管理端口不可达」/「SSH 握手失败」/「SSH 登录失败(用户名或密码错误…)」/「写入 authorized_keys 失败(…)」，底层错误只写服务端日志；可改为手动添加公钥行。存在钉死指纹（已确认或本次/建节点时提交的预期指纹）时，引导在 SSH 握手的主机密钥校验阶段比对，不一致即中止——**密码不会发出**——返回 40900「主机指纹 <实际> 与已确认/预期指纹 <钉死> 不一致: 握手阶段已中止, 一次性密码未发送…」，节点转 `key_mismatch` 并记录实际观测指纹（可经 host-key/confirm 确认，或改正连接信息/预期指纹后重试）。
+- `suspended` 节点 40900。
+- **待重装闸门**（T-089）：整机租约结束后（`needs_reimage`，库内 `reimage_required_at` 非空）可以保存新的连接信息（重装后 IP/端口可能变化），但节点**保持 `needs_reimage`**，不回 `unverified`；`expected_host_fingerprint` 等于租期内的旧指纹 → 40001「该指纹为整机租期内使用的旧主机指纹(买家曾持有 root, 旧主机私钥视为已泄露)…」（连接信息不保存）。
+
+**响应**：`{"node":{Node},"bootstrap":"skipped"|"installed","host_key":{fingerprint,confirmed,confirmed_at,check_command}}`。无钉死指纹时引导成功后 `host_key.fingerprint` 为本次观测到的指纹（未确认）；有预期/已确认指纹时为该指纹且 `confirmed:true`。
+
+## POST /supplier/nodes/:id/verify · 发起完整探活 ✅
+
+**响应**：`{"task_id":123}`。节点 → `verifying`；已有本代次排队/执行中的**完整**探活时返回同一 `task_id`（排队中的端口复测不能代替完整探活：会被作废并另行入队完整探活；在跑的端口复测结束后再执行完整探活）。
+完整探活若因平台侧原因无法完成（平台配置缺失、重试耗尽等），节点 `verifying → failed` 并收到站内信「节点探活未能完成」，可再次发起。
+**错误**：40001 未填 SSH 信息；40900 `suspended` / `key_mismatch`（先确认新指纹）/ `needs_reimage`（先重装确认）。
+
+首次连接（指纹未确认，即未提交 `expected_host_fingerprint` 也未经 host-key/confirm）时探活只执行 P1–P3：记录观测指纹，写一份 `fail` 报告（P2 详情给出指纹与核对命令），节点回 `unverified`，站内信「请确认节点主机指纹」；**不执行任何 nvidia-smi / docker 命令**。
+
+## POST /supplier/nodes/:id/host-key/confirm · 确认主机指纹 ✅
+
+`{"fingerprint":"SHA256:..."}` → `{"confirmed":true,"task_id":124}`
+- 与平台观测值一致才钉死，并自动入队完整探活（`task_id` 为 0 表示 SSH 信息不全未入队）。
+- 40001 指纹不一致（返回平台观测值与核对命令）；40900 尚未观测到指纹 / `suspended`。
+- 从 `key_mismatch` 确认新指纹写审计 `node.host_key_reconfirmed`。
+- 整机待重装（`needs_reimage`，或重装后探活观测到新指纹时）→ 40900「…请重装后调用重装确认(reimage-confirm)并提交新主机指纹」；指纹等于整机租期内的旧指纹 → 40001。待重装节点只能走 reimage-confirm。
+
+## GET /supplier/nodes/:id/probe-reports?limit= · 探活报告 ✅
+
+`limit` 默认 10、最大 50，按时间倒序。
+
+```json
+[{"id":31,"node_id":7,"kind":"verify","result":"pass","created_at":"...",
+  "checks":[{"id":"P1","name":"TCP 可达","ok":true,"required":true,"detail":"203.0.113.10:22 可达"},
+            {"id":"P10","name":"磁盘配额能力","ok":false,"required":false,"detail":"--storage-opt size= 不可用 ..."},
+            {"id":"P13","name":"短压测","ok":true,"required":true,"detail":"压测 8 张空闲卡 60s, 8 张通过; ..."}],
+  "inventory":{"cpu_cores":224,"mem_gb":2015,"disk_free_gb":12946,"disk_path":"/data","disk_quota_supported":true,
+               "driver_version":"535.104.05","cuda_version":"12.2","os":"Ubuntu 22.04.4 LTS","kernel":"5.15.0-113-generic",
+               "docker_version":"24.0.7","gpus":[{"index":0,"uuid":"GPU-...","name":"NVIDIA H100 80GB HBM3",
+               "memory_mib":81559,"pci_bus_id":"00000000:18:00.0","driver_version":"535.104.05"}],
+               "topo_groups":{"0":"g0-nvlink"},"faulty":{"3":"实测 300.5 TFLOPS 低于基准 ..."}}}]
+```
+
+- `kind`：`verify`（完整探活）/ `port_recheck`（端口复测）。`result=pass` 表示全部必检项通过（P10 为非必检）。
+- 连接类失败的 `detail` 为通用提示：P1「管理端口不可达」、P2「SSH 握手失败」、P11「经网关连接 host:port 失败(检查是否已按上架说明放行网关出口 IP)」；不包含解析出的地址或底层错误串（只写服务端日志）。
+- `checks[].skipped=true` 表示前置项未通过未执行。`inventory` 在连接阶段失败或待确认指纹时为 `null`。
+
+## GET /supplier/nodes/:id/slots · 卡槽 ✅
+
+`[{"id":1,"node_id":7,"gpu_index":0,"gpu_uuid":"GPU-...","pci_bus_id":"...","vram_mb":81559,"topo_group":"g0-nvlink","state":"free","lease_id":null,"state_changed_at":"..."}]`
+卡槽在探活通过后生成。`lease_id` 只给租约 ID，不含买家身份。
+
+## PUT /supplier/nodes/:id/slots/:gpu_index · 停用/启用单卡 ✅
+
+`{"state":"withheld"|"free"}` → `{"gpu_index":3,"state":"withheld"}`；仅 `free↔withheld`，写审计并重算库存。
+40001 `state` 取其他值；40400 节点或卡槽不存在；40900 卡槽当前为在租/预留/故障等其他状态。
+
+## POST /supplier/nodes/:id/drain · 排空 ✅ / POST /supplier/nodes/:id/undrain · 恢复接单 ✅
+
+切换 `schedulable`（重复调用幂等），存量租约不受影响；写审计并重算库存。响应 `{"schedulable":false|true}`。
+
+## POST /supplier/nodes/:id/reimage-confirm · 重装确认 ✅（T-089 起须提交新指纹）
+
+`{"expected_host_fingerprint":"SHA256:..."}` → `{"task_id":125}`
+
+整机租约结束后，供给方在节点上**重装操作系统**（新系统会生成新的 SSH 主机密钥），按上架说明重新放行管理公钥后调用。平台据此把节点送回验收：
+
+- `expected_host_fingerprint` **必填**：新系统的 SSH 主机密钥指纹（核对命令同上架说明：`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`）。缺失/格式非法 → 40001；请求体非 JSON → 40001。
+- 指纹必须**已经变化**：等于整机租期内的旧指纹（库内 `reimage_prev_fp`，缺省取当前已确认指纹）→ 40001「该指纹为整机租期内使用的旧主机指纹…」。主机密钥未变即视为未重装：买家曾持有 root，可能已读取旧主机私钥或留下后门。
+- 可调状态：`needs_reimage`；或闸门仍在、探活连到新系统后被记为指纹不符的节点。其他状态 40900「仅待重装(needs_reimage)的节点可确认重装」。节点不属于本人 40400。
+- 节点上仍有**冻结中**（`suspended`，运营核查中）的整机租约 → 40900「节点上的租约 l-… 处于冻结核查中, 现场须保留, 待运营结案后再重装确认」；有其他在租/开通中的租约 → 40900。
+- 节点上停在 `purging` 的整机租约（清除任务因节点已重装连不上或指纹不符而反复失败）随重装确认**结案**：租约 → `purged`、卡槽 `draining → free`、未执行的 `stop/purge` 任务作废（`failed`），写清除回执（`executor="supplier_reimage"`，`steps=[{"step":"account","target":"omnis-<lease_no>","outcome":"reimaged"}]`，`reason`「节点已由供给方重装确认(新主机指纹), 租约账户随系统重装清除」）。
+- 成功：新指纹钉死为已确认（`host_key_confirmed_at` 写入），清除重装闸门，节点代次 +1（重装前入队/在跑的探活结论作废），节点 → `verifying` 并入队**完整探活**（`trigger=reimage_confirm`，P1–P13 全量，含压测）；探活**连接时以新指纹校验**，不一致 → `key_mismatch`，一致且全部必检项通过 → `verified` 并重新计入可售。写审计 `node.reimage_confirmed`（`before`：原 `verify_status` 与指纹；`after`：新指纹与 `finalized_leases` 结案租约号）。
+
+---
+
+## 买家连接（S2 T-086）✅
+
+登录即可调用（buyer 组，任何角色），归属在服务层校验。仅 `fleet.enabled=true` 时注册。
+买家通过访问网关 `ssh -p <gateway_port> <login>@<gateway_host>` 登录：公钥（本节管理）或访问凭证（密码，沿用 compute 的 `GET /orders/:id/access-credential` 与 `POST /orders/:id/access-credential/reveal`）。
+
+### GET /user/ssh-keys · 我的公钥 ✅
+
+只返回未删除的公钥，按添加时间倒序。
+
+```json
+{"code":0,"message":"success","data":[
+  {"id":3,"name":"alice@laptop","key_type":"ssh-ed25519",
+   "public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI...",
+   "fingerprint":"SHA256:9oQf0m4vJ4bXo3m2pY0Yt2bKq9Hk7cY2l7XvN1yq5jE",
+   "created_at":"2026-10-28T10:00:00+08:00"}],
+ "request_id":"..."}
+```
+
+### POST /user/ssh-keys · 添加公钥 ✅
+
+```
+curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"办公笔记本","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... alice@laptop"}'
+```
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `public_key` | 是 | `.pub` 文件的**一行**。支持 `ssh-ed25519`、`ecdsa-sha2-nistp256/384/521`、`ssh-rsa`（≥ 3072 位）。拒绝：带选项的行（`from=`/`command=` 等）、多行/多把、证书（`*-cert-v01@openssh.com`）、安全密钥（`sk-*`）、`ssh-dss`、RSA < 3072 位 |
+| `name` | 否 | ≤ 64 字（超长 40001）；缺省取公钥注释（截断到 64 字），无注释为「SSH 公钥」 |
+
+**响应**：`data` 为一条 `BuyerKey`（同上）。入库的 `public_key` 是解析后重新序列化的规范形式（**不含注释**），`fingerprint` 为 `SHA256:` 格式。
+**规则**：每个账户最多 10 把未删除的公钥（第 11 把 40900）；同一把已添加 40900「该公钥已添加」；曾删除的同一把重新添加时复用原记录（`id` 不变，`created_at` 刷新）。同一把公钥可被不同账户各自添加。写审计 `buyer_ssh_key.add`。
+**错误**：40001 `public_key` 缺失 / 格式或类型不支持 / `name` 超长；40900 重复 / 已达上限。
+
+### DELETE /user/ssh-keys/:id · 删除公钥 ✅
+
+→ `{"code":0,"message":"success","data":{"id":3,"deleted":true},"request_id":"..."}`
+- 软删除（`revoked_at`），同一事务内刷新本人 `active/parked/suspended/grace` 租约的 `access_changed_at`：网关在下一次撤销轮询（≤ 5s 轮询 + 2s 滞后）清掉按该公钥缓存的放行，之后用该公钥登录被拒。
+- **已建立的 SSH 会话不会被断开**，只拦截之后的新登录：删除公钥不入队 `kill_sessions`，租约状态不变（sshpiperd v1.6.1 插件无法切断已建立的管道，见 docs/25 §25.6.3 S2 实现口径）。需要立即踢掉在线会话时，只能由运营冻结订单（租约 `suspended` + 节点侧 `kill_sessions`，见「租约生命周期 · 冻结」）。「删除公钥是否应同时断开该公钥的在线会话」**待业务方决策**，在此之前按上述口径执行。
+- 写审计 `buyer_ssh_key.revoke`。40001 `id` 非法；40400 不存在 / 非本人 / 已删除。
+
+### GET /orders/:id/access · 托管订单连接信息 ✅
+
+`:id` 为订单号（与 compute 订单接口一致）。
+
+```json
+{"code":0,"message":"success","data":{
+  "gateway_host":"gw.omnisline.com","gateway_port":2222,
+  "login":"l-4g7bq4xc","lease_state":"active","delivery_kind":"container",
+  "access_until":"2026-11-28T10:00:00+08:00","grace_until":null,
+  "auth_methods":["publickey","password"]},
+ "request_id":"..."}
+```
+
+- `gateway_host/port` 来自 `accessgw.public_host/public_port`；`login` 即租约号，换节点/续租不变。**不返回节点地址与容器端口。**
+- `delivery_kind`：`container`（按卡，登录进租约容器）/ `bare_metal`（整机）。前端据此切换整机文案并隐藏「一键部署」入口（整机提交部署返回 40001，见 model-deploy-api.md）。
+- 整机订单（T-089）登录方式相同（`ssh -p <gateway_port> <login>@<gateway_host>`），落地为宿主机账户 `omnis-<login>`，`sudo` 免密；整机无宽限，`grace_until` 恒为 `null`，到期即断开，**家目录与买家写入的数据随节点重装清除，须在到期前自行导出**。
+- 能否登录以 `lease_state=active` 且未过 `access_until` 为准；其他状态（`pending/provisioning/parked/suspended/grace/...`）照常返回本结构，前端据 `lease_state` 提示。
+- **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单「该订单为人工交付, 没有网关连接信息」；40400 订单尚无租约。
+
+### GET /orders/:id/sessions?page=&page_size= · 会话记录 ✅
+
+仅本人托管订单（错误同上）。分页 `page` 默认 1，`page_size` 默认 20、> 100 回落为 20；按 `started_at` 倒序。会话记录保留 180 天。
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":12,"lease_no":"l-4g7bq4xc","remote_ip":"198.51.100.1","auth_method":"publickey",
+   "key_fingerprint":"SHA256:9oQf0m4vJ4bXo3m2pY0Yt2bKq9Hk7cY2l7XvN1yq5jE","key_name":"办公笔记本",
+   "started_at":"2026-10-28T08:00:00+08:00","ended_at":"2026-10-28T09:00:00+08:00",
+   "bytes_up":0,"bytes_down":0,"end_reason":"closed"},
+  {"id":13,"lease_no":"l-4g7bq4xc","remote_ip":"2001:db8::1","auth_method":"password",
+   "key_fingerprint":null,"key_name":null,
+   "started_at":"2026-10-28T09:50:00+08:00","ended_at":null,
+   "bytes_up":0,"bytes_down":0,"end_reason":null}],
+  "total":2,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `key_name`：本人登记该指纹时的名称（公钥删除后仍显示，便于核对）；密码登录或指纹未在本人名下登记为 `null`。
+- `ended_at=null` 表示会话进行中（或网关尚未上报结束）。`bytes_up/bytes_down` 在 S2 恒为 0（sshpiperd v1.6.1 插件拿不到字节数）。系统自检会话不记录。
+
+### GET /orders/:id/nights · 包夜订单每晚记录 ✅
+
+仅本人**包夜**托管订单（`pricing_mode=nightly`）。`:id` 为订单号。
+
+```json
+{"code":0,"message":"success","data":{
+  "order_no":"ORD20261101103000123abc","lease_no":"l-4g7bq4xc","lease_state":"parked",
+  "night_start_min":1320,"night_end_min":480,
+  "purchased_nights":3,"extended_nights":1,
+  "next_window_start":"2026-11-03T22:00:00+08:00",
+  "nights":[
+   {"night_date":"2026-11-01","window_start":"2026-11-01T22:00:00+08:00","window_end":"2026-11-02T08:00:00+08:00",
+    "state":"ended","fail_cause":null,"compensation":false,"unparked_at":"2026-11-01T22:00:41+08:00","outage_id":null},
+   {"night_date":"2026-11-02","window_start":"2026-11-02T22:00:00+08:00","window_end":"2026-11-03T08:00:00+08:00",
+    "state":"failed","fail_cause":"node_offline","compensation":false,"unparked_at":null,"outage_id":57},
+   {"night_date":"2026-11-03","window_start":"2026-11-03T22:00:00+08:00","window_end":"2026-11-04T08:00:00+08:00",
+    "state":"booked","fail_cause":null,"compensation":false,"unparked_at":null,"outage_id":null},
+   {"night_date":"2026-11-04","window_start":"2026-11-04T22:00:00+08:00","window_end":"2026-11-05T08:00:00+08:00",
+    "state":"booked","fail_cause":null,"compensation":true,"unparked_at":null,"outage_id":null}]},
+ "request_id":"..."}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `night_start_min` / `night_end_min` | 订单快照的夜间窗口（自 00:00 起的分钟数；`end < start` 表示跨零点） |
+| `purchased_nights` | 购买晚数（= 订单 `duration`） |
+| `extended_nights` | 停机补偿补加的晚数（与 `GET /orders/:id/outages` 的 `extended_nights` 同口径） |
+| `next_window_start` | 最早一个**窗口尚未结束**且状态为 `booked/active` 的夜晚的窗口开始时刻；当前正处于某晚窗口内时即该晚开始（≤ 当前时刻）；没有剩余夜晚时为 `null` |
+| `nights[]` | 按 `night_date` 升序，含已过去的晚与补偿晚 |
+| `nights[].night_date` | 窗口开始那天的日期 `YYYY-MM-DD`（跨零点窗口的结束在次日） |
+| `nights[].state` | `booked` 已预订未开窗 / `active` 本晚已开窗（容器已启动） / `ended` 本晚窗口已结束 / `failed` 本晚判定失败 |
+| `nights[].fail_cause` | `failed` 晚为计入停机的原因（`night_unpark_failed`/`node_offline`/`container_down`/`gateway_down`/`provision_delay`）；`booked` 晚非空表示本晚开窗重试中、最近一次失败的原因；其余为 `null` |
+| `nights[].compensation` | `true` = 停机补偿补加的一晚（`night_date` ≥ 首晚 + 购买晚数），不额外收费 |
+| `nights[].unparked_at` | 本晚实际开窗（容器启动）时刻；未开窗为 `null` |
+| `nights[].outage_id` | 本晚失败记入的停机段 id（对应 `GET /orders/:id/outages` 的 `items[].id`）；无为 `null` |
+
+- **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单；40400 订单尚无租约；40001「该订单不是包夜订单, 没有每晚记录」。
+
+---
+
+## 租约生命周期（S2 T-087/T-088）✅
+
+本节没有新增 HTTP 接口，描述后台周期任务的行为与对外可见的落点（订单状态、`GET /orders/:id/access` 的 `lease_state/access_until/grace_until`、站内通知、`GET /admin/leases`、`GET /admin/audit-logs`、`GET /admin/risk/alerts`）。所有周期任务随 `fleet.enabled=true` 启动；多实例部署以 Redis `SET NX` 互斥（拿不到锁本轮跳过），状态写入全部是守卫式事务。
+
+| 任务 | 周期 | 作用 |
+|---|---|---|
+| 到期扫描 | 30s | 在租到期 → grace（整机无宽限 → 直接清除 + 节点待重装）；冻结中到期 → 停容器释放卡（整机：撤权限保留账户 + 节点待重装）；宽限期满 → 清除 |
+| 到期提醒 | 1min | 到期前 24h / 2h / 30min 站内通知 + 容器内 `wall`（整机只发站内通知）；进入宽限的站内通知（需 Redis，未配置时不发提醒） |
+| 挖矿特征扫描 | `fleet.mining.interval`，默认 10min | 见下文「挖矿特征扫描」 |
+| 对账 | 5min | 收尾任务补入队；在租容器与节点实况对账，节点重启后恢复（整机租约不做容器对账） |
+| 停机扫描 | 1min | 在租租约逐个判定停机开始/结束并结算补偿（见「停机认定与补偿」） |
+| 信用重算 | 10min | 重算托管供给方信用分并同步节点 `dispatch_hold` |
+
+### 到期与宽限
+
+- `active/parked` 且 `access_until` 已过：
+  - 订单 `active` → 订单 `completed`（compute 守卫式流转），同事务租约 → `grace`，卡槽 → `draining`，入队 `stop`（停容器、释放 GPU，容器与数据卷保留）。
+  - 订单非 `active`（冻结/退款中）→ 订单状态不动，租约侧照常 → `grace`；订单已 `cancelled/refunded` 而租约仍在租 → 直接清除（宽限 0）。
+- 宽限时长按订单计费方式快照取档：时/日计费 `fleet.grace.short`（默认 24h）；周/月计费 `fleet.grace.long`（默认 72h）；夜间计费 `fleet.grace.nightly`（默认 24h）。宽限截止写入 `leases.grace_until`，`GET /orders/:id/access` 返回为 `grace_until`。
+- 宽限期内可 `restart` 续租（compute-api.md「托管订单续租」），只能在原节点恢复（数据卷在原节点）。
+- `grace_until` 已过 → 租约 `purging` + 入队 `purge`；父订单有**待支付的 restart 续租单**时暂缓，续租单超时关单后下一轮再清除。
+- **冻结中到期**（`suspended` 且 `access_until` 已过）：停容器、释放 GPU（卡槽 → `draining`），容器与数据卷保留作核查现场；租约保持 `suspended`，**不进宽限计时**。运营解冻时转 `grace`，宽限自解冻时刻起算；运营退款则直接清除。
+- 订单取消/退款 → 租约不进宽限：尚未建容器的（`reserved/pending`）直接作废（`cancelled`，卡槽释放），其余（`provisioning/active/parked/suspended/grace`）→ `purging` 并清除。
+
+**站内通知**（`type=system`，`link=/console/buyer/orders/<order_no>`）：「租期即将结束」（24h/2h/30min 三档；租期不足 24h 只发后两档，不足 2h 只发 30min 档，每档每个到期时刻只发一次）；「租期已结束」（进入宽限时，写明数据卷保留截止时间）；「算力环境已清除」（清除完成）。
+
+### 清除与清除回执
+
+清除是**逻辑删除**：删除容器（含可写层）、数据卷、租约网络与本地提交镜像（如有），**不做介质级擦除**（不覆写磁盘块，不保证底层存储上的数据不可恢复）。清除完成后租约 → `purged`，`purged_at` 写入，`commit_image` 置空，卡槽 `draining → free`，同事务重算派生库存。
+
+任一步骤失败（退出码非 0 或输出无法确认）整条 `purge` 任务失败并按任务重试，租约停留在 `purging`；不会在资源未确认删除时标记 `purged`。
+
+清除回执写入 `audit_logs`：`action="lease.purged"`、`target_type="lease"`、`target_id=<lease id>`、库内 `operator_id` 为空（系统；`GET /admin/audit-logs` 显示为 `0`）、`before_value=null`、`after_value` 为下列 JSON。换节点 / 开通失败后清理旧节点残留时 `action="lease.cleanup"`，结构相同但不迁移租约状态。运营经 `GET /admin/audit-logs` 查看（按时间倒序分页；该接口目前不支持按 `action` 过滤，`after_value` 为 JSON 字符串）。
+
+```json
+{"lease_no":"l-4g7bq4xc","order_id":1024,"node_id":7,
+ "container_id":"3f1c0e2a9b8d7c6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e",
+ "container":"omnis-l-4g7bq4xc","volume":"omnis-l-4g7bq4xc-data","network":"omnis-l-4g7bq4xc-net",
+ "commit_image":"omnis-commit/l-4g7bq4xc:1793181261","upstream_port":40003,
+ "port_rules":"容器端口映射(-p)随容器删除; 节点级 DOCKER-USER 租约端口段规则为节点共用, 保留",
+ "steps":[
+  {"step":"container","target":"omnis-l-4g7bq4xc","exit_code":0,"outcome":"removed","id":"3f1c0e2a9b8d7c6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e"},
+  {"step":"volume","target":"omnis-l-4g7bq4xc-data","exit_code":0,"outcome":"removed"},
+  {"step":"network","target":"omnis-l-4g7bq4xc-net","exit_code":0,"outcome":"absent"},
+  {"step":"commit_image","target":"omnis-commit/l-4g7bq4xc:1793181261","exit_code":0,"outcome":"removed"}],
+ "reason":"宽限期满",
+ "erasure":"逻辑删除: 删除容器可写层、数据卷、租约网络与本地提交镜像, 不做介质级擦除",
+ "executor":"system","finished_at":"2026-11-30T10:00:31+08:00"}
+```
+
+- `container_id`、`commit_image`、`upstream_port`、`reason` 无值时省略；`steps[].id` 只在删除了容器且拿到 64 位容器 ID 时出现，`steps[].detail` 只在失败时出现。
+- `steps[].outcome`：`removed` 已删除 / `absent` 本就不存在 / `error`（出现即整条任务失败，不会写成功回执）。
+- `reason` 取值示例：`宽限期满`、`订单已refunded(到期扫描)`、`对账补入队`、`开通失败清理残留: ...`。
+
+### 冻结
+
+触发：运营 `PATCH /admin/orders/:id/status`（`frozen`）、`POST /admin/risk/alerts/:id/freeze`，或挖矿特征扫描自动冻结。三者走同一路径（compute 订单事务内调用租约钩子）：
+
+- 订单 → `frozen`，订单访问凭证吊销（交付状态 `revoked`）。
+- 租约 `active/parked` → `suspended`（记 `suspended_at`，刷新撤销游标，网关新登录立即被拒），入队 `kill_sessions`（优先级 1）断开现有会话。**容器不停、GPU 不释放**（保留核查现场；冻结期间仍计入供给方占用）。
+- 租约不在租（`reserved/pending/provisioning/grace/...`）：租约状态不动，只刷新撤销游标；开通中的流水线发现订单 `frozen` 即放弃。
+- 解冻见 compute-api.md「托管订单冻结与解冻」。
+
+### 整机（`bare_metal`）租约（docs/25 §25.7.4，S2 T-089）
+
+整机交付把一台节点的**全部卡**租给一个买家，买家以宿主机上的专属账户登录并拥有免密 sudo（root）。与分卡容器的差异：
+
+| 环节 | 分卡容器 | 整机 |
+|---|---|---|
+| 分配 | 单台节点凑齐 N 卡 | 只分配全部卡空闲的节点，`cards` 必须等于节点总卡数 |
+| 开通 | 建网络/数据卷/容器、放行租约端口、自检 | 宿主机建账户 `omnis-<lease_no>`（`useradd -m`，口令字段 `*` 不可口令登录）、`authorized_keys` 只写网关上游公钥并带 `from="<网关出口 IPv4>"`、`/etc/sudoers.d/omnis-<lease_no>` 免密 sudo（`visudo -cf` 校验后落盘）、自检只做 GPU UUID 核对；**不占租约端口段**（`port_claim` 为空） |
+| 网关路由 | 上游 = 节点 IP + 租约端口，上游账户 root | 上游 = 节点 IP + 节点管理 SSH 端口（宿主机 sshd），`upstream_host_key_fp` = 节点已确认主机指纹（开通时快照），上游账户 `omnis-<lease_no>`（`/auth` 返回 `upstream_user`） |
+| 冻结 | 断开会话，容器不停 | 只结束该账户的 sshd 会话进程（`kill_sessions`），买家其他进程保留作核查现场；新登录由网关拒绝 |
+| 到期 / 运营解冻时已过期 | → `grace`，停容器、保留数据卷 | **无宽限**：直接 `purging` + 入队 `purge`，节点同事务 → `needs_reimage` |
+| 冻结中到期 | 停容器释放卡，保留现场 | `stop`：撤 sudo 与公钥、结束账户全部进程，**账户与家目录保留**作核查现场（`result.account="locked"`）；节点同事务 → `needs_reimage` |
+| 取消/退款（在租或冻结中） | → `purging` | 同左，并且节点 → `needs_reimage` |
+| 清除 | 删容器/卷/网络/提交镜像 | 撤 sudo 与公钥 → 结束账户全部进程（最多 10 轮）→ `userdel -r` 删账户与家目录；买家以 root 留下的其他内容**不在清除范围**，由供给方重装兜底 |
+| 续租 | 宽限期内 restart 回原节点 | 只能在到期前 `extend`；到期后原节点待重装，`restart` 在清除完成后按全新整机分配（`purging` 期间 40900） |
+| 到期提醒 | 站内信 + 容器内 `wall` | 只发站内信（不在买家可控的宿主机上执行 `wall`） |
+| 挖矿扫描 / 在租对账 | 扫描 / 对账 | 不扫描、不做容器对账（见下文） |
+
+- 宿主机 root 操作的执行方式：管理账户只在 docker 组（不新增 sudo），经管理 SSH 通道下发 `docker run --rm --privileged --pid host --network none -v /:/host --entrypoint chroot <探针镜像> /host /bin/sh -c '<base64 脚本>'`，脚本由平台生成值（租约号、网关上游公钥、出口 IP）逐项白名单校验后拼装。宿主机须具备 `useradd/userdel/usermod/pkill/pgrep/visudo/getent` 与 `/etc/sudoers.d`，缺失时开通任务失败并给出可读原因（如「宿主机缺少 visudo…」），按任务重试/换节点。
+- 开通前提：`accessgw.egress_ips`（网关出口 IP）至少一个 IPv4（`from=` 限制来源），否则开通失败。
+- 开通中取消（买家从未拿到访问权）：只删除账户（`lease.cleanup` 回执），节点**不**转待重装。
+- 整机清除回执（`lease.purged` / `lease.cleanup`）：`container/volume/network/commit_image` 省略，新增 `"account":"omnis-<lease_no>"`；`steps=[{"step":"account","target":"omnis-<lease_no>","outcome":"removed"|"absent"|"reimaged"}]`；`port_rules`「整机租约无端口段规则…」；`erasure`「删除租约账户、家目录、sudoers 授权与网关公钥并结束账户进程; 买家以 root 身份留下的其他内容不在清除范围, 节点已转待重装(needs_reimage)…」。`stop` 任务结果 `{"container":"absent","account":"locked",...}`。
+- 清除完成后供给方收到站内信「整机节点待重装」，买家收到「算力环境已清除」。节点重装后走「重装确认」；**重装闸门**（`reimage_required_at`）存在期间修改 SSH 信息、确认指纹、发起探活、运营恢复停用都不会让节点回到可售，探活结论也不能写回 `verified`。
+- 若供给方在清除完成前就重装了系统，清除任务连接时指纹不符（节点保持 `needs_reimage`，不转 `key_mismatch`、不报运营告警，只提醒供给方提交重装确认），重装确认时该租约随之结案。
+
+### 挖矿特征扫描（docs/25 §25.7.3，Q-42 / Q-09）
+
+**对象**：`state=active` 且 `delivery_kind=container` 的租约，按节点分组并发（上限 `fleet.probe_concurrency`），每节点每轮时限 5min。裸金属（`bare_metal`）租约不扫描（买家持有 root，进程表与连接表不可信，由整机重装确认兜底）。`suspended` 等非 active 租约不扫描，因此已冻结的不会被重复冻结。
+
+**手段**：经节点管理 SSH 通道，对每个租约执行一条固定命令：宿主机 `docker top omnis-<lease_no> -eo pid,comm,args` 取进程表；以探针镜像 `docker run --rm --network container:omnis-<lease_no> --cap-drop ALL` 加入容器网络命名空间读取 `/proc/net/tcp` 与 `/proc/net/tcp6`。命令里只拼接通过格式校验的租约号与探针镜像引用，不含任何买家可控字符串；不在买家容器内执行任何命令。
+
+**信号与处置**：
+
+| `kind` | 判定 | 处置 |
+|---|---|---|
+| `stratum` | 任一进程命令行含 `stratum+tcp://`、`stratum+ssl://`、`stratum2+tcp://` 等（不区分大小写） | **自动冻结** |
+| `pool_addr` | 已建立 / 正在建立的外连目标落在 `fleet.mining.pool_addrs`（CIDR 或 IP；默认空） | **自动冻结** |
+| `process` | 进程名（`comm`，不区分大小写）在 `fleet.mining.process_names` | 只告警 |
+| `pool_port` | 外连目标端口在 `fleet.mining.pool_ports`（且目标不在矿池地址清单内） | 只告警 |
+
+- 外连只取 TCP 状态 `ESTABLISHED/SYN_SENT`；本地端口为容器内监听端口的入站连接（如网关 → sshd）、环回与未指定地址不计。
+- 一次扫描同时命中冻结类与告警类时按冻结处理，全部命中写入同一条告警。
+- 扫描失败（连不上节点、命令失败、输出不完整）或容器未运行：本轮不判定，只记日志，不影响租约。
+- 配置：`fleet.mining.interval`（默认 `10m`）；`fleet.mining.process_names`（未配置时取内置名单：xmrig、xmr-stak、t-rex、lolminer、nbminer、gminer、miner、phoenixminer、ethminer、teamredminer、bzminer、miniz、nanominer、srbminer-multi、ccminer、cpuminer、cgminer、bfgminer、rigel、onezerominer、wildrig-multi、kawpowminer、z-enemy）；`fleet.mining.pool_ports`（未配置时取 3333、3334、3335、4444、5555、5566、6666、7777、8008、8888、9999、14433、14444、45560、45700）；`fleet.mining.pool_addrs`（不支持域名，非法 CIDR/IP 或端口启动即报错）。
+
+**自动冻结**（单事务）：走上文「冻结」同一路径；写风控告警（`level=high`、`alert_type=mining_freeze`、`target_type=order`、`status=processing`、`resolution=auto_frozen`）；写审计 `action=mining_auto_freeze`、`target_type=order`、`operator_id` 为空（系统）、`before_value`=冻结前订单状态、`after_value`=`"frozen; alert=<告警 id>; lease=<lease_no>; <kind>: <detail>; ..."`。提交后通知：
+- 买家站内信「订单已冻结」（`link=/console/buyer/orders/<order_no>`）；
+- 供给方站内信「在租环境已冻结」（`link=/console/supplier/nodes/<node_id>`）；
+- 运营：服务日志 ERROR「运营告警: 租约命中挖矿特征, 订单已自动冻结...」，并可在 `GET /admin/risk/alerts`（只支持 `level` 过滤，可传 `level=high`）查到该告警（`status=processing`；列表不返回 `resolution`）。
+
+运营核查后在 compute 侧解冻（`POST /admin/orders/:id/unfreeze`，误冻结传 `wrong_freeze:true`）或退款。告警本身的结案沿用现有风控接口：对 `processing` 的 `mining_freeze` 告警调用 `POST /admin/risk/alerts/:id/freeze`（订单已冻结时幂等，不重复写冻结审计）即转 `resolved`；`dismiss` 只接受 `pending`，不能用于自动冻结告警。**注意顺序**：该 `freeze` 调用会对订单再执行一次冻结，订单已解冻（`active`）后再调用会重新冻结订单，订单已 `completed` 时报错；因此应先在告警上结案、再解冻。S2 没有单独的「结案」接口，`processing` 告警可以保持原状不影响业务。
+
+订单不在可冻结状态（如退款中 `refunding`）时自动冻结失败：不写告警与审计，只记服务日志 ERROR「运营告警: 挖矿特征命中但自动冻结失败, 需人工处理」，下一轮扫描会再次尝试。
+
+**只告警**：写风控告警（`level=medium`、`alert_type=mining_suspect`、`target_type=order`、`status=pending`），服务日志 WARN「运营告警: 租约疑似挖矿(仅告警, 待人工核查)」；不冻结、不通知买家与供给方。**去重**：同一订单已有未结（`pending/processing`）的 `mining_suspect`/`mining_freeze` 告警，或 24h 内写过其中任一，则不再写。运营在告警上可人工冻结（`POST /admin/risk/alerts/:id/freeze`）或忽略（`/dismiss`）。
+
+两类告警的 `rule_detail` 均为 JSON 字符串：
+
+```json
+{"lease_no":"l-4g7bq4xc","order_no":"ORD20261101103000123abc","node_id":7,
+ "hits":[{"kind":"stratum","detail":"pid 4303 kworker: stratum+ssl://1.2.3.4:443","freeze":true},
+         {"kind":"process","detail":"pid 4302 进程名 xmrig","freeze":false},
+         {"kind":"pool_port","detail":"外连矿池常用端口 192.168.8.4:3333","freeze":false}]}
+```
+
+`hits` 冻结类在前，同 `kind+detail` 只出现一次；`stratum` 的 `detail` 截取匹配到的 URL（≤ 120 字符）。
+
+## 停机认定与补偿（S2 T-105，docs/25 §25.7.6）✅
+
+本节描述后台认定规则；买家接口见 compute-api.md「托管订单停机与补偿」，运营接口见下文「运营接口」与 admin-api.md「供给方信用」。
+
+**一段停机 = `lease_outages` 一行**：开始时插入（`open_claim=lease_id` 唯一，同一租约同一时刻只有一段进行中，多原因并发只记一段），结束时守卫式更新并在同一事务内结算补偿。只认定 `state=active` 的租约；开始时间不早于开通时间，也不早于本租约上一段的结束时间。
+
+| `cause` | 认定来源 | 开始 | 结束 | `liable` |
+|---|---|---|---|---|
+| `node_offline` | 节点探活判离线（90s 无成功轻量探活），或节点主机密钥与登记不符（`key_mismatch`），或节点已不在平台托管 | 节点最后一次探活成功时刻（`last_probe_ok_at`） | 节点恢复在线（容器租约另需对账确认容器在跑，见下） | supplier |
+| `full_probe_failed` | 12h 定时完整探活（或其他完整探活）未通过，节点 `verify_status=failed` | 停机扫描发现时刻（≤ 1min 延迟） | 供给方修复后重新发起完整探活并通过 | supplier |
+| `gpu_fault` | 轻量探活写入的租约 `resource_alert`（卡掉线 / UUID 变化 / ECC 等；对账自身写的告警不算） | 发现时刻 | 告警清除 | supplier |
+| `container_down` | 对账：容器缺失 / 非运行态 / 重启失败 / 读不到容器列表 | 对账观测时刻 | 对账确认容器在跑 | supplier |
+| `gateway_down` | ① 对账重启容器后经访问网关自检时，网关未接入、连不上或网关主机指纹不符；② 网关心跳失联：网关每 5s 经验签调用主服务内部接口，最后一次请求早于 3 分钟（主服务启动后 3 分钟内、从未收到网关请求时不认定） | ① 对账观测时刻；② 最后一次网关请求时间 | 网关恢复上报，且（容器租约）对账确认容器在跑 | platform |
+| `wrong_freeze` | 运营解冻时认定误冻结（`POST /admin/orders/:id/unfreeze` `wrong_freeze:true`） | 冻结时刻 `suspended_at` | 解冻时刻（直接记已结束的一段） | platform |
+| `provision_delay` | 包夜首晚开通晚于应开通时刻（max(首晚窗口开始, 支付时刻)）≥ `min_minutes`；或某晚从未尝试开通即过窗口（S4 T-095） | 应开通时刻 | 开通自检通过（不超过本晚窗口结束） | platform |
+| `night_unpark_failed` | 包夜开窗失败：宿主机进程占用本晚卡到 应开通时刻+10min（整晚），或开窗晚于应开通时刻 ≥ `min_minutes`（延迟段）（S4 T-095）。其他开窗失败按原因记 `node_offline/container_down/gateway_down` | 应开通时刻 | 开窗成功 / 本晚窗口结束 | supplier |
+
+- **容器租约**的停机须等对账（5min）确认容器在跑才结束（「恢复在线且自检通过」），因此结束时刻最多晚约 5min（偏向买家）；整机租约在硬原因消失的那轮扫描即结束。
+- **买家原因不计**：停机期间租约被冻结（`suspended`），本段在 `suspended_at` 结束，冻结期只有运营认定误冻结才计入；租约到期/清除时进行中的停机在 `min(当前, access_until)` 结束。买家自己导致的容器退出（OOM 等）由对账自动重启，重启成功不产生停机。
+- **结算**（同一事务，幂等，`counted` 非空即已结算）：
+  - 有效秒数 `seconds` = 本段扣除与同租约其他已结束段的重叠；包夜租约另只计落在已购夜晚窗口内的部分（白天停放期不计，例如跨天的误冻结段；停机开始也不早于本晚开通时刻）；原始时长 < `fleet.outage.min_minutes`（默认 5）或有效秒数为 0 → `counted=0`，不补偿（`remedy_applied_at` 照写，视为已处理）。
+  - 责任金额 `liability_amount`（分）= floor(所属订单实付 × `seconds` ÷ 该订单租期秒数)，不超过实付；所属订单 = 停机开始时刻已生效的续租单或原订单。由 `liable` 方承担（D-9/D-10，分账侧扣减见 T-106）。
+  - 租约补偿方式 `outage_remedy=extend` 且仍在租期内 → `remedy=extend`：租约 `access_until`、订单 `lease_end_at`、交付 `access_expires_at`、待支付 `extend` 续租单起止同事务后移 `seconds`；`remedy_applied_at`=结算时刻。
+  - 否则（买家已选退费，或租期已结束）→ `remedy=refund`、`remedy_amount=liability_amount`，`remedy_applied_at` 留空，等 T-106 退款后写入。
+- 供给方责任段结算后即时重算该供给方信用（下节）。
+
+### 供给方信用与停调度
+
+近 30 天口径：停机 = 供给方责任且计入的停机分钟/段数（按结束时间）；探活失败 = 已验证节点完整探活失败次数（审计 `node.verify_failed`）；违约 = 落在该供给方节点上的租约开通失败数（`leases.state=failed`）。
+
+`score = 100 − min(60, ceil(50 × 停机分钟 ÷ max_supplier_minutes_30d)) − min(20, 5 × 探活失败) − min(30, 10 × 违约)`，下限 0。
+
+停调度（`supplier_nodes.dispatch_hold=1`；派生库存与下单分配都排除，已在租的不受影响，续租 restart 回原节点不受影响）：
+- 供给方级：运营覆盖 `stop`，或覆盖为 `auto` 且 `score < fleet.credit.stop_below`（默认 60）→ 其全部托管节点；
+- 节点级：覆盖不是 `allow` 且该节点近 30 天供给方责任停机分钟 > `fleet.outage.max_supplier_minutes_30d`（默认 360）。
+
+运营覆盖 `allow` 后若再发生新的计入停机，覆盖自动回到 `auto`。停/恢复调度时站内通知供给方。
+
+---
+
+## 运营接口
+
+### GET /admin/nodes · 节点总览（扩展）✅
+
+沿用 docs/23（见 [scheduler-api.md](scheduler-api.md)）。托管节点额外返回：`mgmt_mode`、`verify_status`、`schedulable` 与
+`managed:{"last_probe":{"id","kind","result","failed_checks":[],"created_at"}|null,"slots":{"free":6,"faulty":1,"withheld":1},"ssh_host","ssh_port","host_key_fingerprint","host_key_confirmed"}`。
+
+### POST /admin/nodes/:id/suspend · 停用节点 ✅
+
+`{"reason":"≤200 字，可选"}` → `{"verify_status":"suspended"}`。停止新分配、释放空闲/停用/无租约故障卡槽（卡 UUID 与指纹占用随之释放）、作废排队任务、重算库存、通知供给方、写审计。作废该节点**排队中与进行中**的探活任务（任务 `failed`；进行中的探活即使随后通过也不会把节点改回 `verified`，`result.discarded=true`）；租约类任务（stop/purge/kill_sessions/provision）不作废，存量租约不受影响，排队中的开通在执行时发现节点已停用会走重试→换节点/退款。40400 非托管节点；40900 已停用。
+
+### POST /admin/nodes/:id/resume · 恢复节点 ✅
+
+→ `{"verify_status":"unverified","task_id":126}`。恢复后自动入队完整探活，**通过后才回到 `verified`**（停用期间卡槽已释放，须重新核验）。停用期间整机租约已结束（重装闸门存在）的节点恢复为 `needs_reimage`、不入队探活（`task_id:0`），等供给方重装确认（T-089）。40900 节点不在停用状态。
+
+### GET /admin/node-tasks?state=&node_id=&page=&page_size= · 节点任务 ✅
+
+`state` ∈ `pending/running/succeeded/failed/dead`（其他值 40001），缺省为全部。分页信封 `data:{list,total,page,page_size}`。
+`Task`：`id, node_id, lease_id, deployment_id, kind, state, priority, attempts, max_attempts, run_after, locked_until, payload, result, last_error, created_at, updated_at`；`payload/result` 为 JSON（未完成任务 `result` 为 `null`）。`running` 任务的 `locked_until` 是心跳租约（约 3 分钟，执行期间每分钟续期）；已过期仍为 `running` 表示 worker 已中断，1 分钟内被回收。探活任务 `result`：`{"mode":"full","pass":true,"report_id":31,"failed_checks":[],"awaiting_host_key":"SHA256:...","discarded":false}`。
+
+### POST /admin/node-tasks/:id/retry · 重试死信 ✅
+
+仅 `dead` 可重试（否则 40900），次数清零回 `pending`，写审计 `node_task.retry`。`kind=probe`：payload 按节点当前代次重写，完整探活同时把节点置 `verifying`；节点已删除、`suspended`/`needs_reimage`/`key_mismatch` 或已有未结束的探活时 40900。`kind=provision` 的死信不可重试（40900「开通任务死信已自动善后(换节点或取消订单退款), 不可手动重试」，S2 T-083）。40400 任务不存在。响应 `{"task_id":9,"state":"pending"}`。
+
+### GET /admin/leases?state=&node_id=&buyer_id=&page=&page_size= · 租约检索 ✅（S2 T-086）
+
+三个条件可组合，均缺省为全部；按 `id` 倒序；分页同上（默认 20，> 100 回落 20）。
+`state` ∈ `reserved/pending/provisioning/active/parked/suspended/grace/purging/purged/failed/cancelled`（其他值 40001）；`node_id`/`buyer_id` 须为正整数（否则 40001）。
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":5,"lease_no":"l-4g7bq4xc","order_id":88,"buyer_id":21,"product_id":12,"node_id":7,"cards":2,
+   "delivery_kind":"container","state":"active","upstream_port":40000,
+   "upstream_host_key_fp":"SHA256:...","container_name":"omnis-l-4g7bq4xc","volume_name":"omnis-l-4g7bq4xc-data",
+   "access_until":"2026-11-28T10:00:00+08:00","access_changed_at":"2026-10-28T10:00:00+08:00","grace_until":null,"suspended_at":null,
+   "provisioned_at":"2026-10-28T10:00:00+08:00","purged_at":null,"fail_reason":null,
+   "resource_alert":null,"outage_remedy":"extend",
+   "created_at":"2026-10-28T09:58:00+08:00","updated_at":"2026-10-28T10:00:00+08:00"}],
+  "total":1,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `resource_alert`：轻量探活发现的在租卡异常（如卡掉线 / UUID 变化），为空表示正常。`port_claim`、`commit_image` 不出接口。
+- 40001 参数非法。
+
+### GET /admin/lease-outages?lease_no=&order_no=&cause=&supplier_id=&open=&refund_pending=&page=&page_size= · 停机检索 ✅（S2 T-105）
+
+条件可组合：`order_no` 匹配停机所属订单或租约原订单；`cause` 取上表值（其他值 40001）；`supplier_id` 正整数；`open=1` 只看进行中；`refund_pending=1` 只看待退费（`remedy=refund` 且未退款，T-106 的工作队列）。按开始时间倒序，分页同上。
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":31,"lease_id":5,"order_id":88,"node_id":7,"cause":"node_offline","liable":"supplier",
+   "started_at":"2026-11-01T10:20:00+08:00","ended_at":"2026-11-01T10:30:00+08:00","seconds":600,"minutes":10,
+   "counted":true,"remedy":"extend","remedy_applied_at":"2026-11-01T10:30:02+08:00","remedy_amount":null,
+   "liability_amount":250,"detail":"节点探活失败已判离线",
+   "lease_no":"l-4g7bq4xc","order_no":"ORD20261101103000123abc","supplier_id":20}],
+  "total":1,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- 包夜订单租期按 晚数 × 窗口时长 换算（白天不计）；补偿默认顺延为补加一晚，见 compute-api.md「包夜订单（S4）」。
+- `liability_amount` 为 `null`：所属订单租期无法换算（快照缺失等数据异常），服务日志 ERROR「运营告警: 停机责任金额无法计算(需人工核定)」。
+- 供给方信用查看与覆盖见 admin-api.md「供给方信用（S2 T-105）」。
+
+### GET /admin/access-sessions?lease_no=&ip=&page=&page_size= · 会话检索 ✅（S2 T-086）
+
+`lease_no` 与 `ip` 可单独或组合，均缺省为全部；按 `started_at` 倒序；分页同上。结构同买家会话记录，另带 `buyer_id`：
+
+```json
+{"code":0,"message":"success","data":{"list":[
+  {"id":13,"lease_no":"l-4g7bq4xc","buyer_id":21,"remote_ip":"2001:db8::1","auth_method":"password",
+   "key_fingerprint":null,"key_name":null,"started_at":"2026-10-28T09:50:00+08:00","ended_at":null,
+   "bytes_up":0,"bytes_down":0,"end_reason":null}],
+  "total":1,"page":1,"page_size":20},
+ "request_id":"..."}
+```
+
+- `lease_no` 须为 `l-` + 8 位小写字母/数字 2–7（否则 40001）；格式合法但不存在时返回空列表。
+- `ip` 按规范形式匹配（`2001:0db8:0:0::1` 与 `2001:db8::1` 等价）；非法 IP 40001。
+
+---
+
+## 探活检查项与判定（实现口径）
+
+| # | 检查 | 实现要点 |
+|---|---|---|
+| P1 | TCP 可达 | 3 次，单次 5s |
+| P2 | SSH 握手与指纹 | 已钉死则比对，不一致 → `key_mismatch`；未钉死 → 记录观测值并在 P3 后停止 |
+| P3 | 管理密钥认证 | 平台私钥登录 |
+| P4 | GPU 清单 | `nvidia-smi --query-gpu=...`；卡 UUID 已被其他节点登记 → 不通过 |
+| P5 | 声明一致性 | 型号按 `gpu_catalog` 归一后**完全相同**（忽略品牌/显存容量/HBM 类型/PCIe·SXM 形态；`4090 D`、`V100S`、`H100 NVL` 等后缀视为不同型号）、卡数、显存误差 ≤ 3%（GDDR 卡开 ECC 时按可见显存少 1/16 再比） |
+| P6 | 拓扑 | `nvidia-smi topo -m` → `topo_group` |
+| P7 | 健康 | 不可纠正 ECC、退役页/行重映射待生效或失败、24h 致命 Xid；问题卡标 `faulty`；**全部卡故障才判不通过** |
+| P8 | 主机资源 | CPU/内存/Docker 数据目录所在盘/OS/内核 + 驱动 ≥ `fleet.min_driver_version` |
+| P9 | 容器运行时 | Docker ≥ 24；拉取 `fleet.probe_image`；`docker run --gpus "device=<空闲卡>"` 可见卡数一致 |
+| P10 | 磁盘配额（非必检） | `--storage-opt size=1G`；不支持则只能整机出租 |
+| P11 | 租约端口：网关可达 | 端口段内**从末尾向下**选空闲端口起临时 TCP 监听容器，由访问网关从其出口做 TCP 连通自检（S2 T-085：系统自检身份登录 `p-<token>` 下发任务，见下文「访问网关内部接口」`probe`）。网关未配置、不可达、主机指纹不符或未在 10s 内回报 → 判不通过 |
+| P12 | 租约端口：未裸露 | 同一端口从主服务出口直连，必须连不上 |
+| P13 | 短压测 | 空闲卡逐卡 FP16 矩阵乘（默认 60s）+ 降频采样 + 压测后复扫 Xid/ECC；低于 `gpu_catalog.probe_baseline_tflops × fleet.probe.min_perf_ratio`、降频、掉卡的卡标 `faulty`；**全部卡不通过才判不通过**；无空闲卡时通过并注明 |
+
+在租/预留/排空的卡只做只读检查（P4/P7），侵入项只用空闲卡与未分配端口。
+
+**结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间节点被停用/恢复、重装确认、SSH 信息被修改或指纹被确认（节点代次变化）→ 结论作废（任务 `result.discarded=true`，不写报告），不改节点状态；代次已变化后才开始执行的旧任务直接 `failed`、不连接节点。只有 `verifying`（本代次完整探活）或 `verified`（周期补跑）的节点能被探活结论置为 `verified`。
+
+**周期**：`verified` 节点每 60s SSH 轻量探活（`nvidia-smi` 利用率/温度/ECC + Docker 守护进程 + 近 2 分钟 Xid），成功写心跳与 `available_cards`；距上次成功超过 90s → `offline` + 通知，恢复后自动上线。空闲卡掉卡或出现致命错误 → `faulty` + 通知；在租卡异常仅记运营告警（租约侧处理在 S2）。完整探活每 12h、端口复测每 24h 自动入队。
+
+---
+
+## 访问网关内部接口（S2 T-085）✅
+
+仅供访问网关插件（`backend/cmd/accessgw`，运行在 sshpiperd v1.6.1 下）调用。**不在公网 API 上**：主服务在 `accessgw.internal_listen`（内网地址）上单独起一个 HTTP 服务，只挂下列路径；公网路由组不注册它们。设计见 docs/25 §25.6.2/§25.6.3 及其「S2 实现口径（T-085）」。
+
+**Base**：`http://<accessgw.internal_listen>/api/v1/internal/accessgw`
+
+**签名（每个请求必带）**
+
+| 请求头 | 值 |
+|---|---|
+| `X-Gw-Timestamp` | Unix 秒；与主服务时钟偏差 > 60s 拒绝 |
+| `X-Gw-Nonce` | 16 字节随机数的小写 hex（32 位）；300s 内不可重复 |
+| `X-Gw-Signature` | `hex(HMAC-SHA256(accessgw.hmac_secret, method + "\n" + uri + "\n" + ts + "\n" + nonce + "\n" + hex(sha256(body))))`，小写 hex |
+
+`uri` 为 RequestURI（路径 + 查询串，按实际发送的编码），例如 `/api/v1/internal/accessgw/revocations?cursor=1793181263-42`；GET 的 body 为空串。请求体上限 1 MiB。
+
+**错误**：信封与 HTTP 200 同公网接口。签名/时间戳/nonce 不合法或重放 → `40100`「签名校验失败」；Redis 不可用（nonce 去重、爆破计数、探活任务）→ `50000`；签名通过但路径不存在 → `40400`；请求体非法 → `40001`。
+
+### POST /auth · 鉴权与路由
+
+请求：
+
+```json
+{"login":"l-7f3k9q2a","method":"publickey","pubkey_fp":"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU","remote_ip":"198.51.100.7"}
+```
+
+```json
+{"login":"l-7f3k9q2a","method":"password","password":"<访问凭证 access_value>","remote_ip":"2001:db8::7"}
+```
+
+- `method` ∈ `publickey` / `password`，其他 40001；`publickey` 时 `pubkey_fp` 必须以 `SHA256:` 开头，否则 40001；`remote_ip` 必须是合法 IP（不带端口），否则 40001。
+- 不存在/非法的登录名、凭证不符、租约不可登录都**不是错误**：返回 `allow:false`，网关统一提示认证失败。
+- `upstream_host` 恒为 **IP 字面量**：主服务按目标地址拒绝名单（含 `fleet.deny_cidrs`）解析并校验节点 host 后下发，网关不自行解析。节点 host 无法解析或命中拒绝名单时返回 **50000**「租约上游地址不可用」（网关拒绝该次登录，不计入爆破失败）。P11 探活任务的 `probe.host` 同样是 IP 字面量，网关对非 IP 目标直接回报「探活任务地址非法」，并在自身拨号钩子里按内置拒绝名单再拦截。
+
+放行（买家）：
+
+```json
+{"code":0,"message":"success","data":{"allow":true,"upstream_host":"203.0.113.20","upstream_port":40001,"upstream_host_key_fp":"SHA256:Zq0n6n9Lr0m7y3G2b1J1p3b5fK0wQ3Xc9eN8uT4sV2A","access_until":"2026-11-27T10:00:00+08:00","cache_ttl_s":30},"request_id":"..."}
+```
+
+整机租约（T-089）放行时多一个 `"upstream_user":"omnis-l-7f3k9q2a"`，`upstream_port` 为节点管理 SSH 端口：网关以该账户登录宿主机 sshd（仍用网关上游私钥，宿主机侧该公钥带 `from=` 网关出口 IP 限制）。字段缺省 = 网关默认上游账户（`--upstream-user`，容器交付为 `root`）。网关校验账户名（小写字母/数字/`_`/`-`，首字符字母或 `_`，≤32 位），非法即拒绝该次登录。
+
+拒绝：
+
+```json
+{"code":0,"message":"success","data":{"allow":false,"cache_ttl_s":0},"request_id":"..."}
+```
+
+系统自检身份（`fleet.selftest_key_file` 公钥）登录 `provisioning` 租约（开通自检）：`allow:true`、`"system":true`、`"cache_ttl_s":0`，其余字段同买家放行。系统身份登录 `p-<token>`（P11 端口自检，token 为 32 位小写 hex，已由主服务登记）：
+
+```json
+{"code":0,"message":"success","data":{"allow":false,"cache_ttl_s":0,"probe":{"token":"9f2c4b1e0a7d4c3b8e6f5a4d3c2b1a09","host":"203.0.113.20","port":40999}},"request_id":"..."}
+```
+
+网关收到 `probe` 后从自身出口对 `host:port` 做 5s TCP 连接，调用 `/probe-result` 回报，然后拒绝该 SSH 登录。
+
+判定规则：
+
+| 条件 | 结果 |
+|---|---|
+| 来源 IP 处于封禁期（10 分钟内密码失败 20 次 → 封 30 分钟，按规范化后的 IP） | 拒绝（所有方式） |
+| `password` 且「登录名+IP」处于锁定期（10 分钟内失败 10 次 → 锁 15 分钟） | 拒绝（公钥不受影响） |
+| 租约 `state=active`、`delivery_kind` 为 `container` 或 `bare_metal`（T-089）、`now < access_until`、已有上游端口与主机指纹 | 才进入凭证比对 |
+| 公钥：指纹属于租约买家且 `revoked_at IS NULL` / 密码：等于订单访问凭证（常量时间比较） | 放行，`cache_ttl_s = min(30, access_until − now)` |
+| 系统身份 | 仅 `provisioning` 且路由齐全的租约放行；不计数、不受封禁 |
+
+只有**密码**失败计入爆破计数；公钥失败不计（SSH 客户端会依次尝试多把公钥）。
+
+### GET /revocations?cursor= · 撤销游标
+
+`cursor` 格式 `"<unix 秒>-<lease id>"`；首次传空串取起点。
+
+```json
+{"code":0,"message":"success","data":{"logins":[],"cursor":"1793181261-0"},"request_id":"..."}
+```
+
+```json
+{"code":0,"message":"success","data":{"logins":["l-7f3k9q2a","l-ab2cd3ef"],"cursor":"1793181263-42"},"request_id":"..."}
+```
+
+- 返回 `leases.access_changed_at` 在游标之后（按 `(access_changed_at, id)` 严格递增）且**早于当前 2 秒**的租约登录名，每页最多 1000 条；没有新行时 `cursor` 原样返回。空游标返回 `NOW()−2s` 处的起点，不回放历史。
+- 网关拿到 `logins` 即清掉这些登录名的放行缓存；`logins` 满 1000 条时立即用新游标再拉（单次轮询最多 20 页）。轮询失败 → 网关清空全部缓存。
+- `access_changed_at` 刷新时机（S2 现状，与代码一致）：
+  - 租约每次状态迁移（含冻结 `active/parked→suspended`、到期 `→grace`、清除、restart 续租 `→pending`、开通 `→active`、换节点）；
+  - 买家删除公钥（刷新其名下 `active/parked/suspended/grace` 租约，T-086）；
+  - 冻结时租约不在租（状态不变，只吊销订单凭证）；
+  - 解冻（无论租约状态是否变化，T-088）；
+  - extend 续租支付生效（`access_until=renewed_until`）与退款回退（`access_until=lease_end_at`）。
+  - 访问凭证重置：**S2 没有凭证重置接口**（托管订单的密码凭证只在开通时生成、冻结时吊销、解冻时恢复），故无对应刷新点；日后新增重置接口时须同事务调用 `Repository.touchAccess`。
+- 游标只是加速失效的手段；网关放行缓存 TTL ≤ 30s 仍是兜底。
+- 游标格式非法 → 40001。
+
+### POST /sessions · 会话事件上报
+
+```json
+{"events":[
+  {"gw_session_id":"7b0c…e1","login":"l-7f3k9q2a","remote_ip":"198.51.100.7","auth_method":"publickey","key_fingerprint":"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU","started_at":"2026-10-28T10:00:00+08:00","bytes_up":0,"bytes_down":0},
+  {"gw_session_id":"7b0c…e1","login":"l-7f3k9q2a","remote_ip":"198.51.100.7","auth_method":"publickey","key_fingerprint":"SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU","started_at":"2026-10-28T10:00:00+08:00","ended_at":"2026-10-28T11:30:00+08:00","bytes_up":0,"bytes_down":0,"end_reason":"closed"}
+]}
+```
+
+```json
+{"code":0,"message":"success","data":{"accepted":2,"ignored":0},"request_id":"..."}
+```
+
+- 单批最多 500 条，超过 40001。按 `gw_session_id` upsert：开始与结束事件可分批、乱序、重复上报；`ended_at`/`end_reason` 首次写入后不再覆盖，字节数取较大值。
+- 计入 `ignored`（不报错）：登录名不是存在的租约、`auth_method` 不是 `publickey/password`、`remote_ip` 非法、`ended_at` 早于 `started_at`、`gw_session_id` 为空或过长、指纹为系统自检身份。
+- `bytes_up/bytes_down`：sshpiperd v1.6.1 插件拿不到字节计数，当前恒为 0。`end_reason`：`closed`（正常断开）或错误摘要。不记录会话内容。保留 180 天。
+
+### POST /probe-result · P11 端口自检回报
+
+```json
+{"token":"9f2c4b1e0a7d4c3b8e6f5a4d3c2b1a09","reachable":false,"error":"dial tcp 203.0.113.20:40999: connect: connection refused"}
+```
+
+```json
+{"code":0,"message":"success","data":{},"request_id":"..."}
+```
+
+`token` 非 32 位小写 hex → 40001；未登记或已过期（任务 2 分钟有效）→ 40400。结果保存 120s，主服务读取后删除。

@@ -10,6 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"tokenfactory/internal/legal"
 	"tokenfactory/internal/trading"
+	"tokenfactory/pkg/errcode"
 )
 
 var ErrRenewalConflict = errors.New("续租条件已变化或已有待支付续租订单，请刷新订单")
@@ -67,9 +68,23 @@ type RenewOrderReq struct {
 	ExpectedPlatformFee  int64      `json:"expected_platform_fee"`
 }
 
-func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*RenewalQuote, error) {
+// renewalQuoteTx 续租报价。ev=RenewCheck(只读报价) / RenewReserve(下单: 托管 restart 同事务预留卡槽)。
+// 托管订单不占 stock_reserved / products.stock, 余量由 LeaseHooks.RenewTx 按卡槽判定(docs/25 §25.7.2)。
+func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int, ev string) (*RenewalQuote, error) {
 	if parent == nil {
 		return nil, fmt.Errorf("order not found")
+	}
+	if err := s.requireManagedRenewable(parent); err != nil {
+		return nil, err
+	}
+	// 包夜续租(在同一组卡上追加后续晚, docs/26 §26.6.3)未开放: 在租约钩子之前拒绝, 买家始终看到同一条明确提示。
+	if m, err := OrderPricingMode(parent); err == nil && m == PricingNightly {
+		return nil, errNightlyNotWired
+	}
+	managed := parent.FulfillmentMode == FulfillmentManaged
+	if managed && parent.SettleReadyAt != nil {
+		// 已到租期末结算(T-106, 整条续租链进入一次分账): 不能再续租复活, 需重新下单。
+		return nil, ErrRenewalConflict
 	}
 	if parent.LeaseEnd == nil || parent.StockReserved == nil || (parent.Status != "active" && parent.Status != "completed") {
 		return nil, ErrRenewalConflict
@@ -77,6 +92,7 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if parent.Status == "completed" && *parent.StockReserved != 0 {
 		return nil, ErrRenewalConflict
 	}
+	restart := !parent.LeaseEnd.After(time.Now())
 	child, err := GetRenewal(tx, parent.OrderNo)
 	if err != nil {
 		return nil, err
@@ -99,42 +115,69 @@ func (s *Service) renewalQuoteTx(tx *sqlx.Tx, parent *Order, duration int) (*Ren
 	if !policy.TradingEnabled {
 		return nil, trading.ErrDisabled
 	}
+	if managed {
+		// 在锁商品行之前: 租约 → 节点行 → 卡槽 → 商品行(与下单预留、fleet 任务一致)。
+		mode := "extend"
+		if restart {
+			mode = "restart"
+		}
+		if err := s.leaseHooks.RenewTx(tx, ev, parent, &Renewal{Mode: mode}); err != nil {
+			return nil, err
+		}
+	}
 	var product Product
 	if err := tx.Get(&product, "SELECT "+productColumns+" FROM products WHERE id=? FOR UPDATE", parent.ProductID); err != nil {
 		return nil, err
 	}
-	if product.Health == "offline" || product.PricingMode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
+	if err := attachPrices(tx, []*Product{&product}); err != nil {
+		return nil, err
+	}
+	// 续租按原订单的计费方式快照报价, 不随商品展示主价漂移; 快照缺失返回 50000, 不回退商品当前方式(CR M1)。
+	mode, err := OrderPricingMode(parent)
+	if err != nil {
+		return nil, err
+	}
+	if product.Health == "offline" || mode == PricingPerpetual || (product.Status != "active" && product.Status != "sold_out") {
 		return nil, ErrRenewalConflict
 	}
 	if err := requireUnexpiredQualifications(tx, product.SupplierID); err != nil {
 		return nil, err
 	}
-	quantity, duration, err := ValidateRenewParams(&product, parent.Quantity, duration)
+	// 供给方已停用该计费方式 → ErrPricingModeDisabled(40900, 提示重新下单), 不换算成其他方式。
+	price, err := PriceFor(&product, mode)
 	if err != nil {
 		return nil, err
 	}
-	total, fee, err := CalcOrderAmount(product.UnitPrice, quantity, duration, int64(policy.FeeRate))
+	// 托管订单同样按上面的快照报价(RenewTx 未接入时已在入口 50000); 包夜已在入口拒绝。
+	quantity, duration, err := ValidateRenewParamsFor(&product, price, parent.Quantity, duration)
+	if err != nil {
+		return nil, err
+	}
+	total, fee, err := CalcOrderAmount(price.UnitPrice, quantity, duration, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
 	q := &RenewalQuote{ParentOrderNo: parent.OrderNo, Mode: "extend", Quantity: quantity, Duration: duration,
-		PricingMode: product.PricingMode, MinDuration: max(1, product.MinDuration), MaxDuration: MaxDurationFor(product.PricingMode),
-		UnitPrice: product.UnitPrice, TotalAmount: total, PlatformFee: fee, FeeRate: policy.FeeRate, LeaseEndAt: *parent.LeaseEnd}
-	if parent.LeaseEnd.After(time.Now()) {
-		if parent.Status != "active" || *parent.StockReserved != parent.Quantity {
+		PricingMode: mode, MinDuration: price.MinDuration, MaxDuration: MaxDurationFor(mode),
+		UnitPrice: price.UnitPrice, TotalAmount: total, PlatformFee: fee, FeeRate: policy.FeeRate, LeaseEndAt: *parent.LeaseEnd}
+	if !restart {
+		if parent.Status != "active" || (!managed && *parent.StockReserved != parent.Quantity) {
 			return nil, ErrRenewalConflict
 		}
 		if err := requireRenewableAccess(tx, parent.ID); err != nil {
 			return nil, err
 		}
-		end := LeaseEndAt(*parent.LeaseEnd, product.PricingMode, duration)
+		end, err := LeaseEndAt(*parent.LeaseEnd, mode, duration, OrderNightWindow(parent))
+		if err != nil {
+			return nil, err
+		}
 		q.RenewedUntil = &end
 	} else {
 		q.Mode = "restart"
 		if *parent.StockReserved != 0 && *parent.StockReserved != parent.Quantity {
 			return nil, ErrRenewalConflict
 		}
-		if *parent.StockReserved == 0 && product.Stock < quantity {
+		if !managed && *parent.StockReserved == 0 && product.Stock < quantity {
 			return nil, fmt.Errorf("insufficient stock")
 		}
 	}
@@ -157,7 +200,7 @@ func (s *Service) GetRenewalQuote(buyerID int64, orderNo string, duration int) (
 	if parent == nil || parent.BuyerID != buyerID {
 		return nil, fmt.Errorf("order not found")
 	}
-	return s.renewalQuoteTx(tx, parent, duration)
+	return s.renewalQuoteTx(tx, parent, duration, RenewCheck)
 }
 
 func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (*Order, error) {
@@ -173,7 +216,11 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 	if _, err := uuid.Parse(req.RequestID); err != nil || len(req.RequestID) != 36 {
 		return nil, fmt.Errorf("invalid request_id")
 	}
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := s.beginManagedAware(managed) // 托管 restart 预留卡槽后重算派生库存须 READ COMMITTED
 	if err != nil {
 		return nil, err
 	}
@@ -205,7 +252,7 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	q, err := s.renewalQuoteTx(tx, parent, req.Duration)
+	q, err := s.renewalQuoteTx(tx, parent, req.Duration, RenewReserve)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +264,8 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 		expires = *parent.LeaseEnd
 	}
 	reserved := 0
-	if q.Mode == "restart" && *parent.StockReserved == 0 {
+	// 托管订单的 restart 已由 RenewTx(reserve) 预留卡槽, 续租单 stock_reserved 保持 0。
+	if q.Mode == "restart" && *parent.StockReserved == 0 && parent.FulfillmentMode != FulfillmentManaged {
 		reserved = parent.Quantity
 		if err := s.repo.DecrProductStock(tx, parent.ProductID, reserved); err != nil {
 			return nil, err
@@ -225,6 +273,7 @@ func (s *Service) RenewOrder(buyerID int64, orderNo string, req RenewOrderReq) (
 	}
 	o := &Order{OrderNo: "REN" + time.Now().Format("20060102150405") + uuid.New().String()[:6], BuyerID: buyerID,
 		ProductID: parent.ProductID, StockReserved: &reserved, Quantity: q.Quantity, Duration: q.Duration, UnitPrice: q.UnitPrice,
+		PricingMode: &q.PricingMode, NightStartMin: parent.NightStartMin, NightEndMin: parent.NightEndMin,
 		TotalAmount: q.TotalAmount, PlatformFee: q.PlatformFee, Status: "pending_payment", PaymentExpires: &expires, ComplianceAgreed: true}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err
@@ -276,23 +325,38 @@ func (r *Repository) LockOrderFamilyTx(tx *sqlx.Tx, orderNo string) (*Order, *Or
 	return order, parent, renewal, nil
 }
 
+// errManagedRenewalPaymentNotWired 托管原订单的续租收款必须经 compute.Service(含租约侧校验/落账), 包级函数不处理。
+var errManagedRenewalPaymentNotWired = errcode.New(errcode.InternalError, "托管订单续租收款须经租约钩子处理(payment 未注入 compute 续租钩子)")
+
+// ValidateRenewalPaymentTx 人工订单续租的收款前校验(包级, payment 未注入 Service 钩子时的回退)。托管原订单返回 50000。
 func ValidateRenewalPaymentTx(tx *sqlx.Tx, order, parent *Order, r *Renewal) error {
 	if r == nil {
 		return nil
 	}
+	if parent != nil && parent.FulfillmentMode == FulfillmentManaged {
+		return errManagedRenewalPaymentNotWired
+	}
+	return validateRenewalBaseTx(tx, order, parent, r, false)
+}
+
+// validateRenewalBaseTx 订单侧续租校验。managed=true 时不校验 stock_reserved(托管占用是卡槽, 由 RenewTx(verify) 校验)。
+func validateRenewalBaseTx(tx *sqlx.Tx, order, parent *Order, r *Renewal, managed bool) error {
 	if r.AppliedAt != nil || parent == nil || parent.BuyerID != order.BuyerID || parent.ProductID != order.ProductID ||
 		parent.Quantity != order.Quantity || parent.StockReserved == nil || order.StockReserved == nil ||
 		parent.LeaseEnd == nil || !parent.LeaseEnd.Equal(r.LeaseEndAt) {
 		return ErrRenewalConflict
 	}
 	if r.Mode == "extend" {
-		if parent.Status != "active" || !parent.LeaseEnd.After(time.Now()) || *parent.StockReserved != parent.Quantity || *order.StockReserved != 0 || r.RenewedUntil == nil {
+		if parent.Status != "active" || !parent.LeaseEnd.After(time.Now()) || *order.StockReserved != 0 || r.RenewedUntil == nil ||
+			(!managed && *parent.StockReserved != parent.Quantity) {
 			return ErrRenewalConflict
 		}
 		if err := requireRenewableAccess(tx, parent.ID); err != nil {
 			return err
 		}
-	} else if (parent.Status != "active" && parent.Status != "completed") || parent.LeaseEnd.After(time.Now()) || *parent.StockReserved+*order.StockReserved != order.Quantity {
+	} else if (parent.Status != "active" && parent.Status != "completed") || parent.LeaseEnd.After(time.Now()) ||
+		(!managed && *parent.StockReserved+*order.StockReserved != order.Quantity) ||
+		(managed && (*parent.StockReserved != 0 || *order.StockReserved != 0)) {
 		return ErrRenewalConflict
 	}
 	return nil
@@ -315,6 +379,7 @@ func requireRenewableAccess(tx *sqlx.Tx, parentID int64) error {
 }
 
 // Payment, lease, credential expiry and stock ownership commit together.
+// ApplyRenewalPaymentTx 人工订单续租收款落账(包级回退)。托管原订单返回 50000。
 func ApplyRenewalPaymentTx(tx *sqlx.Tx, order, parent *Order, r *Renewal) error {
 	if r == nil {
 		return nil
@@ -322,6 +387,12 @@ func ApplyRenewalPaymentTx(tx *sqlx.Tx, order, parent *Order, r *Renewal) error 
 	if err := ValidateRenewalPaymentTx(tx, order, parent, r); err != nil {
 		return err
 	}
+	return applyRenewalBaseTx(tx, order, parent, r)
+}
+
+// applyRenewalBaseTx 订单侧续租落账(调用方已校验)。restart: 原订单 → paid, 人工订单占用 stock_reserved=quantity,
+// 托管订单保持 0(占用是租约卡槽)。
+func applyRenewalBaseTx(tx *sqlx.Tx, order, parent *Order, r *Renewal) error {
 	if r.Mode == "extend" {
 		if _, err := tx.Exec("UPDATE orders SET lease_end_at=? WHERE id=?", r.RenewedUntil, parent.ID); err != nil {
 			return err
@@ -335,7 +406,11 @@ func ApplyRenewalPaymentTx(tx *sqlx.Tx, order, parent *Order, r *Renewal) error 
 			r.previous_confirmed_at=d.buyer_confirmed_at WHERE r.order_id=?`, order.ID); err != nil {
 			return err
 		}
-		if _, err := tx.Exec("UPDATE orders SET status='paid',stock_reserved=?,lease_start_at=NULL,lease_end_at=NULL WHERE id=?", order.Quantity, parent.ID); err != nil {
+		held := order.Quantity
+		if parent.FulfillmentMode == FulfillmentManaged {
+			held = 0
+		}
+		if _, err := tx.Exec("UPDATE orders SET status='paid',stock_reserved=?,lease_start_at=NULL,lease_end_at=NULL WHERE id=?", held, parent.ID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec("UPDATE order_deliveries SET access_status='revoked',revoked_at=NOW() WHERE order_id=?", parent.ID); err != nil {
@@ -372,7 +447,12 @@ func (s *Service) currentLeaseOrder(db sqlx.Queryer, parent *Order, fallbackPric
 	return &Order{ID: lease.ID, OrderNo: lease.OrderNo, Duration: lease.Duration}, lease.PricingMode, nil
 }
 
+// returnReservedStockTx 人工订单归还 stock_reserved。托管订单的占用是卡槽, 必须经 releaseHoldTx → fleet 释放并重算
+// 派生库存; 误入此路径会把人工增量叠加到派生库存上, 因此直接报错而不是静默跳过。
 func (s *Service) returnReservedStockTx(tx *sqlx.Tx, order *Order) error {
+	if order.FulfillmentMode == FulfillmentManaged {
+		return errcode.New(errcode.InternalError, fmt.Sprintf("托管订单 %s 的占用须由租约释放, 不走人工库存归还", order.OrderNo))
+	}
 	if order.StockReserved == nil {
 		return fmt.Errorf("order %s requires stock reservation reconciliation", order.OrderNo)
 	}
@@ -391,10 +471,27 @@ func (s *Service) cancelPendingRenewalsTx(tx *sqlx.Tx, parentID int64) error {
 		WHERE r.parent_order_id=? AND o.status='pending_payment' ORDER BY o.id FOR UPDATE`, parentID); err != nil {
 		return err
 	}
+	var parent *Order
+	if len(nos) > 0 {
+		p, err := s.lockOrderByIDTx(tx, parentID)
+		if err != nil {
+			return err
+		}
+		parent = p
+	}
 	for _, no := range nos {
 		order, err := s.repo.GetOrderForUpdateTx(tx, no)
 		if err != nil {
 			return err
+		}
+		if isManagedParent(parent) {
+			r, err := GetRenewal(tx, no)
+			if err != nil {
+				return err
+			}
+			if err := s.releaseManagedRenewalTx(tx, parent, r); err != nil {
+				return err
+			}
 		}
 		if err := s.returnReservedStockTx(tx, order); err != nil {
 			return err
@@ -444,14 +541,28 @@ func (s *Service) refundRenewalTx(tx *sqlx.Tx, parent *Order, r *Renewal) error 
 	if err := s.cancelPendingRenewalsTx(tx, parent.ID); err != nil {
 		return err
 	}
+	managed := isManagedParent(parent)
+	if managed && s.leaseHooks.RenewTx == nil {
+		return errManagedRenewNotWired
+	}
 	if r.Mode == "extend" {
 		if _, err := tx.Exec("UPDATE orders SET lease_end_at=? WHERE id=?", r.LeaseEndAt, parent.ID); err != nil {
 			return err
 		}
-		_, err := tx.Exec("UPDATE order_deliveries SET access_expires_at=? WHERE order_id=?", r.LeaseEndAt, parent.ID)
-		return err
+		if _, err := tx.Exec("UPDATE order_deliveries SET access_expires_at=? WHERE order_id=?", r.LeaseEndAt, parent.ID); err != nil {
+			return err
+		}
+		if managed {
+			return s.leaseHooks.RenewTx(tx, RenewRevert, parent, r)
+		}
+		return nil
 	}
-	if err := s.returnReservedStockTx(tx, parent); err != nil {
+	if managed {
+		// 托管 restart 尚未开通完成即退款: 租约清除(卡槽 → draining → purge 后释放), 不走人工库存归还。
+		if err := s.leaseHooks.RenewTx(tx, RenewRevert, parent, r); err != nil {
+			return err
+		}
+	} else if err := s.returnReservedStockTx(tx, parent); err != nil {
 		return err
 	}
 	if err := s.repo.RevokeAccessByOrderTx(tx, parent.ID); err != nil {

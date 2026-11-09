@@ -20,8 +20,10 @@
 > 浏览器统一经鉴权 BFF **`GET /api/market-proxy/<path>`**（白名单代理，401 自动 refresh）取数，市场页面均为客户端取数、不再 SSR 直连。
 
 ### `/market` 算力市场列表 ✅（浏览需登录：middleware + 后端 AuthRequired 双层）
-- `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|perpetual)` `available_hours` `price_min/price_max`(分) `card_count_min` `sort` `page` `page_size`
+- `GET /products`（需登录，经 `/api/market-proxy/products`）— 筛选参数：`q` `product_type(card_rental|outright|center|colocation)` `gpu_model` `region` `delivery_mode(bare_metal|container|rack|vm)` `pricing_mode(hourly|daily|weekly|monthly|nightly|perpetual)`（零租按任一已启用计费方式匹配，T-093） `available_hours` `price_min/price_max`(分) `card_count_min` `min_cards`(能一次租到 ≥N 卡，T-093) `sort` `page` `page_size`
 - 商品卡片关键字段：`gpu_model` `card_count` `stock` `unit_price`(分/卡·周期) `pricing_mode` `region` `self_operated` **`health`**(unknown/healthy/degraded/offline —— offline 应显示「暂不可下单」灰态，unknown 不显示徽章)
+- 🆕 v1.2 字段（列表与详情同）：`prices[]` `fulfillment_mode` `availability` `night_start_min/night_end_min` `card_split_options`（托管分卡可选卡数，非托管为 null） `max_free_per_node`（托管单机最多可租卡数，人工为 null）
+- 🆕 **`GET /products/:id/availability?pricing_mode&cards&duration&night_start_date`**（T-093，需登录，每用户 30 次/分钟超出 42900）— 下单前选卡数/时长后实时校验可租性并报价，与 `POST /orders` 同一报价函数；返回 `available` `reason` `quote{pricing_mode,unit_price,quantity,duration,total_amount,platform_fee,fee_rate}` `lease_preview{start_rule,start_at,end_at}`。经 `/api/market-proxy/products/:id/availability`，**前端仓库 market-proxy `ALLOWED_PATHS` 需新增该路径**（本仓库未改）。详见 compute-api.md
 - 🆕 **算力评估 agent**（2026-09-28 升级，定位工作台首页智能入口；生产网关已接入，页面由前端团队改版实现）：`POST /market/agent-search`（JSON兼容） / `POST /market/agent-search/stream`（流式，需登录），入参 `{query: string ≤500字}`；响应字段：
   - `relevant` false 时只渲染 `reject_reason`
   - `summary` 一句话评估结论（agent 卡标题位）
@@ -93,10 +95,22 @@
 - `GET /orders?status&order_no&page&page_size`、`GET /orders/:orderNo`
 - 状态枚举：`pending_payment|paid|provisioning|active|completed|cancelled|refunding|refunded|frozen`
 - 详情响应含 `actions {can_confirm, can_renew, can_refund, can_view_credential}` —— **按钮显隐直接用这组字段，不要前端自行推断**
-- `POST /orders/:id/confirm`（签收）；`POST /orders/:id/renew` 暂未开放，返回 40900、`can_renew=false`；`POST /orders/:id/refund` ⬜（申请接口存在，真实资金退款仍依赖支付渠道）。
+- `POST /orders/:id/confirm`（签收）；续租 `GET /orders/:id/renewal-quote` + `POST /orders/:id/renew`（仅 `actions.can_renew=true` 时展示；有待支付续租单时 `can_renew=false`，用 `pending_renewal_order_no` 恢复支付；包夜订单返回 50000，契约见 [compute-api.md](compute-api.md#托管订单续租s2-t-088)）；`POST /orders/:id/refund` ⬜（申请接口存在，真实资金退款仍依赖支付渠道）。
 - 凭证：`GET /orders/:id/access-credential`（脱敏）、`POST .../reveal`（明文，二次确认后调用）
 - 🆕 订单详情可加「存证时间线」：复用 `/blockchain/verify?type=order|delivery&id=<orderNo>`
 - 支付：`POST /payment/pay` → 响应含 `pay_url`；`GET /payment/status/:order_no` ⬜（轮询支付结果，待接）
+- 🆕 托管订单（v1.2，`fleet.enabled=true`，订单 `fulfillment_mode=managed`）：无签收环节（`paid → provisioning → active` 由平台自动开通）；详情页加「连接信息」卡片 `GET /orders/:id/access` → `{gateway_host, gateway_port, login, lease_state, delivery_kind, access_until, grace_until, auth_methods}`，展示 `ssh -p <gateway_port> <login>@<gateway_host>`（`lease_state≠active` 时提示不可登录）；「登录记录」`GET /orders/:id/sessions?page&page_size`。（S2 T-087/T-088）`lease_state=grace` 时提示「租期已结束，宽限期至 `grace_until`，可续租恢复（restart），逾期清除数据」；`suspended`（订单 `frozen`）时提示「订单已冻结，暂停登录，容器与数据保留，请联系客服」；`purging/purged` 时提示数据已清除。整机订单（连接信息 `delivery_kind=bare_metal`，T-089）没有宽限期、不展示「一键部署」：连接信息卡片提示「登录后为宿主机账户 `omnis-<login>`，可 `sudo`；到期即断开并清除，数据请在到期前导出」，不展示 grace 文案。续租按钮同样只看 `actions.can_renew`，`mode`(extend/restart) 由报价接口返回。人工订单调用这两个接口返回 40400，前端按 `fulfillment_mode` 决定是否展示。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
+- 🆕 托管订单「停机与补偿」卡片（S2 T-105）：`GET /orders/:id/outages` 列出停机段（`ongoing` 标进行中，`counted=false` 标「不足 5 分钟不补偿」）、已顺延分钟 `extended_minutes`、待退费 `pending_refund_amount`（分）；补偿方式切换 `PUT /orders/:id/outage-remedy` `{remedy:"extend"|"refund"}`，仅 `can_change_remedy=true` 时可点，「退费」仅 `refund_eligible=true` 时可点；`refund_available=false` 时点退费返回 50000「易宝部分退款能力未确认，暂只支持顺延补偿」并记录意向（`refund_requested_at`），页面应提示「已记录退费申请，当前按顺延补偿」。契约见 [compute-api.md](compute-api.md#托管订单停机与补偿s2-t-105)。T-106：开关 `fleet.outage.yeepay_partial_refund_confirmed=true` 后退费真实执行（停机结束即原路部分退款，`remedy_applied_at` 非空即已退成功），`refund_available=true`；开关打开前只记录意向的买家需重新选择「退费」，不会自动转换
+
+### 订单详情 · 一键部署（v1.2，`fleet.enabled=true`，托管订单，页面待建，建议 `/console/buyer/orders/[orderId]/deploy`）🆕
+- 模型选择：`GET /models`（目录 active 条目，含许可证与已验证卡型）
+- 方案判定：`GET /orders/:id/deploy-plans?model_id=&gpu_mem_util=` → `{feasible, plans[], checks[]}`；`checks` 中 `level=error` 的项直接展示原因；F7（许可证）/F8（卡型未实测）要求勾选确认
+- 提交：`POST /orders/:id/deployments`；40900 且 `data.deploy_no` 存在时跳转到该部署；40001 时展示 `data.checks` / `data.plans`
+- 部署列表与详情：`GET /orders/:id/deployments`、`GET .../:deploy_no`（`state` 进度条 pending→checking→pulling→starting→running；`pulling` 时用 `cache.bytes_done/weights_bytes` 画下载进度；`access.base_url` / `access.port_forward_cmd` 展示访问方式；`events` 为重启记录）。进行中状态建议 5–10s 轮询
+- 健康曲线：`GET .../:deploy_no/health?range=1h|24h|7d`（TTFT、吞吐、排队、KV 占用、卡温度；`health_reason_text` 作为当前原因文案）
+- 日志：`GET .../:deploy_no/logs?tail=200`（每分钟 6 次，42900 时提示稍后再试；`source=stored` 时标注"失败时留存的日志"）
+- 操作：`POST .../:deploy_no/stop`、`POST .../:deploy_no/restart`（`stopped/failed` 时按钮文案为"恢复"）
+- 契约见 [model-deploy-api.md](model-deploy-api.md#部署买家订单本人t-098t-099仅-fleetenabledtrue-时注册)
 
 ### `/console/buyer/invoices` 发票 ✅
 - `GET/PUT /invoices/title`、`GET /invoices/billable-orders`、`POST /invoices/apply`、`GET /invoices?status`、`GET /invoices/:invoice_no/download`(PDF 二进制)
@@ -106,6 +120,9 @@
 
 ### `/console/buyer/messages` 通知 ✅
 - `GET /notifications?type(order|ticket|system)`、`POST /notifications/:id/read`、`POST /notifications/read-all`、`DELETE /notifications/:id`；列表响应的 `unread` 是全类型未读数（角标用）
+
+### SSH 公钥（v1.2，`fleet.enabled=true`，页面待建，建议 `/console/buyer/ssh-keys` 或并入 profile）🆕
+- `GET /user/ssh-keys`、`POST /user/ssh-keys` `{name?, public_key}`、`DELETE /user/ssh-keys/:id`；每账户最多 10 把，只收 ed25519 / ecdsa / RSA≥3072 的单行公钥，错误信息直接展示。删除后约 7 秒内新登录被拒，已建立的会话不会断开（页面需提示）。契约见 [managed-rental-api.md](managed-rental-api.md#买家连接s2-t-086)
 
 ### `/console/buyer/profile` `/console/buyer/billing` ⬜
 - profile 已使用 `/auth/me` 和 KYC 状态，只读；`GET /user/profile` 返回当前数据库资料，`PUT` HTTP 501 明确未开放。billing 已接支付记录及结算查询；查询可用不代表真实支付已接入。
@@ -135,11 +152,27 @@
 - `DELETE /supplier/nodes/:id`
 - 页面附节点侧接入说明（30s 心跳 curl 示例见 [scheduler-api.md](scheduler-api.md)）
 
+#### 托管节点接入向导（v1.2，`fleet.enabled=true`，页面待建）🆕
+契约见 [managed-rental-api.md](managed-rental-api.md)。仅托管商品（`fulfillment_mode=managed`）走此流程；后端已就绪，前端未实现。
+
+| 步骤 | 接口 | 页面要点 |
+|---|---|---|
+| ① 添加节点 | `POST /supplier/nodes` `{product_id, node_name, total_cards, mgmt_mode:"ssh", disk_per_card_gb, lease_port_start?, lease_port_end?, expected_host_fingerprint?}` | 无 `node_key`；默认端口段 40000–40099；**推荐**引导用户在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 并粘贴指纹（`SHA256:…`），填写后首次连接即校验、跳过⑤ |
+| ② 上架说明 | `GET /supplier/nodes/:id/onboarding` | 展示 `authorized_keys_line`（复制按钮）、`requirements`、按发行版切换的 `firewall_scripts`、控制面/网关出口 IP |
+| ③ 连接信息 | `PUT /supplier/nodes/:id/ssh` `{host, port, user, bootstrap_password?, expected_host_fingerprint?}` | 默认推荐「手动加公钥 + 预期指纹」；一次性密码为次选项，选它时提示一并填写预期指纹（否则密码会在指纹确认前发出），提交后不回显不缓存；40001 失败时连接信息已保存，引导改为手动加公钥；40900「一次性密码未发送」= 指纹不一致，引导用户核对指纹 |
+| ④ 发起探活 | `POST /supplier/nodes/:id/verify` → `task_id` | 轮询 `GET /supplier/nodes` 看 `verify_status` |
+| ⑤ 确认指纹 | `POST /supplier/nodes/:id/host-key/confirm` `{fingerprint}` | 首次连接后 `verify_status=unverified` 且 `host_key_fingerprint` 有值、未确认时出现；展示核对命令，用户粘贴机器上看到的指纹 |
+| ⑥ 探活报告 | `GET /supplier/nodes/:id/probe-reports?limit=` | P1–P13 逐项 ok/skipped/detail；`inventory` 可能为 `null` |
+| ⑦ 卡槽 | `GET /supplier/nodes/:id/slots`、`PUT /supplier/nodes/:id/slots/:gpu_index` `{state:"withheld"\|"free"}` | 只允许 free↔withheld |
+| ⑧ 运维 | `POST .../drain`、`POST .../undrain`、`POST .../reimage-confirm` `{expected_host_fingerprint}`（T-089 必填）、`DELETE /supplier/nodes/:id` | `key_mismatch` 走⑤重新确认；`needs_reimage`（整机租约结束）显示「待重装」并给出重装确认表单：提示先重装系统、重新放行管理公钥，再在机器上执行 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` 粘贴**新**指纹；40001「旧主机指纹」= 未重装/未换主机密钥；40900「冻结核查中」= 等运营结案。此状态下③⑤④提交后节点仍为 `needs_reimage`，页面不要引导走那条路 |
+| ⑨ 停调度提示（T-105） | `GET /supplier/nodes` 的 `dispatch_hold`、`dispatch_hold_reason` | `dispatch_hold=true` 时标「平台暂停接单」并展示原因（信用分低于阈值 / 30 天停机超限 / 运营暂停），说明在租不受影响、需联系运营复核；与供给方自己的排空（`schedulable=false`）分开展示 |
+
 ### `/console/supplier/settlements` 结算 ✅
 - `GET /supplier/settlements?status`、`GET /supplier/settlements/summary`
+- 🆕 托管订单（T-106）：租期末（租约清除后）才分账；记录含 `refund_deduction`（部分退款扣减，分）与 `platform_compensation`（平台另行补偿，分），非 0 时在明细里展示「停机退款扣减 / 平台补偿」；每行带 `fulfillment_mode` 与 `settle_ready_at`，`managed` 且 `settle_ready_at=null` 的待结行标「租期结束后分账」
 
 ### `/console/supplier/inventory` 盘点 ✅
-- `GET /supplier/resource-syncs?product_id`、`POST /supplier/resource-syncs/passive`
+- `GET /supplier/resource-syncs?product_id`、`POST /supplier/resource-syncs/passive`（托管商品返回 40001「托管商品库存由平台按卡槽自动计算」，页面应对托管商品隐藏上报入口，T-093）
 
 ### `/console/supplier/messages` ✅ 同买家通知四件套
 
@@ -151,16 +184,20 @@
 |---|---|---|
 | `/admin/reviews` | `GET /admin/audits/qualifications[?status=all]`、`POST .../:id/approve\|reject`、`GET .../:id/document`(文件)、`POST /admin/audits/products/:id/approve\|reject` | ✅ |
 | `/admin/products` | `GET /admin/products?status`、`PATCH /admin/products/:id/offline` | ✅ |
-| `/admin/orders` | `GET /admin/orders`（2026-09-22 起下发 `buyer_name`(企业名/手机号)、`product_gpu_model`、`product_type`，列表用可读名称替代 UID/#id）、`PATCH /admin/orders/:id/status`（改 frozen 会自动吊销凭证+违规上链存证） | ✅ |
+| `/admin/orders` | `GET /admin/orders`（2026-09-22 起下发 `buyer_name`(企业名/手机号)、`product_gpu_model`、`product_type`，列表用可读名称替代 UID/#id）、`PATCH /admin/orders/:id/status`（改 frozen 会自动吊销凭证+违规上链存证；托管订单同时租约 suspended + 断开会话）；托管 frozen 订单加「解冻」按钮 `POST /admin/orders/:id/unfreeze`，可选勾选「误冻结」`{wrong_freeze:true}`（仅托管订单，契约见 [compute-api.md](compute-api.md#托管订单冻结与解冻s2-t-088)） | ✅ |
 | `/admin/finance` | `GET /admin/payment/list`、`GET /admin/invoices?status`、`POST /admin/invoices/:id/issue`(FormData: pdf+tax_invoice_no)、`POST /admin/invoices/:id/reject`；`GET /admin/payment/reconcile` ⬜ | ✅ |
 | `/admin/tickets` | `GET /admin/tickets`、`POST /admin/tickets/:id/claim\|resolve\|close`；`GET /admin/tickets/:id` + `POST .../messages` ⬜（详情/回复待接） | ✅ |
 | `/admin/crm` | `GET /admin/leads`、`POST /admin/leads/:id/assign` | ✅ |
-| `/admin/risk` | `GET /admin/risk/alerts`、`POST .../:id/freeze\|dismiss` | ✅ |
+| `/admin/risk` | `GET /admin/risk/alerts`、`POST .../:id/freeze\|dismiss`；托管挖矿扫描（T-088）新增 `alert_type`：`mining_freeze`（已自动冻结，`status=processing`、`level=high`）、`mining_suspect`（仅告警，`status=pending`、`level=medium`）；`rule_detail` 是 JSON 字符串 `{lease_no,order_no,node_id,hits[]}`，前端解析展示。注意：对已被解冻的订单再点 freeze 会重新冻结，结案前先确认订单状态（见 [admin-api.md](admin-api.md)） | ✅ |
 | `/admin/users` | `GET /admin/users`、`PATCH /admin/users/:id/freeze` | ✅ |
-| `/admin/audit` | `GET /admin/audit-logs` | ✅ |
+| `/admin/audit` | `GET /admin/audit-logs`（T-088 新增 action：`mining_auto_freeze`、`unfreeze_order`、`lease.purged`、`lease.cleanup`；系统动作 `operator_id` 显示为 0） | ✅ |
 | `/admin/settings` | `GET/PUT /admin/config`；`GET/POST/PUT /admin/gpu-catalog` ⬜（型号库维护界面待接，字段见 gpu-catalog-api.md） | ✅ |
 | `/admin/cms` | `GET/POST /admin/cms/notices` | ✅ |
 | 节点总览（建议并入 `/admin/settings` 或新页）🆕 | `GET /admin/nodes?status`、`GET /admin/schedule-advice?order_no=`、`POST /admin/blockchain/requeue-failed`(存证死信补推) | 🆕 |
+| 模型目录与部署（v1.2，页面待建）🆕 | `GET/POST/PUT /admin/model-catalog[/:id]`、`POST /admin/model-catalog/:id/verifications\|activate\|retire`；`GET /admin/deployments?state&health&page&page_size`（仅 `fleet.enabled=true`），见 [admin-api.md](admin-api.md#模型部署v12-一键部署fleetenabledtrue-时注册) | 🆕 后端就绪 |
+| 托管节点运维（v1.2，`fleet.enabled=true`，页面待建）🆕 | `GET /admin/nodes`（托管节点带 `managed` 摘要）、`POST /admin/nodes/:id/suspend\|resume`、`GET /admin/node-tasks?state&node_id`、`POST /admin/node-tasks/:id/retry`、`GET /admin/leases?state&node_id&buyer_id`（租约检索，含 `resource_alert`）、`GET /admin/access-sessions?lease_no&ip`（登录会话检索），见 [managed-rental-api.md](managed-rental-api.md#运营接口) | 🆕 后端就绪 |
+| 停机与供给方信用（v1.2 S2 T-105，页面待建）🆕 | `GET /admin/lease-outages?lease_no&order_no&cause&supplier_id&open=1&refund_pending=1`（停机检索，含 `detail`、`liability_amount` 分；`refund_pending=1` 即待退费队列）、`GET /admin/supplier-credits?stopped=1`（按分数升序）、`GET /admin/supplier-credits/:id`（含节点 `dispatch_hold` 与 30 天停机分钟）、`PUT /admin/supplier-credits/:id/override` `{mode:auto\|allow\|stop, reason}`（allow/stop 必填理由），见 [admin-api.md](admin-api.md#供给方信用s2-t-105) | 🆕 后端就绪 |
+| 部分退款与违约退款（v1.2 S2 T-106，页面待建）🆕 | `GET /admin/payment/partial-refunds?status&order_no`（托管订单停机补偿 / 供给方违约部分退款，含状态、易宝退款单号、失败原因）、`POST /admin/supplier-breach-refunds` `{order_no, reason}`（供给方违约未使用部分退款，开关未打开时 50000），见 [admin-api.md](admin-api.md#post-adminsupplier-breach-refunds--供给方违约未使用部分退款s2-t-106)；分账扣减口径见 [payment-api.md](payment-api.md#租期末结算与部分退款s2-t-106docs24-d-10docs25-25776) | 🆕 后端就绪 |
 
 ---
 

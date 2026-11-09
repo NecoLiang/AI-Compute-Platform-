@@ -1,0 +1,339 @@
+package fleet
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+
+	"tokenfactory/internal/compute"
+)
+
+// closeOutage 结束租约的未结束停机(结束时间夹在 [started_at, now]), 同事务结算补偿。无未结束停机时什么也不做。
+// 锁顺序 订单 → 租约 → 停机行。
+func (s *Service) closeOutage(ctx context.Context, leaseID int64, end time.Time, note string) error {
+	l, err := s.repo.getLease(s.repo.db, leaseID)
+	if err != nil || l == nil {
+		return err
+	}
+	if o, err := s.repo.openOutage(s.repo.db, leaseID); err != nil || o == nil {
+		return err
+	}
+	var closedID int64
+	err = s.inTx(func(tx *sqlx.Tx) error {
+		ord, err := s.products.LockManagedOrderTx(tx, l.OrderID)
+		if err != nil {
+			return err
+		}
+		cur, err := s.repo.lockLease(tx, leaseID)
+		if err != nil || cur == nil {
+			return err
+		}
+		var o Outage
+		err = tx.Get(&o, `SELECT `+outageColumns+` FROM lease_outages WHERE open_claim=? FOR UPDATE`, leaseID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		if end.After(now) {
+			end = now
+		}
+		if end.Before(o.StartedAt) {
+			end = o.StartedAt
+		}
+		ok, err := affected(tx.Exec(`UPDATE lease_outages SET ended_at=?, open_claim=NULL WHERE id=? AND open_claim IS NOT NULL`,
+			end, o.ID))
+		if err != nil || !ok {
+			return err
+		}
+		closedID = o.ID
+		slog.Info("停机结束", "lease_no", cur.LeaseNo, "cause", o.Cause, "started_at", o.StartedAt, "ended_at", end, "note", note)
+		return s.settleOutageTx(tx, ord, cur, o.ID)
+	})
+	if err == nil && closedID > 0 {
+		s.afterSettle(ctx, closedID)
+	}
+	return err
+}
+
+// settleOutageTx 已结束停机段的计时与补偿(调用方已锁订单与租约)。幂等: counted 非空即已结算。
+//   - 有效秒数扣除与同租约其他已结束段的重叠; 原始时长 < min_minutes 或有效秒数为 0 → 不计(counted=0)。
+//   - 责任金额 = floor(所属订单实付 × 有效秒数 ÷ 该订单租期秒数), 由 liable 方承担(D-9/D-10)。
+//   - 买家选顺延且租约仍在租期内: 同事务顺延 access_until / 订单 lease_end_at / 交付有效期 / 待支付续租的起止,
+//     remedy='extend' 并写 remedy_applied_at。
+//   - 否则(选了退费, 或租期已结束): remedy='refund', remedy_amount=责任金额, remedy_applied_at 留空由 T-106 退款后写。
+func (s *Service) settleOutageTx(tx *sqlx.Tx, ord *compute.Order, l *Lease, id int64) error {
+	var o Outage
+	if err := tx.Get(&o, `SELECT `+outageColumns+` FROM lease_outages WHERE id=? FOR UPDATE`, id); err != nil {
+		return err
+	}
+	if o.EndedAt == nil || o.Counted != nil {
+		return nil
+	}
+	raw := o.EndedAt.Sub(o.StartedAt)
+	secs, err := s.effectiveSeconds(tx, &o)
+	if err != nil {
+		return err
+	}
+	minDur := time.Duration(s.cfg.Outage.MinMinutes) * time.Minute
+	if raw < minDur || secs <= 0 {
+		ok, err := affected(tx.Exec(`UPDATE lease_outages SET seconds=?, minutes=?, counted=0, liability_amount=0,
+			remedy_applied_at=NOW() WHERE id=? AND counted IS NULL`, secs, secs/60, id))
+		if err == nil && !ok {
+			err = fmt.Errorf("停机段 %d 结算守卫未命中", id)
+		}
+		return err
+	}
+	liab, err := s.liabilityAmount(tx, o.OrderID, secs)
+	if err != nil {
+		slog.Error("运营告警: 停机责任金额无法计算(需人工核定)", "outage_id", id, "order_id", o.OrderID, "error", err)
+		liab = nil
+	}
+	now := time.Now()
+	extend := l.OutageRemedy == "extend" && extendable(ord, l, now)
+	var nightExtend *nightExtension
+	if extend {
+		// 包夜(S4): 顺延 = 补加一晚(同卡同窗口); 末晚之后那晚卡已被别人订走 → 改为退费。
+		if nightExtend, err = s.planNightExtensionTx(tx, l, &o); err != nil {
+			return err
+		}
+		extend = nightExtend == nil || nightExtend.ok
+	}
+	if extend {
+		ok, err := affected(tx.Exec(`UPDATE lease_outages SET seconds=?, minutes=?, counted=1, liability_amount=?,
+			remedy='extend', remedy_applied_at=NOW() WHERE id=? AND counted IS NULL`, secs, secs/60, liab, id))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("停机段 %d 结算守卫未命中", id)
+		}
+		if nightExtend != nil {
+			if err := s.applyNightExtensionTx(tx, ord, l, nightExtend); err != nil {
+				return err
+			}
+			slog.Info("停机补偿: 包夜补加一晚", "lease_no", l.LeaseNo, "outage_id", id, "night", nightExtend.describe(), "liable", o.Liable)
+			return nil
+		}
+		if err := s.extendForOutageTx(tx, ord, l, time.Duration(secs)*time.Second); err != nil {
+			return err
+		}
+		slog.Info("停机补偿: 已顺延", "lease_no", l.LeaseNo, "outage_id", id, "seconds", secs, "liable", o.Liable)
+		return nil
+	}
+	ok, err := affected(tx.Exec(`UPDATE lease_outages SET seconds=?, minutes=?, counted=1, liability_amount=?,
+		remedy='refund', remedy_amount=? WHERE id=? AND counted IS NULL`, secs, secs/60, liab, liab, id))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("停机段 %d 结算守卫未命中", id)
+	}
+	slog.Warn("停机补偿: 待退费(T-106)", "lease_no", l.LeaseNo, "outage_id", id, "seconds", secs, "amount_fen", amountLogValue(liab))
+	return nil
+}
+
+// amountLogValue 日志里输出金额值(分); 未核定(nil)输出 "unknown", 不打印指针地址。
+func amountLogValue(p *int64) any {
+	if p == nil {
+		return "unknown"
+	}
+	return *p
+}
+
+// extendable 顺延的前提: 租约仍在租期内(在租/停放/冻结)且订单未终结。
+func extendable(ord *compute.Order, l *Lease, now time.Time) bool {
+	if ord == nil || ord.LeaseEnd == nil || l.AccessUntil == nil || !l.AccessUntil.After(now) {
+		return false
+	}
+	switch l.State {
+	case LeaseActive, LeaseParked, LeaseSuspended:
+	default:
+		return false
+	}
+	return ord.Status == "active" || ord.Status == "frozen"
+}
+
+// extendForOutageTx 把租期整体后移 d(docs/25 §25.7.6 顺延补偿), 全部守卫式。
+func (s *Service) extendForOutageTx(tx *sqlx.Tx, ord *compute.Order, l *Lease, d time.Duration) error {
+	secs := int(d / time.Second)
+	ok, err := affected(tx.Exec(`UPDATE leases SET access_until=? WHERE id=? AND access_until=?
+		AND state IN ('active','parked','suspended')`, l.AccessUntil.Add(d), l.ID, *l.AccessUntil))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("顺延失败: 租约 %s 租期已变化", l.LeaseNo)
+	}
+	if err := s.repo.touchAccess(tx, l.ID); err != nil {
+		return err
+	}
+	oldEnd := *ord.LeaseEnd
+	ok, err = affected(tx.Exec(`UPDATE orders SET lease_end_at=? WHERE id=? AND lease_end_at=?`, oldEnd.Add(d), ord.ID, oldEnd))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("顺延失败: 订单 %s 租期已变化", ord.OrderNo)
+	}
+	if _, err := tx.Exec(`UPDATE order_deliveries SET access_expires_at=access_expires_at + INTERVAL ? SECOND
+		WHERE order_id=? AND access_expires_at IS NOT NULL`, secs, ord.ID); err != nil {
+		return err
+	}
+	// 待支付的顺延续租以旧结束时间为起点(支付时校验 parent.lease_end_at == lease_end_at), 一并后移。
+	_, err = tx.Exec(`UPDATE order_renewals SET lease_end_at=?, renewed_until=renewed_until + INTERVAL ? SECOND
+		WHERE parent_order_id=? AND applied_at IS NULL AND mode='extend' AND lease_end_at=?`,
+		oldEnd.Add(d), secs, ord.ID, oldEnd)
+	return err
+}
+
+// effectiveSeconds 本段扣除与同租约其他已结束段重叠部分后的秒数(同一时段多原因只计一次)。
+// 包夜租约只计落在已购夜晚窗口内的部分(白天停放期不是租期, 例如跨天的误冻结段), 与 orderTerm 的「晚数 × 窗口时长」口径一致。
+func (s *Service) effectiveSeconds(q sqlx.Queryer, o *Outage) (int, error) {
+	base, err := s.outageBaseIntervals(q, o)
+	if err != nil {
+		return 0, err
+	}
+	var others []span
+	if err := sqlx.Select(q, &others, `SELECT started_at, ended_at FROM lease_outages
+		WHERE lease_id=? AND id<>? AND ended_at IS NOT NULL AND started_at<? AND ended_at>?`,
+		o.LeaseID, o.ID, *o.EndedAt, o.StartedAt); err != nil {
+		return 0, err
+	}
+	var total time.Duration
+	for _, b := range base {
+		total += b.E.Sub(b.S) - overlapUnion(b, others)
+	}
+	if total < 0 {
+		total = 0
+	}
+	return int(total / time.Second), nil
+}
+
+// span 半开区间 [S, E)。
+type span struct {
+	S time.Time `db:"started_at"`
+	E time.Time `db:"ended_at"`
+}
+
+// overlapUnion b 与 others 并集的重叠时长。
+func overlapUnion(b span, others []span) time.Duration {
+	cl := make([]span, 0, len(others))
+	for _, x := range others {
+		st, en := x.S, x.E
+		if st.Before(b.S) {
+			st = b.S
+		}
+		if en.After(b.E) {
+			en = b.E
+		}
+		if en.After(st) {
+			cl = append(cl, span{st, en})
+		}
+	}
+	sort.Slice(cl, func(i, j int) bool { return cl[i].S.Before(cl[j].S) })
+	var d time.Duration
+	cursor := b.S
+	for _, x := range cl {
+		st := x.S
+		if st.Before(cursor) {
+			st = cursor
+		}
+		if x.E.After(st) {
+			d += x.E.Sub(st)
+			cursor = x.E
+		}
+	}
+	return d
+}
+
+// outageBaseIntervals 停机段中计入租期的区间: 非包夜 = 整段; 包夜 = 与本租约各晚窗口的交集。
+func (s *Service) outageBaseIntervals(q sqlx.Queryer, o *Outage) ([]span, error) {
+	whole := []span{{o.StartedAt, *o.EndedAt}}
+	var w struct {
+		Start *int `db:"night_start_min"`
+		End   *int `db:"night_end_min"`
+	}
+	if err := sqlx.Get(q, &w, `SELECT o.night_start_min, o.night_end_min FROM leases l JOIN orders o ON o.id=l.order_id
+		WHERE l.id=?`, o.LeaseID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return whole, nil
+		}
+		return nil, err
+	}
+	if w.Start == nil || w.End == nil {
+		return whole, nil
+	}
+	var nights []time.Time
+	if err := sqlx.Select(q, &nights, `SELECT night_date FROM lease_nights WHERE lease_id=? ORDER BY night_date`, o.LeaseID); err != nil {
+		return nil, err
+	}
+	if len(nights) == 0 {
+		return whole, nil
+	}
+	win := compute.NightWindow{StartMin: *w.Start, EndMin: *w.End}
+	var out []span
+	for _, d := range nights {
+		st, en := compute.NightStartAt(d, win), compute.NightEndAt(d, win)
+		if st.Before(o.StartedAt) {
+			st = o.StartedAt
+		}
+		if en.After(*o.EndedAt) {
+			en = *o.EndedAt
+		}
+		if en.After(st) {
+			out = append(out, span{st, en})
+		}
+	}
+	return out, nil
+}
+
+// liabilityAmount floor(订单实付 × secs ÷ 订单租期秒数), 不超过实付。租期按订单计费方式快照换算。
+func (s *Service) liabilityAmount(q sqlx.Queryer, orderID int64, secs int) (*int64, error) {
+	paid, term, err := orderTerm(q, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if term <= 0 {
+		return nil, fmt.Errorf("订单 %d 无有效租期(未开始或计费方式异常)", orderID)
+	}
+	amt := min(paid*int64(secs)/term, paid)
+	return &amt, nil
+}
+
+// afterSettle 提交后: 待退费段交给 T-106(已注入时), 并重算供给方信用。
+func (s *Service) afterSettle(ctx context.Context, id int64) {
+	var o struct {
+		Remedy    *string    `db:"remedy"`
+		AppliedAt *time.Time `db:"remedy_applied_at"`
+		Liable    string     `db:"liable"`
+		NodeID    *int64     `db:"node_id"`
+	}
+	if err := s.repo.db.Get(&o, `SELECT remedy, remedy_applied_at, liable, node_id FROM lease_outages WHERE id=?`, id); err != nil {
+		slog.Error("停机结算后读取失败", "outage_id", id, "error", err)
+		return
+	}
+	if o.Remedy != nil && *o.Remedy == "refund" && o.AppliedAt == nil && s.refunder != nil {
+		if err := s.refunder.RequestOutageRefund(ctx, id); err != nil {
+			slog.Error("停机退费发起失败(将由 T-106 补偿扫描重试)", "outage_id", id, "error", err)
+		}
+	}
+	if o.Liable == "supplier" && o.NodeID != nil {
+		var supplierID int64
+		if err := s.repo.db.Get(&supplierID, `SELECT supplier_id FROM supplier_nodes WHERE id=?`, *o.NodeID); err != nil {
+			slog.Error("停机结算后读取节点供给方失败", "node_id", *o.NodeID, "error", err)
+			return
+		}
+		if err := s.RecomputeCredit(supplierID); err != nil {
+			slog.Error("供给方信用重算失败", "supplier_id", supplierID, "error", err)
+		}
+	}
+}

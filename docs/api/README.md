@@ -8,7 +8,7 @@
 
 - **响应包裹**：所有接口统一 `{"code":0,"message":"success","data":{...},"request_id":"req_..."}`；`code!=0` 为业务错误，`message` 可直接展示
 - **鉴权**：需登录的接口带 `Authorization: Bearer <access_token>`（短信验证码登录获取，见 auth-api）
-- **通用错误码**：40001 参数 / 40100 未登录 / 40101 token 过期 / 40300 无权限 / 40400 不存在 / 42900 限流 / 50000 服务异常
+- **通用错误码**：40001 参数 / 40100 未登录 / 40101 token 过期 / 40300 无权限 / 40400 不存在 / 40900 状态冲突 / 42900 限流 / 50000 服务异常
 - **金额单位一律为分**；时间为 ISO8601
 - 联调遇到问题时带上响应里的 `request_id`，后端可直接定位日志
 
@@ -22,7 +22,9 @@
 | [compute-api.md](compute-api.md) | 算力市场：商品列表/详情、下单、订单、交付签收、访问凭证 | 买家/供应方 |
 | [agent-search-api.md](agent-search-api.md) | 市场页智能选型：算力推定 + 商品匹配 | 买家 |
 | [gpu-catalog-api.md](gpu-catalog-api.md) | GPU 型号库下拉（含安可认证标记）+ 管理端维护 | 发布页/运营 |
+| [model-deploy-api.md](model-deploy-api.md) | 一键部署：模型目录与真机验证（运营）、模型列表与部署方案（买家） | 运营/托管租约 |
 | [scheduler-api.md](scheduler-api.md) | 供应方节点注册/心跳、商品健康度、调度建议 | 供应方/运营 |
+| [managed-rental-api.md](managed-rental-api.md) | v1.2 托管零租：SSH 节点接入、探活报告、卡槽、运营停用/恢复与任务重试（`fleet.enabled=true`） | 供应方/运营 |
 | [blockchain-api.md](blockchain-api.md) | 文昌链存证查验（订单/交付/违规 上链验证） | 全部 |
 | [payment-api.md](payment-api.md) | 支付与结算 | 买家/供应方 |
 | [notification-api.md](notification-api.md) | 站内信/消息中心 | 全部 |

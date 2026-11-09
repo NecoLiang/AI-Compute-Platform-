@@ -13,9 +13,11 @@ import (
 	"tokenfactory/internal/legal"
 	"tokenfactory/internal/trading"
 	"tokenfactory/pkg/crypto"
+	"tokenfactory/pkg/errcode"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/redis/go-redis/v9"
 )
 
 // ===== 商品类型 / 计费模式常量 (C-01, C-04) =====
@@ -69,6 +71,7 @@ var maxDurationByPricingMode = map[string]int{
 	PricingWeekly:    520,   // 10 年
 	PricingMonthly:   120,   // 10 年
 	PricingPerpetual: 1,     // 买断无租期
+	PricingNightly:   31,    // 包夜按晚, 单笔最多 31 晚 (docs/26 §26.4)
 }
 
 // durationUnitLabel 用于拼中文错误提示，避免"租期超出上限 120"这种没有单位的歧义提示。
@@ -78,6 +81,7 @@ var durationUnitLabel = map[string]string{
 	PricingWeekly:    "周",
 	PricingMonthly:   "个月",
 	PricingPerpetual: "次",
+	PricingNightly:   "晚",
 }
 
 // MaxDurationFor 返回该计费模式允许的最大周期数；未知模式回退到最严格的上限。
@@ -100,20 +104,26 @@ func DurationUnit(pricingMode string) string {
 // monthly / weekly 走自然日历（AddDate），不用固定 30 天/720 小时近似，
 // 避免"买 1 个月却在 2 月少给 2 天"这类与账单不符的情况。
 // 买断（perpetual）无结束时间，返回零值 time.Time，调用方必须判空。
-func LeaseEndAt(start time.Time, pricingMode string, duration int) time.Time {
+// 包夜（nightly）必须显式走窗口换算，窗口取订单快照(win)；缺窗口直接报错，绝不落入默认的按小时分支。
+func LeaseEndAt(start time.Time, pricingMode string, duration int, win *NightWindow) (time.Time, error) {
 	switch pricingMode {
 	case PricingHourly:
-		return start.Add(time.Duration(duration) * time.Hour)
+		return start.Add(time.Duration(duration) * time.Hour), nil
 	case PricingDaily:
-		return start.AddDate(0, 0, duration)
+		return start.AddDate(0, 0, duration), nil
 	case PricingWeekly:
-		return start.AddDate(0, 0, duration*7)
+		return start.AddDate(0, 0, duration*7), nil
 	case PricingMonthly:
-		return start.AddDate(0, duration, 0)
+		return start.AddDate(0, duration, 0), nil
 	case PricingPerpetual:
-		return time.Time{}
+		return time.Time{}, nil
+	case PricingNightly:
+		if win == nil {
+			return time.Time{}, fmt.Errorf("包夜订单缺少夜间窗口快照, 无法计算租期")
+		}
+		return NightlyLeaseEnd(NightDateOf(start, *win), duration, *win), nil
 	default:
-		return start.Add(time.Duration(duration) * time.Hour)
+		return start.Add(time.Duration(duration) * time.Hour), nil
 	}
 }
 
@@ -141,7 +151,8 @@ var validDeliveryModes = map[string]bool{
 
 // allowedPricingModes 各商品类型允许的计费模式 (C-01, C-04)。
 var allowedPricingModes = map[string]map[string]bool{
-	ProductTypeCardRental: {PricingHourly: true, PricingDaily: true, PricingWeekly: true},
+	// v1.2: 零租全天商品 h/d/w/m 可多选; 夜间窗口商品仅 nightly。组合约束见 validateCardRentalPricing。
+	ProductTypeCardRental: {PricingHourly: true, PricingDaily: true, PricingWeekly: true, PricingMonthly: true, PricingNightly: true},
 	ProductTypeOutright:   {PricingPerpetual: true},
 	ProductTypeCenter:     {PricingDaily: true, PricingWeekly: true, PricingMonthly: true, PricingPerpetual: true},
 	ProductTypeColocation: {PricingHourly: true, PricingDaily: true, PricingWeekly: true, PricingMonthly: true, PricingPerpetual: true},
@@ -154,6 +165,7 @@ var pricingModeLabels = map[string]string{
 	PricingWeekly:    "按周",
 	PricingMonthly:   "按月",
 	PricingPerpetual: "永久",
+	PricingNightly:   "包夜",
 }
 
 type Service struct {
@@ -167,6 +179,12 @@ type Service struct {
 	attester Attester
 	// notifier 消息中心写入口。nil 表示未启用, 业务照常。
 	notifier Notifier
+	// managedGate 托管履约判定(fleet 注入)。nil = fleet 未启用, 托管商品不可提审/下单。
+	managedGate ManagedGate
+	// leaseHooks 托管租约钩子(fleet 注入, managed_lease.go)。零值 = 未接入, 托管商品不可下单。
+	leaseHooks LeaseHooks
+	// rdb availability 限流(每用户每分钟 30 次)。nil = 未装配, availability 返回 50000。
+	rdb *redis.Client
 }
 
 // Notifier 消息中心写接口, 由 notification 包实现。
@@ -212,6 +230,12 @@ type BuyerOrderDetailOrder struct {
 	ComplianceAgreed bool       `json:"compliance_agreed"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
+	// 下单快照(与订单列表行同名同类型): 履约模式、计费方式; 包夜订单另有首晚日期与夜间窗口(分钟), 其他订单为 null。
+	FulfillmentMode string     `json:"fulfillment_mode"`
+	PricingMode     string     `json:"pricing_mode"`
+	NightStartDate  *time.Time `json:"night_start_date"`
+	NightStartMin   *int       `json:"night_start_min"`
+	NightEndMin     *int       `json:"night_end_min"`
 }
 
 type BuyerOrderDetailProduct struct {
@@ -561,6 +585,18 @@ type CreateProductReq struct {
 	Region            string `json:"region"`
 	ComplianceAgreed  bool   `json:"compliance_agreed"`
 	ComplianceVersion string `json:"compliance_version"`
+
+	// FulfillmentMode manual(默认)/managed(平台托管, docs/25); 创建后不可修改。
+	// v1.2 灵活计费 (docs/26 §26.9)。零租商品传 prices 时忽略顶层 pricing_mode/unit_price/min_duration,
+	// 改由已启用价格中周期最短的一项同步为展示主价; 不传则按顶层字段生成一行(兼容旧前端)。
+	FulfillmentMode string       `json:"fulfillment_mode"`
+	Availability    string       `json:"availability"`
+	NightStartMin   *int         `json:"night_start_min"`
+	NightEndMin     *int         `json:"night_end_min"`
+	Prices          []PriceInput `json:"prices"`
+	// CardSplitOptions 托管分卡容器商品的可选卡数(docs/26 §26.5.1), 须为平台集合 {1,2,4,6,8} 的子集且不超过 card_count;
+	// 省略取默认集合(平台集合中 ≤ card_count 的全部值)。其他商品不得提交。
+	CardSplitOptions []int `json:"card_split_options"`
 }
 
 // NormalizeProductReq 填补可省略字段的默认值。纯函数, 便于测试。
@@ -568,6 +604,13 @@ type CreateProductReq struct {
 func NormalizeProductReq(req CreateProductReq) CreateProductReq {
 	if req.ProductType == "" {
 		req.ProductType = ProductTypeCardRental
+	}
+	if req.FulfillmentMode == "" {
+		req.FulfillmentMode = FulfillmentManual
+	}
+	// 托管商品库存由卡槽派生(探活通过的空闲卡), 忽略人工填写值。
+	if req.FulfillmentMode == FulfillmentManaged {
+		req.Stock = 0
 	}
 	if req.MinOrder <= 0 {
 		req.MinOrder = 1
@@ -602,8 +645,16 @@ func NormalizeProductReq(req CreateProductReq) CreateProductReq {
 			req.PricingMode = PricingMonthly
 		}
 	case ProductTypeCardRental:
-		if req.PricingMode == "" {
-			req.PricingMode = PricingHourly
+		req = normalizeCardRentalPricing(req)
+	}
+	if req.Availability == "" {
+		req.Availability = AvailabilityFulltime
+	}
+	if isSplitProduct(req.ProductType, req.FulfillmentMode, req.DeliveryMode) {
+		if len(req.CardSplitOptions) == 0 {
+			req.CardSplitOptions = defaultSplitOptions(req.CardCount)
+		} else {
+			req.CardSplitOptions = normalizeSplitOptions(req.CardSplitOptions)
 		}
 	}
 	return req
@@ -627,6 +678,18 @@ func ValidateProductReq(req CreateProductReq) error {
 	if req.Stock > MaxOrderQuantity {
 		return fmt.Errorf("库存超出上限(不得超过 %d)", MaxOrderQuantity)
 	}
+	if err := validateFulfillmentAndAvailability(req); err != nil {
+		return err
+	}
+	if err := validateSplitOptions(req); err != nil {
+		return err
+	}
+	// 零租: 多价格组合约束先于顶层展示主价校验(传 prices 时顶层字段由归一化同步, 不作为输入)。
+	if req.ProductType == ProductTypeCardRental {
+		if err := validateCardRentalPricing(req); err != nil {
+			return err
+		}
+	}
 
 	if modes := allowedPricingModes[req.ProductType]; !modes[req.PricingMode] {
 		return fmt.Errorf("计费模式 %q 不适用于该商品类型, 允许: %s", req.PricingMode, allowedModesText(req.ProductType))
@@ -640,7 +703,7 @@ func ValidateProductReq(req CreateProductReq) error {
 		if req.CardCount <= 0 {
 			return fmt.Errorf("零租商品的卡数必须大于 0")
 		}
-		if req.Stock <= 0 {
+		if req.Stock <= 0 && req.FulfillmentMode != FulfillmentManaged {
 			return fmt.Errorf("零租商品的可租库存必须大于 0")
 		}
 		if req.UnitPrice <= 0 {
@@ -708,7 +771,7 @@ func validateCardsPerMachine(req CreateProductReq) error {
 }
 
 func allowedModesText(productType string) string {
-	order := []string{PricingHourly, PricingDaily, PricingWeekly, PricingMonthly, PricingPerpetual}
+	order := []string{PricingHourly, PricingDaily, PricingWeekly, PricingMonthly, PricingNightly, PricingPerpetual}
 	modes := allowedPricingModes[productType]
 	var parts []string
 	for _, m := range order {
@@ -719,27 +782,60 @@ func allowedModesText(productType string) string {
 	return strings.Join(parts, "/")
 }
 
-func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, error) {
+// CreateProduct 发布商品; 返回价格倒挂提醒(只提醒不阻断, 永不为 nil)。
+func (s *Service) CreateProduct(supplierID int64, req CreateProductReq) (int64, []PriceWarning, error) {
 	p, err := s.prepareProduct(supplierID, req)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return s.repo.CreateProduct(p, req.ComplianceVersion)
+	id, err := s.repo.CreateProduct(p, req.ComplianceVersion)
+	if err != nil {
+		return 0, nil, err
+	}
+	return id, PriceWarnings(p.Prices), nil
 }
 
-func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) error {
+func (s *Service) ResubmitProduct(supplierID, id int64, req CreateProductReq) ([]PriceWarning, error) {
 	p, err := s.prepareProduct(supplierID, req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	existing, err := s.repo.GetProductByID(id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if existing.SupplierID != supplierID {
-		return fmt.Errorf("无权修改其他供给方的商品")
+		return nil, fmt.Errorf("无权修改其他供给方的商品")
 	}
-	return s.repo.ResubmitProduct(id, p, req.ComplianceVersion)
+	if fulfillmentOrManual(existing.FulfillmentMode) != p.FulfillmentMode {
+		return nil, fmt.Errorf("履约模式创建后不可修改, 如需切换请新建商品")
+	}
+	if p.FulfillmentMode == FulfillmentManaged {
+		if err := s.checkManagedSubmit(id, p.GpuModel); err != nil {
+			return nil, err
+		}
+		if managedScheduleChanged(existing, p) {
+			// 商品处于 draft/offline 时不能下新单, 在用状态不会在本次检查与写入之间新增。
+			inUse, err := s.managedGate.ManagedProductInUse(id)
+			if err != nil {
+				return nil, err
+			}
+			if inUse {
+				return nil, ErrManagedWindowLocked
+			}
+		}
+	}
+	if err := s.repo.ResubmitProduct(id, p, req.ComplianceVersion); err != nil {
+		return nil, err
+	}
+	return PriceWarnings(p.Prices), nil
+}
+
+// managedScheduleChanged 托管商品的售卖时段口径(可用时段/夜间窗口/交付方式)是否变化。
+func managedScheduleChanged(old, p *Product) bool {
+	eq := func(a, b *int) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
+	return old.Availability != p.Availability || !eq(old.NightStartMin, p.NightStartMin) ||
+		!eq(old.NightEndMin, p.NightEndMin) || old.DeliveryMode != p.DeliveryMode
 }
 
 func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Product, error) {
@@ -767,6 +863,7 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 		StorageSpec:      req.StorageSpec,
 		BandwidthSpec:    req.BandwidthSpec,
 		DeliveryMode:     req.DeliveryMode,
+		FulfillmentMode:  req.FulfillmentMode,
 		PricingMode:      req.PricingMode,
 		UnitPrice:        req.UnitPrice,
 		PriceNegotiable:  req.PriceNegotiable,
@@ -776,6 +873,17 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 		MinDuration:      req.MinDuration,
 		Region:           req.Region,
 		ComplianceAgreed: req.ComplianceAgreed,
+		Availability:     req.Availability,
+	}
+	if req.ProductType == ProductTypeCardRental {
+		p.Prices = priceRowsOf(req.Prices)
+		if req.Availability == AvailabilityNightWindow {
+			p.NightStartMin, p.NightEndMin = req.NightStartMin, req.NightEndMin
+		}
+		if len(req.CardSplitOptions) > 0 {
+			v := FormatCardSplitOptions(req.CardSplitOptions)
+			p.CardSplitOptionsRaw = &v
+		}
 	}
 	// 可空字段: 只在有意义时写入, 否则留 NULL, 避免 0/"" 被当成真实值展示。
 	if req.MachineCount > 0 {
@@ -807,6 +915,7 @@ func (s *Service) GetProduct(id int64) (*Product, *CreditScore, error) {
 	if p.Status != "active" {
 		return nil, nil, fmt.Errorf("product not found")
 	}
+	p.Prices = EnabledPrices(p.Prices) // 市场只展示已启用价格
 	credit, _ := s.repo.GetCreditScore(p.SupplierID)
 	return p, credit, nil
 }
@@ -831,7 +940,14 @@ func (s *Service) ListProducts(f ProductFilter) ([]Product, int64, error) {
 		len([]rune(f.Region)) > 100 || len([]rune(f.AvailableHours)) > 100 {
 		return nil, 0, fmt.Errorf("搜索条件不能超过 100 个字符")
 	}
-	return s.repo.ListProducts(f)
+	list, total, err := s.repo.ListProducts(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	for i := range list {
+		list[i].Prices = EnabledPrices(list[i].Prices) // 市场只展示已启用价格
+	}
+	return list, total, nil
 }
 
 func (s *Service) GetSupplierProducts(supplierID int64) ([]Product, error) {
@@ -928,7 +1044,22 @@ func (s *Service) ApproveProduct(id int64) error {
 			return fmt.Errorf("商品规格缺少每台卡数, 请驳回让供给方补全后再通过")
 		}
 	}
-	return s.repo.ReviewProduct(id, "active", "")
+	if p.FulfillmentMode == FulfillmentManaged {
+		// 审核期间节点可能已探活失败: 通过前按当前节点状态复核一次。
+		if err := s.checkManagedSubmit(id, p.GpuModel); err != nil {
+			return err
+		}
+	}
+	if err := s.repo.ReviewProduct(id, "active", ""); err != nil {
+		return err
+	}
+	if p.FulfillmentMode == FulfillmentManaged {
+		if err := s.managedGate.RefreshManagedStock(id); err != nil {
+			// 审核已生效; 库存由下一轮探活(60s)重算兜底, 这里只记录。
+			slog.Error("托管商品审核通过后重算库存失败", "product_id", id, "error", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) RejectProduct(id int64, reason string) error {
@@ -954,9 +1085,13 @@ func (s *Service) SupplierOfflineProduct(supplierID, id int64) error {
 // ===== Orders (T-015, T-016) =====
 
 type PlaceOrderReq struct {
-	ProductID         int64  `json:"product_id"`
-	Quantity          int    `json:"quantity"`
-	Duration          int    `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
+	ProductID int64 `json:"product_id"`
+	Quantity  int   `json:"quantity"`
+	Duration  int   `json:"duration"` // 计费周期数: hourly=小时 daily=天 weekly=周 monthly=月; perpetual 忽略并强制为 1
+	// PricingMode v1.2: 零租多价格商品选择计费方式; 省略取商品展示主价方式(兼容旧前端)。
+	PricingMode string `json:"pricing_mode"`
+	// NightStartDate 包夜必填(YYYY-MM-DD, Asia/Shanghai): 首晚窗口开始的日期; duration 为晚数(docs/26 §26.6)。
+	NightStartDate    string `json:"night_start_date"`
 	ComplianceAgreed  bool   `json:"compliance_agreed"`
 	ComplianceVersion string `json:"compliance_version"`
 }
@@ -970,17 +1105,35 @@ type PlaceOrderReq struct {
 //  2. Duration = 0 -> 总价 0, 白嫖。
 //  3. 超大值 -> int64 溢出。
 func ValidateOrderParams(p *Product, quantity, duration int) (int, int, error) {
-	return validateOrderParams(p, quantity, duration, true)
+	return validateOrderParams(p, displayQuote(p), quantity, duration, true)
+}
+
+// ValidateOrderParamsFor 按指定计费方式的价格(PriceFor 结果)校验下单参数: 最短/最长租期取该方式。
+func ValidateOrderParamsFor(p *Product, price PriceQuote, quantity, duration int) (int, int, error) {
+	return validateOrderParams(p, price, quantity, duration, true)
+}
+
+// ValidateRenewParamsFor 同 ValidateRenewParams, 但按订单快照的计费方式价格校验。
+func ValidateRenewParamsFor(p *Product, price PriceQuote, quantity, duration int) (int, int, error) {
+	return validateOrderParams(p, price, quantity, duration, false)
+}
+
+// displayQuote 商品顶层展示主价, 供不区分计费方式的旧调用方使用。
+func displayQuote(p *Product) PriceQuote {
+	if p == nil {
+		return PriceQuote{}
+	}
+	return PriceQuote{PricingMode: p.PricingMode, UnitPrice: p.UnitPrice, MinDuration: p.MinDuration}
 }
 
 // ValidateRenewParams 校验续租参数。规则与下单完全一致, 但**不校验库存**:
 // 续租是在买家已持有的同一批卡上延长租期, 不再占用新库存。
 // (下单时库存已扣减, 若此处再校验, 会出现"卡已卖光 -> 老客户无法续租"的错误拒绝。)
 func ValidateRenewParams(p *Product, quantity, duration int) (int, int, error) {
-	return validateOrderParams(p, quantity, duration, false)
+	return validateOrderParams(p, displayQuote(p), quantity, duration, false)
 }
 
-func validateOrderParams(p *Product, quantity, duration int, checkStock bool) (int, int, error) {
+func validateOrderParams(p *Product, price PriceQuote, quantity, duration int, checkStock bool) (int, int, error) {
 	if p == nil {
 		return 0, 0, fmt.Errorf("product not found")
 	}
@@ -989,38 +1142,46 @@ func validateOrderParams(p *Product, quantity, duration int, checkStock bool) (i
 	if p.PriceNegotiable || p.ProductType == ProductTypeColocation {
 		return 0, 0, fmt.Errorf("该商品为面议商品，请通过询价联系")
 	}
-	if p.UnitPrice <= 0 {
+	if price.UnitPrice <= 0 {
 		return 0, 0, fmt.Errorf("该商品未设置有效单价，暂不支持在线下单")
 	}
 
-	minOrder := p.MinOrder
-	if minOrder < 1 {
-		minOrder = 1
-	}
-	if quantity < minOrder {
-		return 0, 0, fmt.Errorf("购买数量不能少于起订量 %d", minOrder)
-	}
-	if quantity > MaxOrderQuantity {
-		return 0, 0, fmt.Errorf("购买数量超出上限 %d", MaxOrderQuantity)
-	}
-	if p.Stock > 0 && checkStock && quantity > p.Stock {
-		return 0, 0, fmt.Errorf("insufficient stock")
+	if opts := p.SplitOptions(); opts != nil {
+		// 托管分卡商品: 可选卡数集合代替起订量(docs/26 §26.5.1/§26.7); 能否成交以同机卡槽预留为准,
+		// 不按派生库存 stock 预判(stock 是全商品空闲卡合计, 不代表单机余量)。
+		if !containsInt(opts, quantity) {
+			return 0, 0, fmt.Errorf("所选卡数 %d 不在该商品可选卡数 %s 内", quantity, FormatCardSplitOptions(opts))
+		}
+	} else {
+		minOrder := p.MinOrder
+		if minOrder < 1 {
+			minOrder = 1
+		}
+		if quantity < minOrder {
+			return 0, 0, fmt.Errorf("购买数量不能少于起订量 %d", minOrder)
+		}
+		if quantity > MaxOrderQuantity {
+			return 0, 0, fmt.Errorf("购买数量超出上限 %d", MaxOrderQuantity)
+		}
+		if p.Stock > 0 && checkStock && quantity > p.Stock {
+			return 0, 0, errInsufficientStock
+		}
 	}
 
 	// 买断/永久使用权: 时长概念不存在, 强制归一为 1, 忽略客户端传值。
-	if p.PricingMode == PricingPerpetual {
+	if price.PricingMode == PricingPerpetual {
 		return quantity, 1, nil
 	}
 
-	unit := DurationUnit(p.PricingMode)
-	minDuration := p.MinDuration
+	unit := DurationUnit(price.PricingMode)
+	minDuration := price.MinDuration
 	if minDuration < 1 {
 		minDuration = 1
 	}
 	if duration < minDuration {
 		return 0, 0, fmt.Errorf("租期不能少于最短租期 %d%s", minDuration, unit)
 	}
-	maxDuration := MaxDurationFor(p.PricingMode)
+	maxDuration := MaxDurationFor(price.PricingMode)
 	if duration > maxDuration {
 		return 0, 0, fmt.Errorf("租期超出上限 %d%s", maxDuration, unit)
 	}
@@ -1091,12 +1252,39 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if p.Health == "offline" {
 		return nil, fmt.Errorf("供应方算力节点已全部离线, 该商品暂不可下单")
 	}
+	// 托管商品: fleet 未启用 → 40001; 租约钩子未接入 → 50000, 不走人工交付路径。
+	// 托管订单不扣 products.stock(派生库存由 fleet 按卡槽重算), 改为同事务预留同机卡槽(docs/26 §26.5.2)。
+	managed := p.FulfillmentMode == FulfillmentManaged
+	if managed {
+		if s.managedGate == nil {
+			return nil, ErrManagedDisabled
+		}
+		if !s.leaseWired() {
+			return nil, errManagedLeaseNotWired
+		}
+	}
 
-	qty, dur, err := ValidateOrderParams(p, req.Quantity, req.Duration)
+	// 参数与价格的预校验(事务外, 失败不占用交易配置锁); 事务内以锁定的费率按同一纯函数重算。
+	pre, err := QuoteOrder(p, req.PricingMode, req.Quantity, req.Duration, 0)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.db.Beginx()
+	// 包夜: 起始夜晚必填并校验可订范围(当晚截止为窗口开始后 2 小时, Q-36), 窗口与起始夜晚快照进订单。
+	var nightStart *time.Time
+	var nightWin NightWindow
+	if pre.Price.PricingMode == PricingNightly {
+		if nightWin, err = NightOrderWindow(p); err != nil {
+			return nil, err
+		}
+		d, err := ParseNightStartDate(strings.TrimSpace(req.NightStartDate), pre.Duration, nightWin, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		nightStart = &d
+	} else if strings.TrimSpace(req.NightStartDate) != "" {
+		return nil, errcode.New(errcode.ParamInvalid, "night_start_date 仅适用于包夜计费")
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,10 +1296,12 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 	if !policy.TradingEnabled {
 		return nil, trading.ErrDisabled
 	}
-	totalFen, feeFen, err := CalcOrderAmount(p.UnitPrice, qty, dur, int64(policy.FeeRate))
+	quote, err := QuoteOrder(p, req.PricingMode, req.Quantity, req.Duration, int64(policy.FeeRate))
 	if err != nil {
 		return nil, err
 	}
+	price, qty, dur := quote.Price, quote.Quantity, quote.Duration
+	totalFen, feeFen := quote.TotalAmount, quote.PlatformFee
 
 	expires := time.Now().Add(15 * time.Minute)
 	orderNo := "ORD" + time.Now().Format("20060102150405") + uuid.New().String()[:6]
@@ -1123,19 +1313,35 @@ func (s *Service) PlaceOrder(buyerID int64, req PlaceOrderReq) (*Order, error) {
 		Quantity:         qty,
 		StockReserved:    &qty,
 		Duration:         dur,
-		UnitPrice:        p.UnitPrice,
+		PricingMode:      &price.PricingMode, // 计费方式快照: 续租/租期换算只认它, 不随商品改价漂移
+		UnitPrice:        price.UnitPrice,
 		TotalAmount:      totalFen,
 		PlatformFee:      feeFen,
 		Status:           "pending_payment",
 		PaymentExpires:   &expires,
 		ComplianceAgreed: req.ComplianceAgreed,
 	}
+	if nightStart != nil {
+		if price.PricingMode != PricingNightly {
+			return nil, fmt.Errorf("商品计费方式已变化, 请刷新后重新下单")
+		}
+		startMin, endMin := nightWin.StartMin, nightWin.EndMin
+		o.NightStartDate, o.NightStartMin, o.NightEndMin = nightStart, &startMin, &endMin
+	}
 
-	if err := s.repo.DecrProductStock(tx, p.ID, qty); err != nil {
-		return nil, fmt.Errorf("insufficient stock")
+	if managed {
+		zero := 0
+		o.StockReserved, o.FulfillmentMode = &zero, FulfillmentManaged
+	} else if err := s.repo.DecrProductStock(tx, p.ID, qty); err != nil {
+		return nil, errInsufficientStock
 	}
 	if err := s.repo.CreateOrderTx(tx, o); err != nil {
 		return nil, err
+	}
+	if managed {
+		if err := s.leaseHooks.ReserveTx(tx, o, p); err != nil {
+			return nil, err
+		}
 	}
 	if err := legal.Record(tx, buyerID, legal.Acceptance{Document: "resource-usage-rules", Version: req.ComplianceVersion}, "order", orderNo); err != nil {
 		return nil, err
@@ -1200,7 +1406,11 @@ func (s *Service) CancelOrder(orderNo string) error {
 // FreezeOrder 冻结订单(风控/违规)。冻结意味着买家不应再访问算力,
 // 因此必须同步吊销访问凭证 —— 与 C-06「订单到期/退款/冻结 → 凭证自动失效」一致。
 func (s *Service) FreezeOrder(orderNo string) error {
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return err
 	}
@@ -1237,6 +1447,14 @@ func (s *Service) FreezeOrderTx(tx *sqlx.Tx, orderNo string) (string, error) {
 	}
 	if renewal == nil {
 		if err := s.cancelPendingRenewalsTx(tx, order.ID); err != nil {
+			return "", err
+		}
+	}
+	if order.FulfillmentMode == FulfillmentManaged && order.Status != "frozen" {
+		// 托管: 租约 suspended + 断开会话(T-088)。fleet 未接入时订单冻结与凭证吊销照常生效, 只记告警。
+		if s.leaseHooks.FreezeTx == nil {
+			slog.Warn("托管订单冻结: 租约钩子未接入, 未暂停租约", "order_no", orderNo)
+		} else if err := s.leaseHooks.FreezeTx(tx, order); err != nil {
 			return "", err
 		}
 	}
@@ -1282,19 +1500,30 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 	}
 
 	order := buyerOrder.Order
+	// 订单计费方式只认快照(CR M1), 不回退商品当前展示方式; 最短租期取该方式的价格行,
+	// 续租探测与展示都按它。快照缺失属数据异常: 展示为空, 续租报价返回 50000, can_renew=false。
+	orderMode := buyerOrder.PricingMode
+	orderMinDuration := max(1, product.MinDuration)
+	if orderMode != "" {
+		if price, err := PriceFor(product, orderMode); err == nil {
+			orderMinDuration = price.MinDuration
+		}
+	}
 	detail := &BuyerOrderDetail{
 		Order: BuyerOrderDetailOrder{
 			OrderNo: order.OrderNo, Status: order.Status, Quantity: order.Quantity, Duration: order.Duration,
 			UnitPrice: order.UnitPrice, TotalAmount: order.TotalAmount, PlatformFee: order.PlatformFee,
 			PaymentExpiresAt: order.PaymentExpires, LeaseStartAt: order.LeaseStart, LeaseEndAt: order.LeaseEnd,
 			ComplianceAgreed: order.ComplianceAgreed, CreatedAt: order.CreatedAt, UpdatedAt: order.UpdatedAt,
+			FulfillmentMode: fulfillmentOrManual(order.FulfillmentMode), PricingMode: orderMode,
+			NightStartDate: order.NightStartDate, NightStartMin: order.NightStartMin, NightEndMin: order.NightEndMin,
 		},
 		Product: BuyerOrderDetailProduct{
-			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel, MinDuration: max(1, product.MinDuration),
+			ID: product.ID, ProductType: product.ProductType, GPUModel: product.GpuModel, MinDuration: orderMinDuration,
 			CardCount: product.CardCount, MachineCount: product.MachineCount, TotalPflopsApprox: product.TotalPflopsApprox,
 			PowerCapacityKW: product.PowerCapacityKw, RackCount: product.RackCount, CPUSpec: product.CpuSpec,
 			MemorySpec: product.MemorySpec, StorageSpec: product.StorageSpec, BandwidthSpec: product.BandwidthSpec,
-			DeliveryMode: product.DeliveryMode, PricingMode: product.PricingMode, Region: product.Region,
+			DeliveryMode: product.DeliveryMode, PricingMode: orderMode, Region: product.Region,
 			SelfOperated: product.SelfOperated,
 		},
 		Supplier: BuyerOrderDetailSupplier{
@@ -1330,7 +1559,7 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 		}
 		detail.Actions.CanRefund = order.Status == "completed" && unusedRenewal(parent, renewal)
 	} else {
-		lease, pricingMode, err := s.currentLeaseOrder(s.db, &order, product.PricingMode)
+		lease, pricingMode, err := s.currentLeaseOrder(s.db, &order, orderMode)
 		if err != nil {
 			return nil, err
 		}
@@ -1346,7 +1575,7 @@ func (s *Service) GetBuyerOrderDetail(buyerID int64, orderNo string) (*BuyerOrde
 			detail.PendingRenewalOrderNo = pending[0]
 		}
 		if len(pending) == 0 {
-			_, err := s.GetRenewalQuote(buyerID, orderNo, max(1, product.MinDuration))
+			_, err := s.GetRenewalQuote(buyerID, orderNo, orderMinDuration)
 			detail.Actions.CanRenew = err == nil
 		}
 	}
@@ -1404,7 +1633,10 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 		}
 		if status == "active" || status == "completed" {
 			start := createdAt.Add(time.Hour)
-			end := LeaseEndAt(start, product.PricingMode, duration)
+			end, err := LeaseEndAt(start, product.PricingMode, duration, NightWindowOf(&product))
+			if err != nil {
+				return nil, err
+			}
 			leaseStartAt = &start
 			if !end.IsZero() {
 				leaseEndAt = &end
@@ -1413,14 +1645,14 @@ func (s *Service) SeedBuyerOrders(buyerID int64) ([]SeededBuyerOrder, error) {
 		total := product.UnitPrice * int64(duration)
 		platformFee := total * int64(policy.FeeRate) / 10000
 		_, err := tx.Exec(`INSERT INTO orders
-			(order_no,buyer_id,product_id,quantity,duration,unit_price,total_amount,platform_fee,status,
+			(order_no,buyer_id,product_id,quantity,duration,pricing_mode,unit_price,total_amount,platform_fee,status,
 			 payment_expires_at,lease_start_at,lease_end_at,compliance_agreed,created_at,updated_at,stock_reserved)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,0)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,0)
 			ON DUPLICATE KEY UPDATE buyer_id=VALUES(buyer_id),product_id=VALUES(product_id),quantity=VALUES(quantity),
-			duration=VALUES(duration),unit_price=VALUES(unit_price),total_amount=VALUES(total_amount),
+			duration=VALUES(duration),pricing_mode=VALUES(pricing_mode),unit_price=VALUES(unit_price),total_amount=VALUES(total_amount),
 			platform_fee=VALUES(platform_fee),status=VALUES(status),payment_expires_at=VALUES(payment_expires_at),
 			lease_start_at=VALUES(lease_start_at),lease_end_at=VALUES(lease_end_at),compliance_agreed=1,updated_at=VALUES(updated_at)`,
-			orderNo, buyerID, product.ID, 1, duration, product.UnitPrice, total, platformFee, status,
+			orderNo, buyerID, product.ID, 1, duration, product.PricingMode, product.UnitPrice, total, platformFee, status,
 			paymentExpiresAt, leaseStartAt, leaseEndAt, createdAt, now)
 		if err != nil {
 			return nil, err
@@ -1437,6 +1669,7 @@ func (s *Service) ListSupplierOrders(supplierID int64, status string, page, page
 	}
 	// ponytail: one lease lookup per row (20 by default); use a bulk join if larger pages become common.
 	for i := range list {
+		list[i].SettleReadyAt = list[i].Order.SettleReadyAt
 		lease, mode, err := s.currentLeaseOrder(s.db, &list[i].Order, list[i].PricingMode)
 		if err != nil {
 			return nil, 0, nil, err
@@ -1579,13 +1812,20 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 
 	// 永久使用权无到期时间; 其余按租期换算, 到期后由 RevokeExpiredAccess 吊销。
 	// duration 是计费周期数, 必须走 LeaseEndAt 换算, 否则 monthly 订单的凭证会在几小时后就失效。
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
+	orderMode, err := OrderPricingMode(o)
+	if err != nil {
+		return nil, err
+	}
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, orderMode)
 	if err != nil {
 		return nil, err
 	}
 	var expiresAt *time.Time
 	if pricingMode != PricingPerpetual {
-		e := LeaseEndAt(time.Now(), pricingMode, leaseOrder.Duration)
+		e, err := LeaseEndAt(time.Now(), pricingMode, leaseOrder.Duration, OrderNightWindow(o))
+		if err != nil {
+			return nil, err
+		}
 		expiresAt = &e
 	}
 
@@ -1669,14 +1909,22 @@ func (s *Service) ConfirmDelivery(buyerID int64, orderNo string) error {
 		return fmt.Errorf("product not found")
 	}
 
-	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, p.PricingMode)
+	orderMode, err := OrderPricingMode(o)
+	if err != nil {
+		return err
+	}
+	leaseOrder, pricingMode, err := s.currentLeaseOrder(tx, o, orderMode)
 	if err != nil {
 		return err
 	}
 	now := time.Now().Truncate(time.Second)
 	var leaseEnd interface{}
 	if pricingMode != PricingPerpetual {
-		leaseEnd = LeaseEndAt(now, pricingMode, leaseOrder.Duration)
+		end, err := LeaseEndAt(now, pricingMode, leaseOrder.Duration, OrderNightWindow(o))
+		if err != nil {
+			return err
+		}
+		leaseEnd = end
 	}
 
 	result, err := tx.Exec(`UPDATE order_deliveries d
@@ -1890,10 +2138,12 @@ func (s *Service) SyncResource(operatorID int64, isAdmin bool, syncType string, 
 	if err != nil {
 		return nil, err
 	}
-
 	// 归属校验: 非运营时必须是商品所属供给方。
 	if !isAdmin && p.SupplierID != operatorID {
 		return nil, fmt.Errorf("无权盘点该商品: 商品不属于当前供给方")
+	}
+	if p.FulfillmentMode == FulfillmentManaged {
+		return nil, errcode.New(errcode.ParamInvalid, "托管商品库存由平台按卡槽自动计算")
 	}
 	// 被动上报只能由供给方发起, 主动盘点只能由运营发起, 防止身份与类型错配。
 	if syncType == "active" && !isAdmin {
@@ -1957,7 +2207,12 @@ func (s *Service) ListResourceSyncs(operatorID int64, isAdmin bool, productID in
 // RequestRefund 买家申请退款。必须校验订单归属:
 // 否则任意登录买家都能把他人正常使用中的订单打成 refunding 状态。
 func (s *Service) RequestRefund(buyerID int64, orderNo string) error {
-	tx, err := s.db.Beginx()
+	// 托管订单取消待支付的 restart 续租会退回卡槽并重算派生库存, 须 READ COMMITTED。
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return err
 	}
@@ -2034,7 +2289,11 @@ func (s *Service) releaseStock(orderNo string, from []string, to string) (bool, 
 }
 
 func (s *Service) releaseStockTxDeadline(orderNo string, from []string, to string, expiredLeaseOnly bool) (bool, error) {
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return false, err
 	}
@@ -2067,7 +2326,13 @@ func (s *Service) releaseStockTxDeadline(orderNo string, from []string, to strin
 			return false, err
 		}
 	}
-	if err := s.returnReservedStockTx(tx, o); err != nil {
+	if renewal != nil && renewal.AppliedAt == nil {
+		// 未支付的托管 restart 续租单关闭: 退回下单时预留的卡槽(续租单本身 stock_reserved=0)。
+		if err := s.releaseManagedRenewalTx(tx, parent, renewal); err != nil {
+			return false, err
+		}
+	}
+	if err := s.releaseHoldTx(tx, o, to); err != nil {
 		return false, err
 	}
 	if renewal == nil {
@@ -2184,7 +2449,11 @@ func (s *Service) AdminUpdateOrderStatus(operatorID int64, orderNo, status, ip s
 	if status != "cancelled" && status != "frozen" {
 		return fmt.Errorf("运营仅支持关闭订单或冻结订单")
 	}
-	tx, err := s.db.Beginx()
+	managed, err := s.orderIsManaged(orderNo)
+	if err != nil {
+		return err
+	}
+	tx, err := s.beginManagedAware(managed)
 	if err != nil {
 		return err
 	}
@@ -2210,10 +2479,15 @@ func (s *Service) AdminUpdateOrderStatus(operatorID int64, orderNo, status, ip s
 			return err
 		}
 	} else {
-		if err := s.repo.UpdateOrderStatusTx(tx, orderNo, "cancelled"); err != nil {
+		// 守卫式流转(与 releaseStock 同一判定): 订单行已锁, 但仍以条件 UPDATE 确保只从读到的状态关闭一次。
+		moved, err := s.repo.TransitionOrderStatusTx(tx, orderNo, []string{order.Status}, "cancelled")
+		if err != nil {
 			return err
 		}
-		if err := s.returnReservedStockTx(tx, order); err != nil {
+		if !moved {
+			return fmt.Errorf("order not active")
+		}
+		if err := s.releaseHoldTx(tx, order, "cancelled"); err != nil {
 			return err
 		}
 		if renewal == nil {

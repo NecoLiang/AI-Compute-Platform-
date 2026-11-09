@@ -15,8 +15,10 @@ import (
 	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/compute"
 	"tokenfactory/internal/equipment"
+	"tokenfactory/internal/fleet"
 	"tokenfactory/internal/intermediary"
 	"tokenfactory/internal/invoice"
+	"tokenfactory/internal/modeldeploy"
 	"tokenfactory/internal/notification"
 	"tokenfactory/internal/payment"
 	"tokenfactory/internal/scheduler"
@@ -24,6 +26,7 @@ import (
 	"tokenfactory/internal/ticket"
 	"tokenfactory/internal/user"
 	"tokenfactory/pkg/config"
+	tfcrypto "tokenfactory/pkg/crypto"
 	"tokenfactory/pkg/db"
 	mw "tokenfactory/pkg/middleware"
 	"tokenfactory/pkg/redis"
@@ -100,6 +103,8 @@ func main() {
 	}
 	paymentSvc := payment.NewService(paymentRepo, sqlDB, yeepay)
 	paymentSvc.SetRefundHook(computeSvc.CompleteRefund)
+	// 续租收款经 compute.Service: 人工订单与包级函数等价; 托管原订单走租约钩子(fleet 未启用时 50000)。
+	paymentSvc.SetRenewalHooks(computeSvc.ValidateRenewalPaymentTx, computeSvc.ApplyRenewalPaymentTx)
 	intermediaryRepo := intermediary.NewRepository(sqlDB)
 	intermediarySvc := intermediary.NewService(intermediaryRepo)
 	equipmentRepo := equipment.NewRepository(sqlDB)
@@ -112,6 +117,8 @@ func main() {
 	notificationRepo := notification.NewRepository(sqlDB)
 	notificationSvc := notification.NewService(notificationRepo)
 	computeSvc.SetNotifier(notificationSvc)
+	// GET /products/:id/availability 每用户每分钟 30 次(docs/26 §26.9)。
+	computeSvc.SetRateLimiter(rdb)
 	invoiceSvc.SetNotifier(notificationSvc)
 	ticketSvc.SetNotifier(notificationSvc)
 	// 算力评估 agent (工作台首页智能入口): LLM 做算力推定与机器方案建议, 商品匹配由平台代码确定性完成。
@@ -128,7 +135,68 @@ func main() {
 	schedulerSvc := scheduler.NewService(schedulerRepo)
 	schedulerSvc.SetNotifier(notificationSvc)
 
+	// 托管零租 S1 节点接入与探活 (docs/25 §25.4)。fleet.enabled=false(默认)时不装配,
+	// 现有行为不变: 添加 ssh 托管节点返回明确错误, 托管商品提交审核被拒。
+	var fleetSvc *fleet.Service
+	var internalSrv *http.Server
+	if cfg.Fleet.Enabled {
+		credKey, kerr := tfcrypto.ParseKeyHex(cfg.Security.CredentialKey)
+		if kerr != nil {
+			// config.Load 已校验; 这里兜底: 托管履约依赖它加密节点管理私钥, 不可用即启动失败, 不降级运行。
+			slog.Error("fleet.enabled=true 但 security.credential_key 不可用", "error", kerr)
+			os.Exit(1)
+		}
+		fleetSvc = fleet.NewService(fleet.NewRepository(sqlDB),
+			fleet.Deps{Products: computeSvc, Health: schedulerSvc, Notifier: notificationSvc},
+			cfg.Fleet, cfg.AccessGW, credKey)
+		computeSvc.SetManagedGate(fleetSvc)
+		computeSvc.SetLeaseHooks(fleetSvc.LeaseHooks())
+		fleetSvc.SetRedis(rdb)
+		paymentSvc.SetPaidHook(computeSvc.OnOrderPaidTx)
+		schedulerSvc.SetManagedNodes(fleetSvc)
+		// 停机补偿部分退款(T-106): 仅在易宝书面确认部分退款能力后打开; 未打开时选退费返回 50000、只做顺延。
+		if cfg.Fleet.Outage.YeepayPartialRefundConfirmed {
+			if perr := paymentSvc.EnablePartialRefunds(); perr != nil {
+				slog.Error("fleet.outage.yeepay_partial_refund_confirmed=true 但易宝未接入", "error", perr)
+				os.Exit(1)
+			}
+			fleetSvc.SetOutageRefunder(paymentSvc)
+			fleetSvc.SetBreachRefunder(paymentSvc)
+		}
+
+		// 访问网关 (docs/25 §25.6, T-085): 系统自检身份 + 内部接口(独立监听, 不挂公网路由)。
+		// 任一环节不可用即启动失败, 不降级为"跳过自检"。
+		signer, serr := fleet.LoadSelftestSigner(cfg.Fleet.SelftestKeyFile)
+		if serr != nil {
+			slog.Error("fleet.enabled=true 但系统自检私钥不可用", "error", serr)
+			os.Exit(1)
+		}
+		gwClient, gerr := fleet.NewGatewayClient(cfg.AccessGW, signer, rdb)
+		if gerr != nil {
+			slog.Error("fleet.enabled=true 但访问网关自检客户端配置不完整", "error", gerr)
+			os.Exit(1)
+		}
+		fleetSvc.SetGateway(gwClient)
+		gwAPI, aerr := fleet.NewGatewayAPI(fleetSvc, rdb, cfg.AccessGW.HMACSecret, gwClient.SelftestFingerprint())
+		if aerr != nil {
+			slog.Error("访问网关内部接口无法初始化", "error", aerr)
+			os.Exit(1)
+		}
+		internalSrv = &http.Server{Addr: cfg.AccessGW.InternalListen, Handler: gwAPI.Router(),
+			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	}
+
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))
+	// 模型一键部署目录(docs/27, S5): 型号算力架构取自 GPU 型号库。
+	modelDeploySvc := modeldeploy.NewService(modeldeploy.NewRepository(sqlDB), catalogSvc)
+	// 托管租约数据源由 S2 internal/fleet 提供, 仅 fleet.enabled=true 时注入。未启用时不注入:
+	// deploy-plans 明确返回 50000, 不使用任何假数据。尚未采集的实时输入(按卡显存占用、近 1h Xid、
+	// 缓存区剩余空间、逐对 NVLink)由数据源标为未知, 判定结果写明"无法判定"(docs/api/model-deploy-api.md)。
+	if fleetSvc != nil {
+		modelDeploySvc.SetLeaseSource(fleetSvc.ModelDeployLeaseSource())
+		// 一键部署运行期(T-098/T-099): 注册 deploy_model/pull_model/stop_model 执行器、租约钩子与健康轮询, 须在 RunWorkers 之前。
+		modelDeploySvc.SetDeployRuntime(fleetSvc.AttachModelDeploy(modelDeploySvc), notificationSvc, rdb)
+	}
 
 	collateralRepo := intermediary.NewCollateralRepository(sqlDB)
 	collateralSvc := intermediary.NewCollateralService(collateralRepo)
@@ -200,6 +268,7 @@ func main() {
 	compute.NewHandler(computeSvc).RegisterMarketRoutes(protected)
 	equipment.NewHandler(equipmentSvc).RegisterMarketRoutes(protected)
 	catalog.NewHandler(catalogSvc).RegisterCatalogRoutes(protected)
+	modeldeploy.NewHandler(modelDeploySvc).RegisterMarketRoutes(protected)
 
 	// Buyer API
 	buyer := r.Group("/api/v1")
@@ -211,6 +280,12 @@ func main() {
 	notification.NewHandler(notificationSvc).RegisterBuyerRoutes(buyer)
 	equipment.NewHandler(equipmentSvc).RegisterBuyerRoutes(buyer)
 	payment.NewHandler(paymentSvc).RegisterBuyerRoutes(buyer)
+	if fleetSvc != nil {
+		fleet.NewHandler(fleetSvc).RegisterBuyerRoutes(buyer)
+		// 部署接口只在 fleet 启用时注册: fleet.enabled=false 时行为与之前一致(路由不存在)。
+		modeldeploy.NewHandler(modelDeploySvc).RegisterDeployRoutes(buyer)
+	}
+	modeldeploy.NewHandler(modelDeploySvc).RegisterBuyerRoutes(buyer)
 	if cfg.Server.Mode != "release" {
 		dev := r.Group("/api/v1/dev")
 		dev.Use(mw.AuthRequired(cfg.JWT.AccessSecret, rdb, userRepo))
@@ -223,6 +298,9 @@ func main() {
 	compute.NewHandler(computeSvc).RegisterSupplierRoutes(supplier)
 	payment.NewHandler(paymentSvc).RegisterSupplierRoutes(supplier)
 	scheduler.NewHandler(schedulerSvc).RegisterSupplierRoutes(supplier)
+	if fleetSvc != nil {
+		fleet.NewHandler(fleetSvc).RegisterSupplierRoutes(supplier)
+	}
 
 	// Vendor API
 	// 平台实际只有三种业务角色(供应方 supplier / 采购方 buyer / 运营方 operator|admin)。
@@ -246,7 +324,12 @@ func main() {
 	admin.NewHandler(adminSvc).RegisterRoutes(adminRoute)
 	blockchain.NewHandler(blockchainSvc).RegisterAdminRoutes(adminRoute)
 	scheduler.NewHandler(schedulerSvc).RegisterAdminRoutes(adminRoute)
+	if fleetSvc != nil {
+		fleet.NewHandler(fleetSvc).RegisterAdminRoutes(adminRoute)
+		modeldeploy.NewHandler(modelDeploySvc).RegisterAdminDeployRoutes(adminRoute)
+	}
 	catalog.NewHandler(catalogSvc).RegisterAdminRoutes(adminRoute)
+	modeldeploy.NewHandler(modelDeploySvc).RegisterAdminRoutes(adminRoute)
 
 	// Payment callback (no auth, signature verification)
 	payment.NewHandler(paymentSvc).RegisterCallbackRoutes(r.Group("/api/v1"))
@@ -307,6 +390,22 @@ func main() {
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	go blockchainSvc.RunWorker(workerCtx)
 	go schedulerSvc.RunLivenessSweep(workerCtx)
+	if fleetSvc != nil {
+		fleetSvc.RunWorkers(workerCtx)
+		go fleetSvc.RunPeriodic(workerCtx)
+		// 托管到期/宽限清除(30s)、到期提醒、在租容器对账(T-087)。停机认定(T-105)未接入前观测只写日志。
+		go fleetSvc.RunLeaseJobs(workerCtx)
+	}
+
+	if internalSrv != nil {
+		go func() {
+			slog.Info("访问网关内部接口监听", "addr", internalSrv.Addr)
+			if err := internalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("访问网关内部接口监听失败", "error", err)
+				os.Exit(1)
+			}
+		}()
+	}
 
 	go func() {
 		slog.Info("server starting", "port", cfg.Server.Port)
@@ -326,4 +425,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+	if internalSrv != nil {
+		internalSrv.Shutdown(ctx)
+	}
 }

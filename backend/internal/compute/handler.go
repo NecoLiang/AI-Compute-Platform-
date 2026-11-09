@@ -33,6 +33,8 @@ func (h *Handler) RegisterMarketRoutes(r *gin.RouterGroup) {
 	r.GET("/products", h.ListProducts)
 	r.GET("/trading-config", h.GetTradingConfig)
 	r.GET("/products/:id", h.GetProduct)
+	r.GET("/products/:id/availability", h.ProductAvailability)
+	r.GET("/products/:id/night-calendar", h.ProductNightCalendar)
 }
 
 func (h *Handler) RegisterAuthenticatedRoutes(r *gin.RouterGroup) {
@@ -83,6 +85,7 @@ func (h *Handler) RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.PATCH("/admin/products/:id/offline", h.OfflineProduct)
 	r.GET("/admin/orders", h.AdminListOrders)
 	r.PATCH("/admin/orders/:id/status", h.AdminUpdateOrderStatus)
+	r.POST("/admin/orders/:id/unfreeze", h.AdminUnfreezeOrder)
 	r.POST("/admin/resource-syncs/active", h.ActiveResourceSync)
 }
 
@@ -117,6 +120,10 @@ func (h *Handler) ListProducts(c *gin.Context) {
 		return
 	}
 	if f.CardCountMin, err = nonNegativeIntQuery(c, "card_count_min"); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if f.MinCards, err = nonNegativeIntQuery(c, "min_cards"); err != nil {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
@@ -188,6 +195,65 @@ func (h *Handler) GetProduct(c *gin.Context) {
 	})
 }
 
+// ProductNightCalendar GET /products/:id/night-calendar?cards=&from=&days= (docs/26 §26.9): 包夜每晚单节点最多可订卡数。
+func (h *Handler) ProductNightCalendar(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.NotFound, "商品不存在")
+		return
+	}
+	cards, err := nonNegativeIntQuery(c, "cards")
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	days, err := positiveIntQuery(c, "days", 0)
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	out, err := h.svc.NightCalendar(c.Request.Context(), c.GetInt64("user_id"), id, cards, strings.TrimSpace(c.Query("from")), days)
+	if err != nil {
+		code := ErrToCode(err)
+		msg := err.Error()
+		if code == errcode.NotFound {
+			msg = "商品不存在"
+		}
+		response.Error(c, code, msg)
+		return
+	}
+	response.Success(c, out)
+}
+
+// ProductAvailability GET /products/:id/availability (docs/26 §26.9): 报价 + 可租性, 只计算不预留。
+func (h *Handler) ProductAvailability(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.Error(c, errcode.NotFound, "商品不存在")
+		return
+	}
+	req := AvailabilityReq{PricingMode: c.Query("pricing_mode"), NightStartDate: c.Query("night_start_date")}
+	if req.Cards, err = positiveIntQuery(c, "cards", 0); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	if req.Duration, err = nonNegativeIntQuery(c, "duration"); err != nil {
+		response.Error(c, errcode.ParamInvalid, err.Error())
+		return
+	}
+	out, err := h.svc.ProductAvailability(c.Request.Context(), c.GetInt64("user_id"), id, req)
+	if err != nil {
+		code := ErrToCode(err)
+		msg := err.Error()
+		if code == errcode.NotFound {
+			msg = "商品不存在"
+		}
+		response.Error(c, code, msg)
+		return
+	}
+	response.Success(c, out)
+}
+
 // CreateProduct 发布商品。差异化校验在 service 层做 (C-02), 校验失败回 40001 + 中文原因。
 func (h *Handler) CreateProduct(c *gin.Context) {
 	var req CreateProductReq
@@ -195,12 +261,12 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	id, err := h.svc.CreateProduct(c.GetInt64("user_id"), req)
+	id, warnings, err := h.svc.CreateProduct(c.GetInt64("user_id"), req)
 	if err != nil {
 		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
-	response.Success(c, gin.H{"id": id})
+	response.Success(c, gin.H{"id": id, "warnings": warnings})
 }
 
 func (h *Handler) GetMyProducts(c *gin.Context) {
@@ -694,11 +760,12 @@ func (h *Handler) ResubmitProduct(c *gin.Context) {
 		response.Error(c, errcode.ParamInvalid, err.Error())
 		return
 	}
-	if err := h.svc.ResubmitProduct(c.GetInt64("user_id"), id, req); err != nil {
+	warnings, err := h.svc.ResubmitProduct(c.GetInt64("user_id"), id, req)
+	if err != nil {
 		response.Error(c, ErrToCode(err), err.Error())
 		return
 	}
-	response.Success(c, gin.H{"id": id})
+	response.Success(c, gin.H{"id": id, "warnings": warnings})
 }
 
 // SupplierOfflineProduct 供给方主动下架自己的商品; 下架后可修改并重提(重新审核)。
@@ -780,6 +847,44 @@ func (h *Handler) AdminUpdateOrderStatus(c *gin.Context) {
 	response.Success(c, nil)
 }
 
+// AdminUnfreezeOrder POST /admin/orders/:id/unfreeze {"wrong_freeze":bool}(托管订单, T-088)。
+func (h *Handler) AdminUnfreezeOrder(c *gin.Context) {
+	var req struct {
+		WrongFreeze bool `json:"wrong_freeze"`
+	}
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			response.Error(c, errcode.ParamInvalid, err.Error())
+			return
+		}
+	}
+	idOrNo := c.Param("id")
+	var order *Order
+	var err error
+	if id, parseErr := strconv.ParseInt(idOrNo, 10, 64); parseErr == nil && id > 0 {
+		order, err = h.svc.GetOrderByID(id)
+	} else if validOrderNo(idOrNo) {
+		order, err = h.svc.GetOrder(idOrNo)
+	} else {
+		response.Error(c, errcode.ParamInvalid, "订单编号无效")
+		return
+	}
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	if order == nil {
+		response.Error(c, errcode.NotFound, "order not found")
+		return
+	}
+	out, err := h.svc.AdminUnfreezeOrder(c.GetInt64("user_id"), order.OrderNo, req.WrongFreeze, c.ClientIP())
+	if err != nil {
+		response.Error(c, ErrToCode(err), err.Error())
+		return
+	}
+	response.Success(c, out)
+}
+
 func productToJSON(p *Product) gin.H {
 	return gin.H{
 		"id": p.ID, "supplier_id": p.SupplierID, "product_type": p.ProductType,
@@ -794,7 +899,25 @@ func productToJSON(p *Product) gin.H {
 		"available_hours": p.AvailableHours,
 		"stock":           p.Stock, "min_order": p.MinOrder, "min_duration": p.MinDuration,
 		"region": p.Region, "status": p.Status, "self_operated": p.SelfOperated, "health": p.Health,
+		"fulfillment_mode": p.FulfillmentMode, "availability": p.Availability,
+		"night_start_min": p.NightStartMin, "night_end_min": p.NightEndMin,
+		"prices":             productPricesJSON(p),
+		"card_split_options": productSplitOptionsJSON(p),
+		"max_free_per_node":  p.MaxFreePerNode,
 	}
+}
+
+// productSplitOptionsJSON 可选卡数: 托管分卡商品为升序数组(未勾选取默认集合), 其他商品为 null(不可分卡)。
+func productSplitOptionsJSON(p *Product) []int {
+	return p.SplitOptions()
+}
+
+// productPricesJSON 价格列表永不为 nil; 非零租商品为空数组(以顶层 pricing_mode/unit_price 为准)。
+func productPricesJSON(p *Product) []ProductPrice {
+	if p.Prices == nil {
+		return []ProductPrice{}
+	}
+	return p.Prices
 }
 
 var _ = middleware.RBAC

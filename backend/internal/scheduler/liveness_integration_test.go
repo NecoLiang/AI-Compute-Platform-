@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"tokenfactory/pkg/errcode"
+
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
 )
@@ -39,16 +41,21 @@ func setupSchedDB(t *testing.T) (*sqlx.DB, *Service) {
 		supplier_id BIGINT NOT NULL,
         product_type VARCHAR(32) NOT NULL DEFAULT 'card_rental',
         card_count INT NULL DEFAULT 0, machine_count INT NULL,
+		fulfillment_mode ENUM('manual','managed') NOT NULL DEFAULT 'manual',
 		health ENUM('unknown','healthy','degraded','offline') NOT NULL DEFAULT 'unknown'
 	)`)
 	db.MustExec(`CREATE TABLE supplier_nodes (
 		id BIGINT AUTO_INCREMENT PRIMARY KEY,
 		supplier_id BIGINT NOT NULL, product_id BIGINT NOT NULL,
-		node_name VARCHAR(64) NOT NULL, node_key_hash CHAR(64) NOT NULL,
+		node_name VARCHAR(64) NOT NULL, node_key_hash CHAR(64) NULL,
 		status ENUM('online','degraded','offline') NOT NULL DEFAULT 'offline',
 		total_cards INT NOT NULL DEFAULT 0, available_cards INT NOT NULL DEFAULT 0,
 		gpu_util_pct TINYINT UNSIGNED NULL, vram_util_pct TINYINT UNSIGNED NULL,
 		last_heartbeat_at TIMESTAMP NULL,
+		mgmt_mode ENUM('push','ssh') NOT NULL DEFAULT 'push',
+		verify_status ENUM('unverified','verifying','verified','failed','key_mismatch','needs_reimage','suspended') NOT NULL DEFAULT 'unverified',
+		schedulable TINYINT NOT NULL DEFAULT 1,
+		dispatch_hold TINYINT NOT NULL DEFAULT 0, dispatch_hold_reason VARCHAR(255) NULL, -- migrations/033
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 		UNIQUE KEY uk_product_node (product_id, node_name)
@@ -185,5 +192,77 @@ func TestAdvise_RanksNodes(t *testing.T) {
 	// 运营视角(0)放行
 	if _, err := svc.Advise("ORD-1", 0); err != nil {
 		t.Fatalf("运营视角: %v", err)
+	}
+}
+
+// docs/25 §25.4.4: 托管节点(mgmt_mode=ssh)不推心跳, 在线状态只由 fleet 判定;
+// scheduler 的心跳超时清扫不得把它们打成离线, push 节点行为不变。
+func TestLiveness_SweepSkipsSSHNodes(t *testing.T) {
+	db, svc := setupSchedDB(t)
+	db.MustExec("INSERT INTO products (id, supplier_id) VALUES (1, 10), (2, 10)")
+	db.MustExec(`INSERT INTO supplier_nodes (supplier_id, product_id, node_name, node_key_hash, status, total_cards, last_heartbeat_at, mgmt_mode)
+		VALUES (10, 1, 'ssh-node', NULL, 'online', 8, NOW() - INTERVAL 600 SECOND, 'ssh'),
+		       (10, 2, 'push-node', REPEAT('a',64), 'online', 8, NOW() - INTERVAL 600 SECOND, 'push')`)
+	svc.sweepOnce()
+	var ssh, push string
+	if err := db.Get(&ssh, "SELECT status FROM supplier_nodes WHERE node_name='ssh-node'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Get(&push, "SELECT status FROM supplier_nodes WHERE node_name='push-node'"); err != nil {
+		t.Fatal(err)
+	}
+	if ssh != "online" {
+		t.Fatalf("ssh 节点不应被心跳清扫置离线, got %s", ssh)
+	}
+	if push != "offline" {
+		t.Fatalf("push 节点心跳超时应离线, got %s", push)
+	}
+	if h := productHealth(t, db, 1); h != "unknown" {
+		t.Fatalf("ssh 节点商品不应被清扫重算, got %s", h)
+	}
+	// ssh 节点 node_key_hash 为 NULL: 读取不报错, 且任何 node_key 都不能冒充它发心跳。
+	var id int64
+	db.Get(&id, "SELECT id FROM supplier_nodes WHERE node_name='ssh-node'")
+	n, err := svc.repo.GetNode(id)
+	if err != nil || n == nil || n.MgmtMode != "ssh" || n.NodeKeyHash != "" {
+		t.Fatalf("读取 ssh 节点: %+v %v", n, err)
+	}
+	if err := svc.Heartbeat(id, "nk-anything", 1, nil, nil); err == nil {
+		t.Fatal("ssh 节点不接受推送心跳")
+	}
+	// fleet 未注入时托管节点不可注册/删除, 且错误码明确。
+	if _, err := svc.RegisterManagedNode(10, ManagedNodeReq{ProductID: 1, NodeName: "x", TotalCards: 1}); errcode.CodeOf(err, 0) != errcode.ParamInvalid {
+		t.Fatalf("fleet 未启用注册托管节点应 40001: %v", err)
+	}
+	if err := svc.DeleteNode(id, 10); errcode.CodeOf(err, 0) != errcode.InternalError {
+		t.Fatalf("fleet 未启用删除托管节点应 50000: %v", err)
+	}
+	// push 节点不能挂到托管商品下
+	db.MustExec("UPDATE products SET fulfillment_mode='managed' WHERE id=1")
+	if _, _, err := svc.RegisterNode(10, 1, "push-on-managed", 8); err == nil {
+		t.Fatal("托管商品不应接受 push 节点")
+	}
+}
+
+// 供给方节点列表带出平台停调度标记(T-105, docs/api/page-api-map.md 供给方节点⑨); 非托管/未停调度节点为 false/null。
+func TestSupplierNodesExposeDispatchHold(t *testing.T) {
+	db, svc := setupSchedDB(t)
+	db.MustExec("INSERT INTO products (id, supplier_id) VALUES (1, 10), (2, 10)")
+	db.MustExec(`INSERT INTO supplier_nodes (supplier_id, product_id, node_name, node_key_hash, status, total_cards, mgmt_mode, dispatch_hold, dispatch_hold_reason)
+		VALUES (10, 1, 'held', NULL, 'online', 8, 'ssh', 1, '信用分 52 低于阈值 60'),
+		       (10, 2, 'push', REPEAT('a',64), 'online', 8, 'push', 0, NULL)`)
+	list, err := svc.repo.ListNodesBySupplier(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]Node{}
+	for _, n := range list {
+		got[n.NodeName] = n
+	}
+	if h := got["held"]; !h.DispatchHold || h.DispatchHoldReason == nil || *h.DispatchHoldReason != "信用分 52 低于阈值 60" {
+		t.Fatalf("停调度节点应带出 dispatch_hold/原因: %+v", h)
+	}
+	if p := got["push"]; p.DispatchHold || p.DispatchHoldReason != nil {
+		t.Fatalf("非托管节点 dispatch_hold 应为 false/null: %+v", p)
 	}
 }

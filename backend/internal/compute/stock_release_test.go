@@ -56,6 +56,7 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		id BIGINT PRIMARY KEY AUTO_INCREMENT,
 		supplier_id BIGINT NOT NULL DEFAULT 1,
 		stock INT NOT NULL DEFAULT 0,
+		fulfillment_mode ENUM('manual','managed') NOT NULL DEFAULT 'manual',
 		status ENUM('draft','pending','active','sold_out','offline','frozen') DEFAULT 'active'
 	)`)
 	db.MustExec(`CREATE TABLE orders (
@@ -63,9 +64,14 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		order_no VARCHAR(64) NOT NULL UNIQUE,
 		buyer_id BIGINT NOT NULL DEFAULT 1,
 		product_id BIGINT NOT NULL,
+		fulfillment_mode ENUM('manual','managed') NOT NULL DEFAULT 'manual',
 		quantity INT NOT NULL,
         stock_reserved INT NULL,
 		duration INT NOT NULL DEFAULT 1,
+		pricing_mode VARCHAR(20) NULL,
+		night_start_date DATE NULL,
+		night_start_min SMALLINT NULL,
+		night_end_min SMALLINT NULL,
 		unit_price BIGINT NOT NULL DEFAULT 0,
 		total_amount BIGINT NOT NULL DEFAULT 0,
 		platform_fee BIGINT NOT NULL DEFAULT 0,
@@ -74,6 +80,7 @@ func setupStockDB(t *testing.T) (*sqlx.DB, *Service) {
 		lease_start_at TIMESTAMP NULL,
 		lease_end_at TIMESTAMP NULL,
 		compliance_agreed TINYINT DEFAULT 0,
+		settle_ready_at TIMESTAMP NULL,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 	)`)

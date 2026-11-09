@@ -37,9 +37,34 @@ func (h *Handler) RegisterNode(c *gin.Context) {
 		ProductID  int64  `json:"product_id" binding:"required"`
 		NodeName   string `json:"node_name" binding:"required"`
 		TotalCards int    `json:"total_cards" binding:"required"`
+		// 以下为托管节点(docs/25)可选字段; 缺省 mgmt_mode=push 与原行为一致。
+		MgmtMode       string `json:"mgmt_mode"`
+		DiskPerCardGB  int    `json:"disk_per_card_gb"`
+		LeasePortStart int    `json:"lease_port_start"`
+		LeasePortEnd   int    `json:"lease_port_end"`
+		// 推荐: 填写机器上 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 的指纹, 首次连接即校验。
+		ExpectedHostFingerprint string `json:"expected_host_fingerprint"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, errcode.ParamInvalid, "product_id / node_name / total_cards 必填")
+		return
+	}
+	switch req.MgmtMode {
+	case "", "push":
+	case "ssh":
+		node, err := h.svc.RegisterManagedNode(c.GetInt64("user_id"), ManagedNodeReq{
+			ProductID: req.ProductID, NodeName: req.NodeName, TotalCards: req.TotalCards,
+			DiskPerCardGB: req.DiskPerCardGB, LeasePortStart: req.LeasePortStart, LeasePortEnd: req.LeasePortEnd,
+			ExpectedHostFingerprint: req.ExpectedHostFingerprint,
+		})
+		if err != nil {
+			response.Error(c, errcode.CodeOf(err, errcode.ParamInvalid), err.Error())
+			return
+		}
+		response.Success(c, gin.H{"node": node})
+		return
+	default:
+		response.Error(c, errcode.ParamInvalid, "mgmt_mode 仅支持 push / ssh")
 		return
 	}
 	node, key, err := h.svc.RegisterNode(c.GetInt64("user_id"), req.ProductID, req.NodeName, req.TotalCards)
@@ -64,7 +89,7 @@ func (h *Handler) ListMyNodes(c *gin.Context) {
 func (h *Handler) DeleteNode(c *gin.Context) {
 	id, _ := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err := h.svc.DeleteNode(id, c.GetInt64("user_id")); err != nil {
-		response.Error(c, errcode.ParamInvalid, err.Error())
+		response.Error(c, errcode.CodeOf(err, errcode.ParamInvalid), err.Error())
 		return
 	}
 	response.Success(c, gin.H{"deleted": true})
