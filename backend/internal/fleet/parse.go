@@ -644,7 +644,7 @@ func (d DockerInfo) BackingFS() string {
 			return kv[1]
 		}
 	}
-	return ""
+	return "未报告" // containerd snapshotter(overlayfs)等不报告底层文件系统
 }
 
 // HasNvidiaRuntime nvidia-container-toolkit 注册的 runtime, 或 CDI 方式(--gpus 仍可用, 以 P9 实跑为准)。
@@ -679,6 +679,24 @@ func ParseGPUListL(out string) []string {
 		}
 	}
 	return res
+}
+
+// ParseComputeApps 解析 cmdGPUApps(--query-compute-apps=gpu_uuid,pid), 返回 大写 UUID → pid 列表。
+// 无进程时 nvidia-smi 输出为空(个别驱动打印 "No running processes found"); 其他无法识别的行报错, 由调用方按"占用未知"处理。
+func ParseComputeApps(out string) (map[string][]string, error) {
+	res := map[string][]string{}
+	for _, l := range nonEmptyLines(out) {
+		if strings.EqualFold(strings.TrimSpace(l), "No running processes found") {
+			continue
+		}
+		f := splitCSV(l)
+		if len(f) != 2 || !uuidRe.MatchString(f[0]) || f[1] == "" {
+			return nil, fmt.Errorf("GPU 计算进程输出格式异常: %q", truncate(l, 160))
+		}
+		u := strings.ToUpper(f[0])
+		res[u] = append(res[u], f[1])
+	}
+	return res, nil
 }
 
 // ===== P11/P12 端口 =====

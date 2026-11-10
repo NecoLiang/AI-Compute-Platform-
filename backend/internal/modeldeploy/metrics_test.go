@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// vLLM v0.11.0(V1 引擎)/metrics 指标名; 与 docs/api/model-deploy-api.md 示例不同之处:
-// v0.11.0 的 KV 占用是 vllm:kv_cache_usage_perc(旧名 gpu_cache_usage_perc 已移除), 这正是 metrics_map 存在的原因。
+// vLLM v0.11.0(V1 引擎)/metrics 指标名; KV 占用是 vllm:kv_cache_usage_perc(旧名 gpu_cache_usage_perc 已移除),
+// 指标名随版本变化正是 metrics_map 存在的原因。
 var v011Map = map[string]string{
 	"requests_running":        "vllm:num_requests_running",
 	"requests_waiting":        "vllm:num_requests_waiting",

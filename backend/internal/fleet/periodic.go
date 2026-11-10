@@ -190,6 +190,15 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 	if _, err := p.runFor(ctx, cmdDockerAlive, 15*time.Second); err != nil {
 		return "Docker 守护进程不可用: " + err.Error(), false
 	}
+	// 空闲卡上的宿主机计算进程(供给方自用)→ 该卡停止出租; 读取失败只记日志, 不计入探活失败。
+	var hostApps map[string][]string
+	if out, err := p.runFor(ctx, cmdLightGPUApps, 15*time.Second); err != nil {
+		slog.Warn("fleet 轻量探活读取 GPU 计算进程失败", "node_id", n.ID, "error", err)
+	} else if strings.TrimSpace(out) != "@@probe" {
+		if hostApps, err = ParseComputeApps(out); err != nil {
+			slog.Warn("fleet 轻量探活解析 GPU 计算进程失败", "node_id", n.ID, "error", err)
+		}
+	}
 	// Xid: 自上次成功扫描起(见 xidWindowSince), 事件与覆盖区间在下方事务内落库。
 	lastScan, err := s.repo.lastXidScanAt(n.ID)
 	if err != nil {
@@ -241,6 +250,10 @@ func (s *Service) lightCheck(ctx context.Context, n *Node) (reason string, handl
 		}
 		if x := recentFatal[NormalizeBusID(sl.PCIBusID)]; len(x) > 0 {
 			why = append(why, fmt.Sprintf("致命 Xid %v", x))
+		}
+		// 在租卡上的进程是买家自己的, 只看空闲卡。
+		if pids := hostApps[strings.ToUpper(sl.GPUUUID)]; sl.State == SlotFree && len(pids) > 0 {
+			why = append(why, fmt.Sprintf("宿主机计算进程占用(pid %s)", strings.Join(pids, ",")))
 		}
 		if len(why) == 0 {
 			if sl.State == SlotFree {

@@ -55,8 +55,12 @@ func (p *probeRun) ports(ctx context.Context) {
 	}
 	defer p.cleanup(name)
 	out, err = p.run(ctx, cmd)
-	if err != nil || !strings.Contains(out, "@@up") {
+	if err != nil {
 		p.portsFail(fmt.Sprintf("端口 %d 上的临时监听容器未能启动: %s", port, errText(err)))
+		return
+	}
+	if !strings.Contains(out, "@@up") {
+		p.portsFail(fmt.Sprintf("端口 %d 上的临时监听容器已创建, 但 15 秒内宿主机本地未监听(容器内监听进程未起: 检查探针镜像是否含 python3)", port))
 		return
 	}
 	host := *p.n.SSHHost

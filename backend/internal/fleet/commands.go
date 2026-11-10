@@ -21,6 +21,11 @@ const (
 	cmdDocker      = "docker info --format '{{json .}}'"
 	cmdPorts       = "ss -Htln"
 	cmdDockerAlive = "docker ps -q --filter label=omnis.lease"
+	// cmdLightGPUApps 轻探活读宿主机 GPU 计算进程; 前后任一次看到平台探针容器(完整探活压测进行中)则只输出 @@probe, 本轮不判占用。
+	cmdLightGPUApps = `p1=$(docker ps -q --filter label=omnis.probe=1) || exit 1; ` +
+		`a=$(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader) || exit 1; ` +
+		`p2=$(docker ps -q --filter label=omnis.probe=1) || exit 1; ` +
+		`if [ -n "$p1$p2" ]; then echo @@probe; else printf '%s\n' "$a"; fi`
 	// cmdTelemetry 周期轻量探活唯一的 nvidia-smi 查询(与 docker 守护进程存活一并检查): 逐卡显存已用/总量、温度、功耗、
 	// 降频原因位图、ECC 不可纠正/可纠正(volatile, 告警口径)、利用率。执行或解析失败即本次轻探活失败;
 	// 成功则落 gpu_slots 遥测列(docs/27 §27.3 F3 输入)并用于掉卡/ECC 告警与节点平均利用率。
@@ -150,12 +155,16 @@ func runtimeCheckCommand(image string, freeUUIDs []string) (string, error) {
 	return "docker run --rm --network none --gpus " + g + " " + image + " nvidia-smi -L", nil
 }
 
-// quotaCheckCommand P10: --storage-opt size=1G 能否启动(overlay2 over xfs+pquota)。
+// quotaCheckCommand P10: --storage-opt size= 不只要能启动, 还要真正限住写入(overlay2 over xfs+pquota)。
+// containerd snapshotter(存储驱动 overlayfs)接受该参数却静默忽略, 只看能否启动会误判; 因此在 64M 配额内
+// 先写 8M(必须成功, 排除写入本身不可用), 再写 128M(必须失败)。输出 @@enforced / @@not-enforced / @@small-fail。
 func quotaCheckCommand(image string) (string, error) {
 	if err := checkImage(image); err != nil {
 		return "", err
 	}
-	return "docker run --rm --network none --storage-opt size=1G " + image + " true", nil
+	return "docker run --rm --network none --storage-opt size=64M " + image + ` sh -c '` +
+		`dd if=/dev/zero of=/tmp/omnis-q1 bs=1M count=8 >/dev/null 2>&1 || { echo @@small-fail; exit 0; }; ` +
+		`if dd if=/dev/zero of=/tmp/omnis-q2 bs=1M count=128 conv=fsync >/dev/null 2>&1; then echo @@not-enforced; else echo @@enforced; fi'`, nil
 }
 
 // pyExec 把固定 Python 脚本以 base64 交给容器内 python3 执行, 规避多层引号。

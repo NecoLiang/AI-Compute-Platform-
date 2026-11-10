@@ -636,7 +636,7 @@ v1.2 S2（T-082~T-084，T-092 下单分配子集）。只作用于 `products.ful
 | `refund_requested_at` | 买家申请过退费的时间（退费通道未就绪时只记录意向，补偿仍按顺延执行） |
 | `can_change_remedy` | 租约在租（`active/parked/suspended`）且 `access_until` 未到 |
 | `refund_eligible` | 达到退费门槛（Q-47）：**当前所属订单**（原订单或已生效的续租单）期内停机累计 ≥ 租期 × `refund_ratio`，或单次停机 ≥ `refund_single_hours` 小时；进行中的停机按已持续时长计入 |
-| `refund_available` | 退费通道已就绪（T-106 退费实现已接入且 `fleet.outage.yeepay_partial_refund_confirmed=true`）。开关默认 `false`，易宝部分退款能力书面确认前恒为 `false` |
+| `refund_available` | 退费通道已就绪（T-106 退费实现已接入且 `fleet.outage.yeepay_partial_refund_confirmed=true`）。开关默认 `false`；易宝能力已于 2026-11-10 确认，启用 fleet 并在沙箱验证部分退款后由运维置 `true` |
 | `term_minutes` / `term_outage_minutes` / `longest_outage_minutes` | 门槛计算口径：当前所属订单租期分钟数、期内计入停机分钟、期内最长一段 |
 | `extended_minutes` | 已以顺延方式补偿的停机总分钟数（时/日/周/月订单即租期后移的分钟数；包夜订单是被补偿的停机分钟，实际补偿为补加整晚，见 `extended_nights`） |
 | `extended_nights` | 包夜订单已补加的晚数（排在原购买最后一晚之后的夜晚，含已过去的）；非包夜订单为 `null` |
