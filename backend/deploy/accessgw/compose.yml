@@ -1,0 +1,65 @@
+name: omnis-accessgw
+
+# 访问网关(docs/25 §25.6)。与主服务同机部署时的网络拓扑:
+#   egress   omnis-accessgw-egress   网关独占; 出口 SNAT 到辅助私网 IP(绑定独立 EIP), 即 accessgw.egress_ips。
+#                                     节点防火墙只放行这个 IP 访问租约端口; 主服务出口(123.56.177.241)不在其中, P12 才能通过。
+#   internal omnis-accessgw-internal  由主服务 compose 创建(internal, 无外网); 网关经它调用主服务内部接口 :9090,
+#                                     主服务经它连网关 :2222 做开通自检(网络别名 = accessgw.public_host)。
+# 两个网络均由 setup.sh 预先创建/校验, 这里只引用。
+services:
+  accessgw:
+    image: ${ACCESSGW_IMAGE:?ACCESSGW_IMAGE is required}
+    container_name: omnis-accessgw
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        format: raw
+        required: true
+    command:
+      - --address=0.0.0.0
+      - --port=2222
+      - --server-key=/etc/omnis/accessgw/host_ed25519
+      - --login-grace-time=30s
+      - --log-format=json
+      - /usr/local/lib/sshpiperd/failtoban
+      - --max-failures=5
+      - --ban-duration=30m
+      # 主服务自检走 internal 网络, 不参与封禁。
+      - --ignore-ip=172.30.21.0/24
+      - --
+      - /usr/local/bin/accessgw
+      - --main-url=http://wanxiang-backend:9090
+      - --upstream-key-file=/etc/omnis/accessgw/upstream_ed25519
+    ports:
+      - "${ACCESSGW_BIND_IP:?ACCESSGW_BIND_IP is required}:2222:2222"
+    volumes:
+      - ./keys:/etc/omnis/accessgw:ro
+    networks:
+      egress: {}
+      internal:
+        aliases:
+          - ${ACCESSGW_PUBLIC_HOST:?ACCESSGW_PUBLIC_HOST is required}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 1
+    mem_limit: 512m
+    pids_limit: 512
+    ulimits:
+      nofile: 65536
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+networks:
+  egress:
+    external: true
+    name: omnis-accessgw-egress
+  internal:
+    external: true
+    name: omnis-accessgw-internal

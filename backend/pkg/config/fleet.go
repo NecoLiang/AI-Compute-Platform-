@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -146,7 +147,14 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 			PoolAddrs:    cleanList(v.GetStringSlice("fleet.mining.pool_addrs")),
 		},
 	}
-	if err := v.UnmarshalKey("fleet.base_images", &f.BaseImages); err != nil {
+	// 环境变量 FLEET_BASE_IMAGES 只能是字符串, 按 JSON 解析: [{"name":"…","ref":"…@sha256:…"}]。
+	if s, ok := v.Get("fleet.base_images").(string); ok {
+		if strings.TrimSpace(s) != "" {
+			if err := json.Unmarshal([]byte(s), &f.BaseImages); err != nil {
+				return fmt.Errorf("fleet.base_images 格式错误(环境变量应为 JSON [{\"name\",\"ref\"}] 列表): %w", err)
+			}
+		}
+	} else if err := v.UnmarshalKey("fleet.base_images", &f.BaseImages); err != nil {
 		return fmt.Errorf("fleet.base_images 格式错误(应为 [{name, ref}] 列表): %w", err)
 	}
 	if r := strings.TrimSpace(v.GetString("fleet.engine_port_range")); r != "" {
