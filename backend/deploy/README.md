@@ -40,3 +40,24 @@ The backend joins `config_default` for MySQL/Redis and
 `wanxiang-frontend_default` for the frontend. Port 8080 is bound only to
 `127.0.0.1`; the frontend container can use
 `http://wanxiang-backend:8080/api/v1`.
+
+## Managed rental (fleet) images and access gateway
+
+The backend also creates the internal network `omnis-accessgw-internal`
+(172.30.21.0/24, no outbound route) and mounts `/opt/wanxiang/backend/secrets`
+read-only at `/etc/omnis` (the fleet self-test key). Both are inert while
+`FLEET_ENABLED` is unset/false.
+
+`.github/workflows/fleet-images.yml` builds the four platform images
+(`images/probe`, `images/lease-base`, `images/model-pull`, `accessgw/`),
+pushes them to `ghcr.io/<owner>/omnis-fleet-<name>:<commit>` and, when the
+`ACR_REGISTRY`, `ACR_NAMESPACE`, `ACR_USERNAME` and `ACR_PASSWORD` secrets
+exist, to Alibaba Cloud ACR as well. It then runs the production command
+templates against the pushed images on a GPU-less runner
+(`TestFleetImagesSmoke`, `TestModelPullImageSmoke`). The job summary lists the
+`ref@sha256` values to put in the fleet configuration; configuration only
+accepts digests.
+
+The access gateway runs on the same ECS behind its own egress IP; see
+`accessgw/README.md` for the console prerequisites, `accessgw/setup.sh` and
+the variables needed to enable fleet.

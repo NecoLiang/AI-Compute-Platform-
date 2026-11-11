@@ -1,0 +1,161 @@
+name: Fleet Images
+
+# 托管零租平台镜像(docs/25 §25.12、docs/27 §27.4.3): 探针、租约基础、权重拉取、访问网关。
+# 构建 linux/amd64 → 推送 ghcr.io/<owner>/omnis-fleet-<name>:<commit>(配置了 ACR_* secrets 时同时推阿里云 ACR,
+# 国内节点从 ghcr 拉取极慢, 生产配置应写 ACR 的 digest)→ 用生产命令模板在无 GPU 的 runner 上冒烟。
+# 生产配置只认 digest: 作业摘要里列出每个镜像的 ref@sha256, 原样写入 fleet.probe_image / fleet.base_images /
+# fleet.model_pull_image 与 deploy/accessgw/.env 的 ACCESSGW_IMAGE。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/deploy/images/**"
+      - "backend/deploy/accessgw/**"
+      - "backend/cmd/accessgw/**"
+      - "backend/pkg/accessgw/**"
+      - "backend/pkg/netguard/**"
+      - ".github/workflows/fleet-images.yml"
+  pull_request:
+    paths:
+      - "backend/deploy/images/**"
+      - "backend/deploy/accessgw/**"
+      - "backend/cmd/accessgw/**"
+      - "backend/pkg/accessgw/**"
+      - "backend/pkg/netguard/**"
+      - "backend/internal/fleet/images_smoke_test.go"
+      - "backend/internal/modeldeploy/pull_image_smoke_test.go"
+      - ".github/workflows/fleet-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fleet-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # 同仓库分支才有 packages 写权限; fork 的 PR 不构建。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: probe
+            context: backend/deploy/images/probe
+            file: backend/deploy/images/probe/Dockerfile
+          - name: lease-base
+            context: backend/deploy/images/lease-base
+            file: backend/deploy/images/lease-base/Dockerfile
+          - name: model-pull
+            context: backend/deploy/images/model-pull
+            file: backend/deploy/images/model-pull/Dockerfile
+          - name: accessgw
+            context: backend
+            file: backend/deploy/accessgw/Dockerfile
+    env:
+      ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+      ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk space
+        if: matrix.name != 'accessgw'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+
+      - name: Registry login
+        run: |
+          set -eu
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if [ -n "$ACR_REGISTRY" ]; then
+            test -n "$ACR_NAMESPACE" && test -n "$ACR_USERNAME" && test -n "$ACR_PASSWORD"
+            printf '%s' "$ACR_PASSWORD" | docker login "$ACR_REGISTRY" -u "$ACR_USERNAME" --password-stdin
+          fi
+
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          repo="omnis-fleet-${{ matrix.name }}"
+          refs=("ghcr.io/$owner/$repo")
+          if [ -n "$ACR_REGISTRY" ]; then refs+=("$ACR_REGISTRY/$ACR_NAMESPACE/$repo"); fi
+          tags=()
+          for r in "${refs[@]}"; do tags+=(--tag "$r:$GITHUB_SHA"); done
+          # 单一 manifest(不带 provenance/SBOM 索引), 各仓库 digest 相同, 节点 docker pull ref@sha256 无兼容问题。
+          docker buildx build --platform linux/amd64 --provenance=false --sbom=false --push \
+            "${tags[@]}" --file "${{ matrix.file }}" "${{ matrix.context }}"
+          {
+            echo "### omnis-fleet-${{ matrix.name }}"
+            for r in "${refs[@]}"; do
+              d=$(docker buildx imagetools inspect "$r:$GITHUB_SHA" --format '{{json .Manifest}}' | jq -r .digest)
+              echo "- \`$r@$d\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+
+      - name: Pull images by commit tag and pin digests
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          for n in probe lease-base model-pull accessgw; do
+            docker pull -q "ghcr.io/$owner/omnis-fleet-$n:$GITHUB_SHA"
+          done
+          pin() { docker inspect -f '{{index .RepoDigests 0}}' "ghcr.io/$owner/omnis-fleet-$1:$GITHUB_SHA"; }
+          {
+            echo "SMOKE_PROBE_IMAGE=$(pin probe)"
+            echo "SMOKE_BASE_IMAGE=$(pin lease-base)"
+            echo "SMOKE_PULL_IMAGE=$(pin model-pull)"
+            echo "SMOKE_ACCESSGW_IMAGE=$(pin accessgw)"
+          } >> "$GITHUB_ENV"
+
+      - name: Probe and lease-base images (production command templates, no GPU)
+        run: go test ./internal/fleet/ -run '^TestFleetImagesSmoke$' -count=1 -v
+
+      - name: Model pull image (real ModelScope download + sha256 checklist)
+        run: go test ./internal/modeldeploy/ -run '^TestModelPullImageSmoke$' -count=1 -v
+
+      - name: Access gateway image
+        run: |
+          set -euo pipefail
+          img="$SMOKE_ACCESSGW_IMAGE"
+          docker run --rm "$img" --version | tee /dev/stderr | grep -q 'sshpiperd version 1.6.1'
+          test "$(docker inspect -f '{{.Config.User}}' "$img")" = "10022:10022"
+          docker run --rm --entrypoint /bin/sh "$img" -c \
+            'test -x /usr/local/lib/sshpiperd/failtoban && test -x /usr/local/bin/accessgw && id -u' | grep -qx 10022
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### Smoke passed (digests to use in production config)"
+            echo "- fleet.probe_image: \`$SMOKE_PROBE_IMAGE\`"
+            echo "- fleet.base_images[0].ref: \`$SMOKE_BASE_IMAGE\`"
+            echo "- fleet.model_pull_image: \`$SMOKE_PULL_IMAGE\`"
+            echo "- ACCESSGW_IMAGE: \`$SMOKE_ACCESSGW_IMAGE\`"
+            echo
+            echo "国内节点请改用构建作业摘要中 ACR 仓库的同一 digest。"
+          } >> "$GITHUB_STEP_SUMMARY"

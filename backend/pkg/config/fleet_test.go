@@ -155,3 +155,58 @@ func TestFleetEnabledRejectsMalformedCredentialKey(t *testing.T) {
 		t.Fatalf("fleet disabled must not validate credential_key: %v", err)
 	}
 }
+
+// 生产经 .env 注入: fleet.base_images 不能用 YAML 列表时, FLEET_BASE_IMAGES 按 JSON 解析并覆盖配置文件。
+func TestFleetBaseImagesFromEnvJSON(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	body := strings.ReplaceAll(validFleetYAML, "%s", digest)
+	ref := "registry.example.com/omnis/lease-base@sha256:" + strings.Repeat("b", 64)
+	t.Setenv("FLEET_BASE_IMAGES", `[{"name":"PyTorch 2.7 / CUDA 12.8","ref":"`+ref+`"}]`)
+	cfg, err := Load(writeFleetConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Fleet.BaseImages) != 1 || cfg.Fleet.BaseImages[0].Name != "PyTorch 2.7 / CUDA 12.8" || cfg.Fleet.BaseImages[0].Ref != ref {
+		t.Fatalf("env base images: %+v", cfg.Fleet.BaseImages)
+	}
+
+	t.Setenv("FLEET_BASE_IMAGES", `[{"name":"x","ref":"registry.example.com/omnis/lease-base:latest"}]`)
+	if _, err := Load(writeFleetConfig(t, body)); err == nil || !strings.Contains(err.Error(), "fleet.base_images[0]") {
+		t.Fatalf("tag-only env image must be rejected: %v", err)
+	}
+	t.Setenv("FLEET_BASE_IMAGES", `name=x`)
+	if _, err := Load(writeFleetConfig(t, body)); err == nil || !strings.Contains(err.Error(), "JSON") {
+		t.Fatalf("malformed env must fail: %v", err)
+	}
+}
+
+// 其余 fleet/accessgw 键全部经环境变量注入(生产 /opt/wanxiang/backend/.env 的写法)。
+func TestFleetEnabledFromEnvOnly(t *testing.T) {
+	d := strings.Repeat("c", 64)
+	for k, v := range map[string]string{
+		"SECURITY_CREDENTIAL_KEY":       strings.Repeat("0123456789abcdef", 4),
+		"FLEET_ENABLED":                 "true",
+		"FLEET_CONTROLLER_EGRESS_IPS":   "123.56.177.241",
+		"FLEET_BASE_IMAGES":             `[{"name":"pytorch","ref":"r.example.com/a@sha256:` + d + `"}]`,
+		"FLEET_PROBE_IMAGE":             "r.example.com/p@sha256:" + d,
+		"FLEET_MODEL_PULL_IMAGE":        "r.example.com/m@sha256:" + d,
+		"FLEET_MIN_DRIVER_VERSION":      "535",
+		"FLEET_SELFTEST_KEY_FILE":       "/etc/omnis/selftest_ed25519",
+		"ACCESSGW_PUBLIC_HOST":          "gw.example.com",
+		"ACCESSGW_INTERNAL_LISTEN":      "0.0.0.0:9090",
+		"ACCESSGW_EGRESS_IPS":           "1.2.3.4,5.6.7.8",
+		"ACCESSGW_UPSTREAM_PUBKEY":      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample gw",
+		"ACCESSGW_HMAC_SECRET":          strings.Repeat("s", 32),
+		"ACCESSGW_HOST_KEY_FINGERPRINT": "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+	} {
+		t.Setenv(k, v)
+	}
+	cfg, err := Load(writeFleetConfig(t, "server:\n  mode: debug\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Fleet.Enabled || len(cfg.Fleet.BaseImages) != 1 || len(cfg.AccessGW.EgressIPs) != 2 || cfg.AccessGW.PublicPort != 2222 ||
+		cfg.Fleet.ModelPullImage == "" || cfg.AccessGW.InternalListen != "0.0.0.0:9090" {
+		t.Fatalf("env-only config: %+v %+v", cfg.Fleet, cfg.AccessGW)
+	}
+}
