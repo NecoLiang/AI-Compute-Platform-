@@ -60,7 +60,7 @@ draft ──activate(须≥1条 pass 验证)──▶ active ──retire──�
   "metrics_map": {
     "requests_running": "vllm:num_requests_running",
     "requests_waiting": "vllm:num_requests_waiting",
-    "kv_cache_usage": "vllm:gpu_cache_usage_perc",
+    "kv_cache_usage": "vllm:kv_cache_usage_perc",
     "ttft_seconds": "vllm:time_to_first_token_seconds",
     "generation_tokens_total": "vllm:generation_tokens_total",
     "prompt_tokens_total": "vllm:prompt_tokens_total",

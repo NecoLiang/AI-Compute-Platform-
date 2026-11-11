@@ -141,7 +141,7 @@ platformFee = totalAmount × feeRate / 10000  (feeRate默认500=5%)
 
 - **幂等**：`UNIQUE(kind, source_id)`；同一停机段 / 同一租约至多一行，重复调用、并发调用都只调用一次易宝。所有部分退款路径先锁订单族（母单 → 续租单），再锁 `payment_refunds` → `payments` → `settlements`。
 - **结果落地**：同步返回 / 定时查询（`processing` 按请求号查）/ 异步通知（`POST /payment/yeepay/notify/refund`，按 `refund_request_id` 路由到部分退款）三路共用一个幂等落地函数。`SUCCESS` 时同事务写 `lease_outages.remedy_applied_at`；`FAILED/CANCEL` 记 `failed` + 运营告警，1 小时后自动换新请求号重提。
-- **开关**：仅当 `fleet.enabled=true` 且 `fleet.outage.yeepay_partial_refund_confirmed=true`（易宝部分退款能力已书面确认）时 main 打开通道；易宝未接入时启动失败（不降级为"假装可退"）。未打开时不登记、不提交，选退费返回 `50000`；已在 `processing` 的仍会查询落地。
+- **开关**：仅当 `fleet.enabled=true` 且 `fleet.outage.yeepay_partial_refund_confirmed=true`（易宝能力已于 2026-11-10 确认，启用 fleet 时沙箱验证部分退款后置 true）时 main 打开通道；易宝未接入时启动失败（不降级为"假装可退"）。未打开时不登记、不提交，选退费返回 `50000`；已在 `processing` 的仍会查询落地。
 - **登记条件**：根订单为托管且 `settle_ready_at IS NULL`、支付 `paid` 且未进入全额退款、本订单无 `processing/success` 分账。已进入分账后不能再部分退款。
 - **全额退款扣除已成功部分退款**：之后的全额退款金额 = 实付 − 已成功部分退款；有 `processing` 部分退款时全额退款等待；`pending/failed` 的部分退款在全额退款成功后作废（记 `failed`，原因「订单已全额退款, 本笔不再提交」）。
 

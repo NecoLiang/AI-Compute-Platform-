@@ -38,6 +38,17 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P4", false, "同一张卡不能重复上架(如为本人机器请删除旧节点; 若被他人抢先登记请提交工单由运营仲裁): "+strings.Join(d, "; "))
 		return
 	}
+	// 宿主机上的 GPU 计算进程: 查不清就不能确认哪些卡可做侵入项(P9 挂卡、P13 压测), 整次探活不通过。
+	out, err = p.run(ctx, cmdGPUApps)
+	if err != nil {
+		p.set("P4", false, "查询 GPU 计算进程失败(无法确认空闲卡未被占用): "+err.Error())
+		return
+	}
+	apps, err := ParseComputeApps(out)
+	if err != nil {
+		p.set("P4", false, err.Error())
+		return
+	}
 	p.gpus, p.inv.GPUs, p.inv.DriverVersion = gpus, gpus, gpus[0].Driver
 	p.set("P4", true, fmt.Sprintf("%d 张 %s, 驱动 %s", len(gpus), gpus[0].Name, gpus[0].Driver))
 
@@ -54,10 +65,17 @@ func (p *probeRun) inventory(ctx context.Context) {
 			busy[sl.GPUUUID] = true
 		}
 	}
+	// 非平台在租的卡上已有宿主机计算进程(供给方自用或残留): 不做侵入项、不计入可售, 进程退出后下次完整探活自动恢复。
+	hostBusy := map[int]string{}
 	for _, g := range gpus {
-		if !busy[g.UUID] {
-			p.freeIdx[g.Index] = true
+		if busy[g.UUID] {
+			continue
 		}
+		if pids := apps[strings.ToUpper(g.UUID)]; len(pids) > 0 {
+			hostBusy[g.Index] = fmt.Sprintf("宿主机计算进程占用(pid %s), 不计入可售, 进程退出后下次完整探活自动恢复", strings.Join(pids, ","))
+			continue
+		}
+		p.freeIdx[g.Index] = true
 	}
 
 	if d := CheckConsistency(p.product.GpuModel, p.cat, p.n.TotalCards, gpus); len(d) > 0 {
@@ -80,7 +98,16 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P6", true, fmt.Sprintf("%d 个拓扑分组", len(groups)))
 	}
 
+	// P7 只反映硬件健康; 占用卡在其后并入 Faulty(硬件原因优先)。
 	p.health(ctx, 24*time.Hour, "P7")
+	if p.inv.Faulty == nil {
+		p.inv.Faulty = map[int]string{}
+	}
+	for idx, why := range hostBusy {
+		if p.inv.Faulty[idx] == "" {
+			p.inv.Faulty[idx] = why
+		}
+	}
 	p.host(ctx)
 	p.modelCache(ctx)
 }
@@ -269,13 +296,19 @@ func (p *probeRun) runtime(ctx context.Context) {
 		p.docker.ServerVersion, p.docker.Driver, p.docker.BackingFS(), len(free)))
 
 	cmd, _ = quotaCheckCommand(image)
-	if _, err := p.run(ctx, cmd); err != nil {
-		p.set("P10", false, fmt.Sprintf("--storage-opt size= 不可用(存储驱动 %s, 底层 %s; 需 overlay2 + xfs pquota), 该节点只能整机出租: %v",
-			p.docker.Driver, p.docker.BackingFS(), err))
-		return
+	out, err = p.run(ctx, cmd)
+	drv := fmt.Sprintf("存储驱动 %s, 底层 %s; 需 overlay2 + xfs pquota", p.docker.Driver, p.docker.BackingFS())
+	switch {
+	case err != nil:
+		p.set("P10", false, fmt.Sprintf("--storage-opt size= 不可用(%s), 该节点只能整机出租: %v", drv, err))
+	case strings.Contains(out, "@@enforced"):
+		p.inv.QuotaOK = true
+		p.set("P10", true, "支持按容器限制磁盘(64M 配额内写 128M 被拒)")
+	case strings.Contains(out, "@@not-enforced"):
+		p.set("P10", false, fmt.Sprintf("--storage-opt size= 被接受但未生效(64M 配额内写入 128M 成功; %s), 该节点只能整机出租", drv))
+	default:
+		p.set("P10", false, fmt.Sprintf("磁盘配额自检未得出结论(探针容器内写入失败或输出异常: %q), 该节点只能整机出租", truncate(strings.TrimSpace(out), 160)))
 	}
-	p.inv.QuotaOK = true
-	p.set("P10", true, "支持按容器限制磁盘")
 }
 
 // freeUUIDs 可做侵入项的空闲健康卡 UUID(按 index 升序)。
