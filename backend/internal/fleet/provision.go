@@ -20,10 +20,13 @@ import (
 //
 //	⓪ 订单 paid→provisioning, 租约 pending→provisioning(同一事务, 锁顺序 订单→租约)
 //	① 校验节点与卡槽, 以钉死指纹建立管理连接
-//	② 校验/下发 DOCKER-USER 规则(租约端口段只放行网关出口)
+//	② 网关模式: 校验/下发 DOCKER-USER 规则(租约端口段只放行网关出口); 直连模式无此步(租约端口段对公网开放)
 //	③ 基础镜像(按 digest)不在本地则拉取
 //	④ 占用端口(uk_node_port) → 建网络/数据卷/容器 → 读取容器 sshd 主机指纹
-//	⑤ 经网关公网入口以系统自检身份登录, nvidia-smi -L 的 UUID 集合必须恰为分配的卡; 主服务出口直连端口必须失败
+//	④' 直连模式: 写入平台/买家公钥并确认容器接入租约网络、22 端口映射到租约端口(direct.go)
+//	⑤ 网关模式: 经网关公网入口以系统自检身份登录, 主服务出口直连端口必须失败;
+//	   直连模式: 以节点管理密钥直连 节点地址:租约端口(买家同一入口)登录, 钉死容器 sshd 指纹;
+//	   两种模式 nvidia-smi -L 的 UUID 集合都必须恰为分配的卡
 //	⑥ 订单 active(写交付记录与 selftest_passed_at)、租约 active、卡槽 reserved→leased, 通知买家
 //
 // 不变式: 节点/网络问题一律返回可重试错误(最终走换节点/退款), 只有订单/租约已不需要开通时才 errTaskAborted。
@@ -66,8 +69,11 @@ func (s *Service) runProvisionTask(ctx context.Context, t *Task) (any, error) {
 	}
 	defer p.client.Close()
 	steps := []func(context.Context) error{p.firewall, p.image, p.container, p.selftest}
+	if s.directMode() {
+		steps = []func(context.Context) error{p.image, p.container, p.access, p.selftest}
+	}
 	if p.l.DeliveryKind == "bare_metal" {
-		// 整机(T-089, docs/25 §25.7.4): 宿主机建租约账户, 买家经网关登录宿主机 sshd; 无容器/端口段/基础镜像。
+		// 整机(T-089, docs/25 §25.7.4): 宿主机建租约账户, 买家(经网关或直连)登录宿主机 sshd; 无容器/端口段/基础镜像。
 		steps = []func(context.Context) error{p.bareMetalAccount, p.selftest}
 	}
 	for _, step := range steps {
@@ -324,7 +330,7 @@ func (p *provisionRun) container(ctx context.Context) error {
 	case l.Cards != n.TotalCards:
 		return fmt.Errorf("节点 #%d 不支持磁盘配额(P10), 只能整机出租, 不能开通 %d/%d 卡", n.ID, l.Cards, n.TotalCards)
 	}
-	init, err := containerInitScript(s.gw.UpstreamPubkey, s.gwEgress)
+	init, err := s.leaseInitScript(n)
 	if err != nil {
 		return err
 	}
@@ -373,6 +379,7 @@ func (p *provisionRun) container(ctx context.Context) error {
 		}
 		// 同值重写(重试)RowsAffected=0, 属正常。
 	}
+	l.UpstreamHostKeyFP = &fp
 	p.out.UpstreamPort, p.out.UpstreamHostKeyFP = port, fp
 	return nil
 }
@@ -437,14 +444,18 @@ func (p *provisionRun) claimPort(ctx context.Context) (int, error) {
 }
 
 // bareMetalAccount 整机开通 ②'(T-089): 以探针镜像特权容器 chroot 宿主机创建账户 omnis-<lease_no>(免密 sudo)、
-// 写入网关上游公钥(from=网关出口 IP); 租约上游 = 节点管理 sshd(ssh_port), 主机指纹 = 节点钉死指纹(开通时快照,
+// 写入 authorized_keys(网关模式: 网关上游公钥, from=网关出口 IP; 直连模式: 平台管理公钥 + 买家公钥); 租约上游 = 节点管理 sshd(ssh_port), 主机指纹 = 节点钉死指纹(开通时快照,
 // 租期内节点指纹再变化不会让网关改认新指纹)。重试幂等(账户已存在沿用, 公钥与 sudoers 重写)。
 func (p *provisionRun) bareMetalAccount(ctx context.Context) error {
 	s, l, n := p.s, p.l, p.n
 	if _, err := ensureImageOn(ctx, p.client, s.cfg.ProbeImage); err != nil {
 		return fmt.Errorf("平台探针镜像(建整机租约账户用): %w", err)
 	}
-	script, err := bareMetalProvisionScript(l.LeaseNo, s.gw.UpstreamPubkey, s.gwEgress)
+	lines, err := s.bareMetalAuthLines(n, l)
+	if err != nil {
+		return err
+	}
+	script, err := bareMetalProvisionScript(l.LeaseNo, lines)
 	if err != nil {
 		return err
 	}
@@ -480,19 +491,45 @@ func (p *provisionRun) bareMetalAccount(ctx context.Context) error {
 			return errTaskAborted{fmt.Sprintf("租约 %s 已变为 %s, 停止开通(账户由 purge 回收)", l.LeaseNo, st)}
 		}
 	}
-	l.UpstreamPort = &port
+	l.UpstreamPort, l.UpstreamHostKeyFP = &port, &fp
 	p.out.UpstreamPort, p.out.UpstreamHostKeyFP = port, fp
 	return nil
 }
 
-// selftest ⑤。网关未接入时明确失败, 不伪造通过。
-func (p *provisionRun) selftest(ctx context.Context) error {
-	if p.s.gateway == nil {
-		return fmt.Errorf("访问网关(cmd/accessgw)未接入, 无法经网关做开通自检; 接入前不能交付")
-	}
-	out, err := p.s.gateway.SelfTestLease(ctx, p.l.LeaseNo)
+// access ④'(直连模式): 写入公钥, 确认容器接入租约网络且 22 端口映射到租约端口。
+func (p *provisionRun) access(ctx context.Context) error {
+	res, err := p.s.syncContainerAccess(ctx, p.client, p.n, p.l, syncConnect)
 	if err != nil {
-		return fmt.Errorf("经网关自检登录失败: %w", err)
+		return err
+	}
+	switch {
+	case res.Absent:
+		return fmt.Errorf("租约容器 %s 不存在(创建后被删除?)", containerNameOf(p.l.LeaseNo))
+	case !res.Running:
+		return fmt.Errorf("租约容器 %s 未在运行(sshd 退出?)", containerNameOf(p.l.LeaseNo))
+	}
+	return nil
+}
+
+// selftest ⑤。网关模式下网关未接入时明确失败, 不伪造通过。
+func (p *provisionRun) selftest(ctx context.Context) error {
+	var out string
+	var err error
+	if p.s.directMode() {
+		user, port, fp, err := directEndpoint(p.l)
+		if err != nil {
+			return err
+		}
+		if out, err = p.s.directLogin(ctx, p.n, user, port, fp); err != nil {
+			return fmt.Errorf("直连自检失败: %w", err)
+		}
+	} else {
+		if p.s.gateway == nil {
+			return fmt.Errorf("访问网关(cmd/accessgw)未接入, 无法经网关做开通自检; 接入前不能交付")
+		}
+		if out, err = p.s.gateway.SelfTestLease(ctx, p.l.LeaseNo); err != nil {
+			return fmt.Errorf("经网关自检登录失败: %w", err)
+		}
 	}
 	got := ParseGPUListL(out)
 	want := make([]string, len(p.slots))
@@ -501,6 +538,10 @@ func (p *provisionRun) selftest(ctx context.Context) error {
 	}
 	if !sameUUIDSet(got, want) {
 		return fmt.Errorf("自检: 容器内可见 GPU %v 与分配的卡 %v 不一致", got, want)
+	}
+	if p.s.directMode() {
+		// 直连模式的租约端口本就对公网开放, 不做"主服务出口直连必须失败"的检查。
+		return nil
 	}
 	if p.l.DeliveryKind == "bare_metal" {
 		// 整机上游即宿主机管理 sshd(平台主服务本就能连), "主服务直连必须失败"不适用; 来源限制靠
@@ -530,8 +571,7 @@ func (p *provisionRun) activate() error {
 	err := s.inTx(func(tx *sqlx.Tx) error {
 		var err error
 		delayOutage = 0
-		end, err = s.products.ActivateManagedOrderTx(tx, l.OrderID, time.Now(),
-			compute.ManagedAccess{GatewayHost: s.gw.PublicHost, GatewayPort: s.gw.PublicPort, Login: l.LeaseNo})
+		end, err = s.products.ActivateManagedOrderTx(tx, l.OrderID, time.Now(), s.managedAccess(p.n, l))
 		if err != nil || end == nil {
 			return err
 		}
@@ -584,9 +624,13 @@ func (p *provisionRun) activate() error {
 	}
 	slog.Info("托管租约已开通", "lease_no", l.LeaseNo, "node_id", l.NodeID, "port", p.out.UpstreamPort)
 	if order != nil {
-		s.notifyLink(order.BuyerID, "算力已开通",
-			fmt.Sprintf("订单 %s 已开通, 可在订单详情查看网关登录方式(登录名 %s)。", order.OrderNo, l.LeaseNo),
-			"/console/buyer/orders/"+order.OrderNo)
+		msg := fmt.Sprintf("订单 %s 已开通, 可在订单详情查看网关登录方式(登录名 %s)。", order.OrderNo, l.LeaseNo)
+		if s.directMode() {
+			acc := s.managedAccess(p.n, l)
+			msg = fmt.Sprintf("订单 %s 已开通, 用账户中登记的 SSH 公钥登录: ssh -p %d %s@%s(详见订单详情)。",
+				order.OrderNo, acc.Port, acc.Login, acc.Host)
+		}
+		s.notifyLink(order.BuyerID, "算力已开通", msg, "/console/buyer/orders/"+order.OrderNo)
 	}
 	return nil
 }

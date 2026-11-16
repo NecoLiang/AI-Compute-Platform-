@@ -166,6 +166,142 @@ func TestFleetImagesSmoke(t *testing.T) {
 		assert.Regexp(t, `:0016 [0-9A-F:]+ 0A `, out, "sshd listening on :22 must appear in the container's /proc/net/tcp")
 	})
 
+	t.Run("direct_probe_port_toggle", func(t *testing.T) {
+		// 直连模式 P12 的前提: 断开容器网络即撤销端口映射, 重新接入即恢复。
+		name := "omnis-probe-1-" + randHex(t, 4)
+		const port = 47030
+		cmd, err := portListenerNetCommand(probe, name, port)
+		require.NoError(t, err)
+		clean, err := cleanupNetCommand(name)
+		require.NoError(t, err)
+		t.Cleanup(func() { _, _ = host(t, clean) })
+		assert.Contains(t, mustHost(t, cmd), "@@up")
+		reach := func() error {
+			c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 3*time.Second)
+			if err == nil {
+				_ = c.Close()
+			}
+			return err
+		}
+		require.NoError(t, reach())
+		off, err := probeNetToggleCommand(name, port, false)
+		require.NoError(t, err)
+		assert.Contains(t, mustHost(t, off), "@@closed")
+		assert.Error(t, reach())
+		on, err := probeNetToggleCommand(name, port, true)
+		require.NoError(t, err)
+		assert.Contains(t, mustHost(t, on), "@@open")
+		assert.NoError(t, reach())
+	})
+
+	t.Run("direct_lease_container_access", func(t *testing.T) {
+		lease, err := newLeaseNo()
+		require.NoError(t, err)
+		c, v, nw := containerNameOf(lease), volumeNameOf(lease), networkNameOf(lease)
+		t.Cleanup(func() {
+			_, _ = host(t, "docker rm -f "+c+" >/dev/null 2>&1; docker volume rm "+v+" >/dev/null 2>&1; docker network rm "+nw+" >/dev/null 2>&1")
+		})
+		// 同 lease_container_ssh_and_mining_scan: 本机经端口映射连入时来源是租约网络网关地址, 当作"控制面出口 IP"。
+		mustHost(t, "docker network create --label omnis.lease="+lease+" "+nw+" >/dev/null")
+		gwIP := strings.TrimSpace(mustHost(t, "docker network inspect -f '{{(index .IPAM.Config 0).Gateway}}' "+nw))
+		require.NotNil(t, net.ParseIP(gwIP), gwIP)
+
+		platformKey, buyer := newSigner(t), newSigner(t)
+		platform, err := authorizedKeysLine(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(platformKey.PublicKey()))), []string{gwIP})
+		require.NoError(t, err)
+		buyerLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(buyer.PublicKey())))
+		init, err := containerInitScriptDirect(platform)
+		require.NoError(t, err)
+		uuids := []string{"GPU-" + randHex(t, 4) + "-" + randHex(t, 2) + "-" + randHex(t, 2) + "-" + randHex(t, 2) + "-" + randHex(t, 6)}
+		const port = 47040
+		cmd, err := createContainerCommand(leaseContainerSpec{LeaseNo: lease, Image: base, UUIDs: uuids, CPUs: 2, MemGB: 2,
+			Port: port, InitShell: init})
+		require.NoError(t, err)
+		g, err := gpusFlag(uuids)
+		require.NoError(t, err)
+		assert.Contains(t, mustHost(t, strings.Replace(cmd, " --gpus "+g, "", 1)), "@@created")
+		hk, err := hostKeyCommand(lease)
+		require.NoError(t, err)
+		fp, err := parseHostKeyFP(mustHost(t, hk))
+		require.NoError(t, err)
+
+		sync := func(buyers []string, mode string) AccessSyncResult {
+			t.Helper()
+			var keys []byte
+			if mode != syncCut {
+				keys, err = accessKeysTar(platform, buyers)
+				require.NoError(t, err)
+			}
+			cmd, err := accessSyncCommand(lease, keys, mode)
+			require.NoError(t, err)
+			res, err := parseAccessSync(mustHost(t, cmd))
+			require.NoError(t, err)
+			return res
+		}
+		dial := func(signer ssh.Signer) (*ssh.Client, error) {
+			return ssh.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &ssh.ClientConfig{User: "root", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
+				Timeout: 5 * time.Second, HostKeyCallback: func(_ string, _ net.Addr, k ssh.PublicKey) error {
+					if got := ssh.FingerprintSHA256(k); got != fp {
+						return fmt.Errorf("host key %s != %s", got, fp)
+					}
+					return nil
+				}})
+		}
+		canLogin := func(signer ssh.Signer) bool {
+			cl, err := dial(signer)
+			if err != nil {
+				return false
+			}
+			defer cl.Close()
+			s, err := cl.NewSession()
+			if err != nil {
+				return false
+			}
+			defer s.Close()
+			out, err := s.CombinedOutput("echo @@in")
+			return err == nil && strings.Contains(string(out), "@@in")
+		}
+
+		res := sync([]string{buyerLine}, syncConnect)
+		assert.True(t, res.Keys)
+		assert.True(t, res.Running)
+		assert.Equal(t, port, res.Port)
+		require.Eventually(t, func() bool { return canLogin(buyer) }, 30*time.Second, time.Second, "buyer key login")
+		assert.True(t, canLogin(platformKey), "platform key (from= lease network gateway) login")
+		assert.False(t, canLogin(newSigner(t)), "unregistered key must be rejected")
+		_, err = ssh.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &ssh.ClientConfig{User: "root",
+			Auth: []ssh.AuthMethod{ssh.Password("x")}, Timeout: 5 * time.Second, HostKeyCallback: ssh.InsecureIgnoreHostKey()})
+		assert.Error(t, err, "password auth must be disabled")
+
+		// 冻结: 断开全部网络 → 端口映射撤销, 已有会话被结束。
+		live, err := dial(buyer)
+		require.NoError(t, err)
+		defer live.Close()
+		res = sync(nil, syncCut)
+		assert.True(t, res.Disconnected)
+		assert.False(t, canLogin(buyer), "cut must block new logins")
+		assert.Empty(t, strings.TrimSpace(mustHost(t, "docker port "+c+" 22/tcp 2>/dev/null || true")))
+		kill, err := killSessionsCommand(lease)
+		require.NoError(t, err)
+		// 断网后已建立的 TCP 不一定立刻收到 RST, 以容器内被结束的 sshd 会话进程数为准(live 那条连接至少一个)。
+		var killed int
+		_, err = fmt.Sscanf(strings.TrimSpace(mustHost(t, kill)), "@@killed %d", &killed)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, killed, 1, "established session must be killed")
+
+		// 解冻: 重新接入租约网络, 映射恢复到同一端口。
+		res = sync([]string{buyerLine}, syncConnect)
+		assert.True(t, res.Connected)
+		assert.Equal(t, port, res.Port)
+		require.Eventually(t, func() bool { return canLogin(buyer) }, 30*time.Second, time.Second, "login after reconnect")
+
+		// 删光买家公钥: 只剩平台公钥。
+		res = sync(nil, syncKeys)
+		assert.True(t, res.Keys)
+		assert.False(t, canLogin(buyer))
+		assert.True(t, canLogin(platformKey))
+	})
+
 	t.Run("probe_firewall_rules", func(t *testing.T) {
 		const start, end = 47000, 47099
 		t.Cleanup(func() {

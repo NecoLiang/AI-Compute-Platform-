@@ -74,8 +74,10 @@ type RuntimeSettings struct {
 	PullImage   string // fleet.model_pull_image(ref@sha256); 空 = 未配置, 提交部署 50000
 	PortStart   int    // fleet.engine_port_range
 	PortEnd     int
-	GatewayHost string // accessgw.public_host, 仅用于给买家展示端口转发命令
+	GatewayHost string // accessgw.public_host, 仅用于给买家展示端口转发命令(网关模式)
 	GatewayPort int
+	// DirectAccess fleet.access_mode=direct: 端口转发命令直连 节点地址:租约端口(root@), 不经网关。
+	DirectAccess bool
 }
 
 // Runtime 由 internal/fleet 实现(本包不能依赖 fleet: fleet 已依赖本包)。

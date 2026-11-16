@@ -531,8 +531,10 @@ func (s *Service) startNightContainer(ctx context.Context, l *Lease) error {
 	if busy := occupiedGPUs(out, mine); len(busy) > 0 {
 		return fmt.Errorf("%w: %s", errNightOccupied, strings.Join(busy, "; "))
 	}
-	if _, err := s.applyFirewall(ctx, client, n); err != nil {
-		return fmt.Errorf("下发租约端口防火墙规则失败(未启动容器): %w", err)
+	if !s.directMode() {
+		if _, err := s.applyFirewall(ctx, client, n); err != nil {
+			return fmt.Errorf("下发租约端口防火墙规则失败(未启动容器): %w", err)
+		}
 	}
 	start, err := startContainerCommand(l.LeaseNo)
 	if err != nil {
@@ -541,7 +543,7 @@ func (s *Service) startNightContainer(ctx context.Context, l *Lease) error {
 	if out, err := runRemote(ctx, client, start, cmdTimeout); err != nil || !strings.Contains(out, "@@started") {
 		return fmt.Errorf("docker start 失败: %v", errText(err))
 	}
-	if err := s.verifyContainer(ctx, client, l, SlotReserved, LeaseParked); err != nil {
+	if err := s.verifyContainer(ctx, client, n, l, SlotReserved, LeaseParked); err != nil {
 		s.stopBack(ctx, client, l.LeaseNo)
 		return err
 	}

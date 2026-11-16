@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"tokenfactory/internal/compute"
+	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/errcode"
 
 	"golang.org/x/crypto/ssh"
@@ -128,7 +129,8 @@ func (s *Service) ListBuyerKeys(userID int64) ([]BuyerKey, error) {
 }
 
 // AddBuyerKey 添加公钥: 每人最多 10 把(未吊销), 同一把重复添加 40900; 曾删除过的同一把重新启用。
-// 先锁用户行把同一买家的并发添加串行化, 上限计数不会被并发突破。新增公钥只扩大放行范围, 不需要刷新撤销游标。
+// 先锁用户行把同一买家的并发添加串行化, 上限计数不会被并发突破。新增公钥只扩大放行范围, 不需要刷新撤销游标;
+// 直连模式同一事务内给名下租约入队 sync_access(把公钥写进租约容器/整机账户)。
 func (s *Service) AddBuyerKey(userID int64, name, publicKey, ip string) (*BuyerKey, error) {
 	pk, err := parseBuyerKey(publicKey)
 	if err != nil {
@@ -188,6 +190,9 @@ func (s *Service) AddBuyerKey(userID int64, name, publicKey, ip string) (*BuyerK
 			return nil, err
 		}
 	}
+	if err := s.enqueueBuyerSyncTx(tx, userID, "buyer_ssh_key.add"); err != nil {
+		return nil, err
+	}
 	if err := s.repo.audit(tx, userID, "buyer_ssh_key.add", "buyer_ssh_key", id, nil,
 		map[string]string{"name": nm, "fingerprint": pk.fingerprint}, ip); err != nil {
 		return nil, err
@@ -207,6 +212,8 @@ func (s *Service) AddBuyerKey(userID int64, name, publicKey, ip string) (*BuyerK
 // 清掉按该公钥缓存的放行。已建立的会话不受影响: 删钥只拦新登录, 不入队 kill_sessions(网关插件也无法切断已建立的管道,
 // docs/25 §25.6.3 S2 口径)。需立即断开现有会话只能由运营冻结订单; "删钥是否同时断开现有会话"
 // 为待业务负责人确认的口径(docs/api/managed-rental-api.md), 确认前保持不断开。
+// 直连模式: 同一事务内给名下租约入队 sync_access, 从租约容器 buyer_keys / 整机账户 authorized_keys 中移除该公钥
+// (同样只拦新登录)。
 func (s *Service) DeleteBuyerKey(userID, keyID int64, ip string) error {
 	tx, err := s.repo.db.Beginx()
 	if err != nil {
@@ -231,6 +238,9 @@ func (s *Service) DeleteBuyerKey(userID, keyID int64, ip string) error {
 	if err := s.repo.touchBuyerLeases(tx, userID); err != nil {
 		return err
 	}
+	if err := s.enqueueBuyerSyncTx(tx, userID, "buyer_ssh_key.revoke"); err != nil {
+		return err
+	}
 	if err := s.repo.audit(tx, userID, "buyer_ssh_key.revoke", "buyer_ssh_key", keyID,
 		map[string]string{"fingerprint": fp}, nil, ip); err != nil {
 		return err
@@ -238,12 +248,19 @@ func (s *Service) DeleteBuyerKey(userID, keyID int64, ip string) error {
 	return tx.Commit()
 }
 
-// OrderAccess GET /orders/:id/access 的连接信息。不含节点地址与容器端口。
+// OrderAccess GET /orders/:id/access 的连接信息。
+// access_mode=gateway: gateway_host/gateway_port 为访问网关入口(不含节点地址与容器端口), 登录名为租约号;
+// access_mode=direct: host/port 为节点地址与租约映射端口(开通前为空), 登录名 root(整机为 omnis-<lease_no>),
+// host_key_fingerprint 为租约 sshd 主机指纹, 仅公钥登录。gateway_host/gateway_port 在直连模式下为空。
 type OrderAccess struct {
-	GatewayHost string `json:"gateway_host"`
-	GatewayPort int    `json:"gateway_port"`
-	Login       string `json:"login"`
-	LeaseState  string `json:"lease_state"`
+	AccessMode         string `json:"access_mode"`
+	GatewayHost        string `json:"gateway_host"`
+	GatewayPort        int    `json:"gateway_port"`
+	Host               string `json:"host,omitempty"`
+	Port               int    `json:"port,omitempty"`
+	HostKeyFingerprint string `json:"host_key_fingerprint,omitempty"`
+	Login              string `json:"login"`
+	LeaseState         string `json:"lease_state"`
 	// DeliveryKind container=按卡容器(经网关登录进租约容器) / bare_metal=整机(经网关登录宿主机账户 omnis-<lease_no>; 不支持一键部署)。
 	DeliveryKind string     `json:"delivery_kind"`
 	AccessUntil  *time.Time `json:"access_until"`
@@ -283,9 +300,30 @@ func (s *Service) OrderAccess(userID int64, orderNo string) (*OrderAccess, error
 	if err != nil {
 		return nil, err
 	}
-	return &OrderAccess{GatewayHost: s.gw.PublicHost, GatewayPort: s.gw.PublicPort, Login: l.LeaseNo, LeaseState: l.State,
-		DeliveryKind: l.DeliveryKind,
-		AccessUntil:  l.AccessUntil, GraceUntil: l.GraceUntil, AuthMethods: []string{authMethodPubkey, authMethodPasswd}}, nil
+	acc := &OrderAccess{AccessMode: config.AccessModeGateway, LeaseState: l.State, DeliveryKind: l.DeliveryKind,
+		AccessUntil: l.AccessUntil, GraceUntil: l.GraceUntil}
+	if !s.directMode() {
+		acc.GatewayHost, acc.GatewayPort, acc.Login = s.gw.PublicHost, s.gw.PublicPort, l.LeaseNo
+		acc.AuthMethods = []string{authMethodPubkey, authMethodPasswd}
+		return acc, nil
+	}
+	acc.AccessMode, acc.AuthMethods, acc.Login = config.AccessModeDirect, []string{authMethodPubkey}, "root"
+	if l.DeliveryKind == "bare_metal" {
+		if acc.Login, err = bareMetalUser(l.LeaseNo); err != nil {
+			return nil, err
+		}
+	}
+	// 地址/端口/指纹在开通写入 upstream_* 之后才有; 换节点后随新节点变化。
+	if l.UpstreamPort != nil && l.UpstreamHostKeyFP != nil && l.NodeID != 0 {
+		n, err := s.repo.GetNode(l.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		if n != nil && n.SSHHost != nil {
+			acc.Host, acc.Port, acc.HostKeyFingerprint = *n.SSHHost, *l.UpstreamPort, *l.UpstreamHostKeyFP
+		}
+	}
+	return acc, nil
 }
 
 // AccessSession access_sessions 一行(买家与运营共用; buyer_id 仅运营检索返回)。

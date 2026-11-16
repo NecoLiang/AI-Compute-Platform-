@@ -10,7 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// 租约收尾任务执行器(docs/25 §25.7, T-087): stop / purge(含 cleanup_only)/ kill_sessions。
+// 租约收尾任务执行器(docs/25 §25.7, T-087): stop / purge(含 cleanup_only)/ kill_sessions; 直连模式的 sync_access 见 direct.go。
 //
 // 共同约束:
 //   - 执行前读取租约当前状态, 已不需要执行(解冻、续租恢复、换节点等)→ errTaskAborted(failed, 不重试);
@@ -28,6 +28,7 @@ func (s *Service) registerLeaseExecutors() {
 	s.registerExecutor(KindStop, taskExecutor{timeout: stopExecTimeout, run: s.runStopTask, onDead: s.leaseTaskDead})
 	s.registerExecutor(KindPurge, taskExecutor{timeout: purgeExecTimeout, run: s.runPurgeTask, onDead: s.leaseTaskDead})
 	s.registerExecutor(KindKillSessions, taskExecutor{timeout: killExecTimeout, run: s.runKillSessionsTask, onDead: s.leaseTaskDead})
+	s.registerExecutor(KindSyncAccess, taskExecutor{timeout: syncAccessExecTimeout, run: s.runSyncAccessTask, onDead: s.leaseTaskDead})
 }
 
 // leaseTaskDead stop/purge/kill_sessions 重试耗尽: 运营告警 + 租约 resource_alert(运营租约列表可见)。
@@ -453,30 +454,52 @@ func (s *Service) runKillSessionsTask(ctx context.Context, t *Task) (any, error)
 		return nil, err
 	}
 	defer client.Close()
+	if s.directMode() {
+		// 直连模式: 先切断入口(容器断开全部网络 / 整机 authorized_keys 只留平台公钥), 再结束已有会话。
+		n, err := s.repo.GetNode(t.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		if n == nil {
+			return nil, errTaskAborted{fmt.Sprintf("节点 #%d 已不存在", t.NodeID)}
+		}
+		if l.DeliveryKind == "bare_metal" {
+			if _, _, err := s.syncBareMetalKeys(ctx, client, n, l, true); err != nil {
+				return nil, err
+			}
+			return s.bareMetalKillSessions(ctx, client, l)
+		}
+		return s.cutContainerAccess(ctx, client, n, l)
+	}
 	if l.DeliveryKind == "bare_metal" {
 		return s.bareMetalKillSessions(ctx, client, l)
 	}
+	return s.killContainerSessions(ctx, client, l)
+}
+
+// killContainerSessions 结束租约容器内的全部会话(sshd 子进程); 容器未运行视为已完成。
+func (s *Service) killContainerSessions(ctx context.Context, client Runner, l *Lease) (KillSessionsOutcome, error) {
+	res := KillSessionsOutcome{LeaseNo: l.LeaseNo}
 	cmd, err := killSessionsCommand(l.LeaseNo)
 	if err != nil {
-		return nil, errTaskAborted{err.Error()}
+		return res, errTaskAborted{err.Error()}
 	}
 	out, err := runRemote(ctx, client, cmd, cmdTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("断开容器内会话失败: %w", err)
+		return res, fmt.Errorf("断开容器内会话失败: %w", err)
 	}
-	res := KillSessionsOutcome{LeaseNo: l.LeaseNo}
 	for _, line := range nonEmptyLines(out) {
 		if line == "@@notrunning" {
 			return res, nil
 		}
 		if strings.HasPrefix(line, "@@killed ") {
 			if _, err := fmt.Sscanf(line, "@@killed %d", &res.Killed); err != nil {
-				return nil, fmt.Errorf("断开会话输出无法解析: %q", truncate(line, 80))
+				return res, fmt.Errorf("断开会话输出无法解析: %q", truncate(line, 80))
 			}
 			res.Running = true
 			slog.Info("冻结租约容器内会话已断开", "lease_no", l.LeaseNo, "killed", res.Killed)
 			return res, nil
 		}
 	}
-	return nil, fmt.Errorf("断开会话无结论输出: %q", truncate(strings.TrimSpace(out), 120))
+	return res, fmt.Errorf("断开会话无结论输出: %q", truncate(strings.TrimSpace(out), 120))
 }

@@ -1,5 +1,8 @@
 # 访问网关部署（与主服务同机）
 
+> **仅 `FLEET_ACCESS_MODE=gateway` 时需要。** 缺省的直连模式（`direct`，2026-11-16 起）买家直连节点映射端口，平台在节点 Docker 层切断，
+> 不部署网关，下面的辅助私网 IP、EIP2、安全组 2222、`gw.omnisline.com` 与 `setup.sh` 都不用做（docs/25 §25.6.0）。
+
 设计见 docs/25 §25.6、§25.12、§25.14。当前形态：网关（sshpiperd v1.6.1 + failtoban + `cmd/accessgw` 插件）与主服务
 同在万象 ECS（123.56.177.241）上，用独立出口 IP 隔离；后续迁到独立主机时只需换 `--bind-ip/--egress-ip` 与
 `--main-url`，主服务配置不变。
@@ -56,6 +59,8 @@ scp backend/deploy/accessgw/compose.yml backend/deploy/accessgw/setup.sh wanxian
 
 私钥与 HMAC 不输出；结尾打印上游公钥、主机密钥指纹、出口 IP。外部核对：`ssh-keyscan -p 2222 gw.omnisline.com | ssh-keygen -lf -`
 的 ED25519 指纹应等于打印的指纹。
+
+`setup.sh` 不写 `FLEET_ACCESS_MODE`：启用网关模式须在主服务 `.env` 另加 `FLEET_ACCESS_MODE=gateway`，否则主服务按直连模式运行、不启动内部接口。
 
 `fleet.enabled=false` 时主服务不启动内部接口，网关每 5s 记一条"拉取撤销列表失败"并拒绝所有登录（fail-closed，属预期）。
 可以先不加 `--up`，到打开 fleet 时再启动。

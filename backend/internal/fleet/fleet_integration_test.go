@@ -147,6 +147,8 @@ func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 	notif := notification.NewService(notification.NewRepository(db))
 	cfg := config.FleetConfig{
 		Enabled: true, Workers: 1, ControllerEgressIPs: []string{"10.0.0.1"},
+		// 既有测试按网关模式编写; 直连模式见 direct_integration_test.go(newDirectProvEnv)。
+		AccessMode: config.AccessModeGateway,
 		ProbeImage: testProbeImage, MinDriverVersion: "535.104",
 		Probe:          config.FleetProbe{MinPerfRatio: 0.7},
 		ModelCacheDir:  "/data/omnis-models",

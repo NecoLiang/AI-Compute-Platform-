@@ -23,6 +23,10 @@ on:
       - "backend/pkg/accessgw/**"
       - "backend/pkg/netguard/**"
       - "backend/internal/fleet/images_smoke_test.go"
+      # 冒烟用的生产命令模板
+      - "backend/internal/fleet/*_cmds.go"
+      - "backend/internal/fleet/keys.go"
+      - "backend/internal/fleet/onboarding.go"
       - "backend/internal/modeldeploy/pull_image_smoke_test.go"
       - ".github/workflows/fleet-images.yml"
   workflow_dispatch:

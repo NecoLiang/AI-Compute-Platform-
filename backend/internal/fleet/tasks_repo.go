@@ -107,7 +107,8 @@ func (r *Repository) claimNext(kinds []string, lock time.Duration) (*Task, error
 // expressKinds 快车道任务(docs/25 §25.11 S2 实现口径): stop / kill_sessions 只执行一两条短命令且关系到
 // 断开买家访问与释放卡槽, 不应排在同节点的长任务(拉镜像最长 30 分钟)之后。快车道任务不受"同节点同时只运行
 // 一个任务"约束, 也不占用该约束; 但同一节点上同一租约同时只运行一个任务(快车道与普通任务一视同仁)。
-var expressKinds = []string{KindStop, KindKillSessions}
+// sync_access(直连模式下同步买家公钥/网络连接)同理: 只有几条 docker 命令, 买家改公钥不应等同节点的拉镜像。
+var expressKinds = []string{KindStop, KindKillSessions, KindSyncAccess}
 
 func isExpressKind(kind string) bool {
 	for _, k := range expressKinds {

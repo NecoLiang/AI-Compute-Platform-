@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 访问网关与主服务同机部署的一次性准备(可重复执行, 已存在的项只校验不覆盖)。拓扑见 compose.yml 头注释与 README.md。
+# 仅 FLEET_ACCESS_MODE=gateway 时使用(主服务 .env 须另行设置该项); 缺省的直连模式(direct)不需要网关, 不要运行本脚本。
 #
 #   setup.sh --bind-ip <辅助私网IP> --egress-ip <辅助私网IP绑定的EIP> --public-host <网关域名> --image <网关镜像@sha256> \
 #            [--add-secondary-ip] [--up]

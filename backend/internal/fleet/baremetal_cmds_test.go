@@ -34,7 +34,9 @@ func TestHostRootCommand(t *testing.T) {
 }
 
 func TestBareMetalProvisionScript(t *testing.T) {
-	s, err := bareMetalProvisionScript(testLeaseNo, testUpstreamPub, []string{"203.0.113.7", "198.51.100.2"})
+	gw, err := gatewayAuthLine(testUpstreamPub, []string{"203.0.113.7", "198.51.100.2"})
+	require.NoError(t, err)
+	s, err := bareMetalProvisionScript(testLeaseNo, []string{gw})
 	require.NoError(t, err)
 	shSyntaxOK(t, s)
 	u := "omnis-" + testLeaseNo
@@ -42,7 +44,8 @@ func TestBareMetalProvisionScript(t *testing.T) {
 	assert.Contains(t, s, `useradd -m -s "$SH" -p '*'`)
 	line, err := upstreamKeyLine(testUpstreamPub)
 	require.NoError(t, err)
-	assert.Contains(t, s, `printf '%s\n' 'from="203.0.113.7,198.51.100.2" `+line+`' > "$H/.ssh/authorized_keys"`)
+	assert.Contains(t, s, `printf '%s\n' 'from="203.0.113.7,198.51.100.2" `+line+`' >> "$T"`)
+	assert.Contains(t, s, `mv -f "$T" "$H/.ssh/authorized_keys"`)
 	assert.Contains(t, s, "NOPASSWD: ALL")
 	assert.Contains(t, s, `visudo -cf "$T"`)
 	assert.Contains(t, s, `mv -f "$T" "/etc/sudoers.d/$U"`)
@@ -50,15 +53,20 @@ func TestBareMetalProvisionScript(t *testing.T) {
 	// sudoers.d 中含 '.' 的文件名会被 sudo 忽略: 临时文件以 '.' 开头, 正式文件名(账户名)不含 '.'。
 	assert.NotContains(t, u, ".")
 
-	_, err = bareMetalProvisionScript("l-abc;rm -", testUpstreamPub, []string{"203.0.113.7"})
+	_, err = bareMetalProvisionScript("l-abc;rm -", []string{gw})
 	assert.Error(t, err)
-	_, err = bareMetalProvisionScript(testLeaseNo, "not a key", []string{"203.0.113.7"})
+	_, err = bareMetalProvisionScript(testLeaseNo, nil)
+	assert.Error(t, err, "authorized_keys 不能为空")
+	_, err = bareMetalProvisionScript(testLeaseNo, []string{"ssh-ed25519 AAAA'; id; '"})
 	assert.Error(t, err)
-	_, err = bareMetalProvisionScript(testLeaseNo, testUpstreamPub, nil)
+
+	_, err = gatewayAuthLine("not a key", []string{"203.0.113.7"})
+	assert.Error(t, err)
+	_, err = gatewayAuthLine(testUpstreamPub, nil)
 	assert.Error(t, err, "未配置网关出口 IP 不能开通(from= 无法限制来源)")
-	_, err = bareMetalProvisionScript(testLeaseNo, testUpstreamPub, []string{"2001:db8::1"})
+	_, err = gatewayAuthLine(testUpstreamPub, []string{"2001:db8::1"})
 	assert.Error(t, err)
-	_, err = bareMetalProvisionScript(testLeaseNo, testUpstreamPub, []string{"203.0.113.7'; id; '"})
+	_, err = gatewayAuthLine(testUpstreamPub, []string{"203.0.113.7'; id; '"})
 	assert.Error(t, err)
 }
 

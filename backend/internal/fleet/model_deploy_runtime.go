@@ -237,7 +237,7 @@ func (d *deployRuntime) Settings() modeldeploy.RuntimeSettings {
 	c := d.s.cfg
 	return modeldeploy.RuntimeSettings{CacheDir: c.ModelCacheDir, PullImage: c.ModelPullImage,
 		PortStart: c.EnginePortStart, PortEnd: c.EnginePortEnd,
-		GatewayHost: strings.TrimSpace(d.s.gw.PublicHost), GatewayPort: d.s.gw.PublicPort}
+		GatewayHost: strings.TrimSpace(d.s.gw.PublicHost), GatewayPort: d.s.gw.PublicPort, DirectAccess: d.s.directMode()}
 }
 
 // modelSampleCleanupEvery 健康采样清理周期(保留 7 天, docs/27 §27.5)。

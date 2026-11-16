@@ -31,7 +31,7 @@ func TestFleetDisabledByDefaultKeepsDefaults(t *testing.T) {
 }
 
 func TestFleetEnabledListsEveryMissingKey(t *testing.T) {
-	_, err := Load(writeFleetConfig(t, "server:\n  mode: debug\nfleet:\n  enabled: true\n"))
+	_, err := Load(writeFleetConfig(t, "server:\n  mode: debug\nfleet:\n  enabled: true\n  access_mode: gateway\n"))
 	if err == nil {
 		t.Fatal("enabled fleet without required keys must fail to load")
 	}
@@ -52,6 +52,7 @@ security:
   credential_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 fleet:
   enabled: true
+  access_mode: gateway
   controller_egress_ips: ["123.56.177.241"]
   base_images:
     - name: pytorch-2.4-cuda12
@@ -67,6 +68,45 @@ accessgw:
   hmac_secret: 0123456789abcdef0123456789abcdef
   host_key_fingerprint: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s
 `
+
+// 直连映射(默认): 不需要任何 accessgw.* 与 selftest_key_file。
+func TestFleetDirectModeNeedsNoGateway(t *testing.T) {
+	_, err := Load(writeFleetConfig(t, "server:\n  mode: debug\nfleet:\n  enabled: true\n"))
+	if err == nil {
+		t.Fatal("enabled fleet without required keys must fail to load")
+	}
+	for _, key := range []string{"accessgw.", "fleet.selftest_key_file"} {
+		if strings.Contains(err.Error(), key) {
+			t.Errorf("direct mode must not require %s: %v", key, err)
+		}
+	}
+	d := strings.Repeat("d", 64)
+	body := `
+server:
+  mode: debug
+security:
+  credential_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+fleet:
+  enabled: true
+  controller_egress_ips: ["123.56.177.241"]
+  base_images:
+    - name: pytorch
+      ref: r.example.com/a@sha256:` + d + `
+  probe_image: r.example.com/p@sha256:` + d + `
+  min_driver_version: "535"
+`
+	cfg, err := Load(writeFleetConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Fleet.AccessMode != AccessModeDirect || cfg.Fleet.GatewayMode() {
+		t.Fatalf("access_mode default: %q", cfg.Fleet.AccessMode)
+	}
+	_, err = Load(writeFleetConfig(t, strings.Replace(body, "  enabled: true\n", "  enabled: true\n  access_mode: relay\n", 1)))
+	if err == nil || !strings.Contains(err.Error(), "fleet.access_mode 须为 direct 或 gateway: relay") {
+		t.Fatalf("unknown access_mode must be rejected: %v", err)
+	}
+}
 
 func TestFleetEnabledValidConfigLoads(t *testing.T) {
 	digest := strings.Repeat("a", 64)
@@ -186,6 +226,7 @@ func TestFleetEnabledFromEnvOnly(t *testing.T) {
 	for k, v := range map[string]string{
 		"SECURITY_CREDENTIAL_KEY":       strings.Repeat("0123456789abcdef", 4),
 		"FLEET_ENABLED":                 "true",
+		"FLEET_ACCESS_MODE":             "gateway",
 		"FLEET_CONTROLLER_EGRESS_IPS":   "123.56.177.241",
 		"FLEET_BASE_IMAGES":             `[{"name":"pytorch","ref":"r.example.com/a@sha256:` + d + `"}]`,
 		"FLEET_PROBE_IMAGE":             "r.example.com/p@sha256:" + d,
