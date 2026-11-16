@@ -276,20 +276,30 @@ func TestFleetImagesSmoke(t *testing.T) {
 		assert.Error(t, err, "password auth must be disabled")
 
 		// 冻结: 断开全部网络 → 端口映射撤销, 已有会话被结束。
+		// 容器内 sshd 进程数: PID 1 主 sshd + 每条连接的会话进程。
+		sshdProcs := func() int {
+			n, err := strconv.Atoi(strings.TrimSpace(mustHost(t, "docker exec "+c+` sh -c 'n=0; for d in /proc/[0-9]*; do x=$(cat "$d/comm" 2>/dev/null) || continue; case "$x" in sshd|sshd-session|sshd-auth) n=$((n+1));; esac; done; echo $n'`)))
+			require.NoError(t, err)
+			return n
+		}
 		live, err := dial(buyer)
 		require.NoError(t, err)
 		defer live.Close()
+		require.Eventually(t, func() bool { return sshdProcs() >= 2 }, 10*time.Second, 200*time.Millisecond, "live session process")
 		res = sync(nil, syncCut)
 		assert.True(t, res.Disconnected)
 		assert.False(t, canLogin(buyer), "cut must block new logins")
 		assert.Empty(t, strings.TrimSpace(mustHost(t, "docker port "+c+" 22/tcp 2>/dev/null || true")))
 		kill, err := killSessionsCommand(lease)
 		require.NoError(t, err)
-		// 断网后已建立的 TCP 不一定立刻收到 RST, 以容器内被结束的 sshd 会话进程数为准(live 那条连接至少一个)。
+		// 本机回环经 docker-proxy, 断网时代理可能已关掉连接(会话自行退出, killed 可为 0); 公网经 DNAT 时会话进程会残留,
+		// 必须由 kill_sessions 结束。两种情况都以"之后只剩 PID 1 主 sshd"为准。
 		var killed int
 		_, err = fmt.Sscanf(strings.TrimSpace(mustHost(t, kill)), "@@killed %d", &killed)
 		require.NoError(t, err)
-		assert.GreaterOrEqual(t, killed, 1, "established session must be killed")
+		t.Logf("kill_sessions killed %d", killed)
+		// 被 KILL 的会话进程在主 sshd 回收前短暂留作僵尸, 稍等。
+		assert.Eventually(t, func() bool { return sshdProcs() == 1 }, 10*time.Second, 200*time.Millisecond, "only the main sshd (PID 1) remains")
 		assert.Equal(t, "true", strings.TrimSpace(mustHost(t, "docker inspect -f '{{.State.Running}}' "+c)),
 			"kill_sessions must not stop the container (main sshd survives)")
 
