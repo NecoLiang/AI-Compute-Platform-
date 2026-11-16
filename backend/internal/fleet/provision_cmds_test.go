@@ -19,7 +19,7 @@ import (
 
 // T-084 开通命令模板: 白名单、注入防护、脚本语法与幂等语义。
 
-var b64Re = regexp.MustCompile(`echo ([A-Za-z0-9+/=]+) \| base64 -d \| sh`)
+var b64Re = regexp.MustCompile(`echo ([A-Za-z0-9+/=]+) \| base64 -d(?: \| sh|\)")`)
 
 // decodeB64 取出命令中 base64 交给 sh 的脚本。
 func decodeB64(t *testing.T, cmd string) string {
@@ -159,6 +159,16 @@ func TestContainerInitScript(t *testing.T) {
 	shSyntaxOK(t, script)
 }
 
+// TestExecB64KeepsPID 以真实 sh 验证 execB64 不新开进程: 脚本里的 $$ 与外层 sh 相同(容器内即 PID 1)。
+func TestExecB64KeepsPID(t *testing.T) {
+	out, err := exec.Command("sh", "-c", `echo "$$"; `+execB64(`echo "$$"; exec sh -c 'echo "$$"'`)).Output()
+	require.NoError(t, err)
+	pids := strings.Fields(string(out))
+	require.Len(t, pids, 3)
+	assert.Equal(t, pids[0], pids[1])
+	assert.Equal(t, pids[0], pids[2])
+}
+
 func TestCreateContainerCommand(t *testing.T) {
 	init, err := containerInitScript(testUpstreamPub, []string{"10.0.0.2"})
 	require.NoError(t, err)
@@ -179,6 +189,7 @@ func TestCreateContainerCommand(t *testing.T) {
 		assert.Contains(t, cmd, frag)
 	}
 	assert.Equal(t, init, decodeB64(t, cmd))
+	assert.Contains(t, cmd, " -c 'exec sh -c \"$(echo ", "入口脚本 exec 替换 PID 1 的 sh, 主 sshd 成为 PID 1")
 	shSyntaxOK(t, cmd)
 
 	whole := sp

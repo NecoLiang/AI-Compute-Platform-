@@ -224,6 +224,8 @@ func TestFleetImagesSmoke(t *testing.T) {
 		require.NoError(t, err)
 		fp, err := parseHostKeyFP(mustHost(t, hk))
 		require.NoError(t, err)
+		// 主 sshd 必须是 PID 1: kill_sessions 只保留 PID 1。
+		assert.Equal(t, "sshd", strings.TrimSpace(mustHost(t, "docker exec "+c+" cat /proc/1/comm")))
 
 		sync := func(buyers []string, mode string) AccessSyncResult {
 			t.Helper()
@@ -288,10 +290,13 @@ func TestFleetImagesSmoke(t *testing.T) {
 		_, err = fmt.Sscanf(strings.TrimSpace(mustHost(t, kill)), "@@killed %d", &killed)
 		require.NoError(t, err)
 		assert.GreaterOrEqual(t, killed, 1, "established session must be killed")
+		assert.Equal(t, "true", strings.TrimSpace(mustHost(t, "docker inspect -f '{{.State.Running}}' "+c)),
+			"kill_sessions must not stop the container (main sshd survives)")
 
 		// 解冻: 重新接入租约网络, 映射恢复到同一端口。
 		res = sync([]string{buyerLine}, syncConnect)
 		assert.True(t, res.Connected)
+		assert.True(t, res.Running)
 		assert.Equal(t, port, res.Port)
 		require.Eventually(t, func() bool { return canLogin(buyer) }, 30*time.Second, time.Second, "login after reconnect")
 
