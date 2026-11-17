@@ -25,9 +25,12 @@ const (
 )
 
 func (s *Service) registerLeaseExecutors() {
-	s.registerExecutor(KindStop, taskExecutor{timeout: stopExecTimeout, run: s.runStopTask, onDead: s.leaseTaskDead})
-	s.registerExecutor(KindPurge, taskExecutor{timeout: purgeExecTimeout, run: s.runPurgeTask, onDead: s.leaseTaskDead})
-	s.registerExecutor(KindKillSessions, taskExecutor{timeout: killExecTimeout, run: s.runKillSessionsTask, onDead: s.leaseTaskDead})
+	s.registerExecutor(KindStop, taskExecutor{timeout: stopExecTimeout, run: s.runStopTask, onRetry: s.leaseTaskRetry,
+		onDead: s.leaseTaskDead})
+	s.registerExecutor(KindPurge, taskExecutor{timeout: purgeExecTimeout, run: s.runPurgeTask, onRetry: s.leaseTaskRetry,
+		onDead: s.leaseTaskDead})
+	s.registerExecutor(KindKillSessions, taskExecutor{timeout: killExecTimeout, run: s.runKillSessionsTask, onRetry: s.leaseTaskRetry,
+		onDead: s.leaseTaskDead})
 	s.registerExecutor(KindSyncAccess, taskExecutor{timeout: syncAccessExecTimeout, run: s.runSyncAccessTask, onDead: s.leaseTaskDead})
 }
 
@@ -43,6 +46,53 @@ func (s *Service) leaseTaskDead(t *Task, lastErr string) {
 			slog.Error("写租约资源告警失败", "lease_id", pl.LeaseID, "error", err)
 		}
 	}
+	s.escalateBareMetalReclaim(t, lastErr)
+}
+
+// bareMetalEscalateAt 整机收尾任务第几次失败时升级为供给方带外处置(退避 1m+2m, 约 3 分钟内连续两次失败)。
+const bareMetalEscalateAt = 2
+
+// leaseTaskRetry 收尾任务失败待重试: 整机租约在第 bareMetalEscalateAt 次失败时即升级, 不等重试耗尽(约 4 小时)。
+func (s *Service) leaseTaskRetry(t *Task, lastErr string) {
+	if t.Attempts == bareMetalEscalateAt {
+		s.escalateBareMetalReclaim(t, lastErr)
+	}
+}
+
+// escalateBareMetalReclaim 整机租约的停止/清除/断开会话经管理连接执行不了时, 平台侧已无强制手段: 买家持有 sudo,
+// 可以改 sshd、删管理公钥、封管理端口。唯一可靠的兜底是供给方的带外控制(断网/BMC 关机)后重装, 因此通知供给方
+// 立即处置并写租约资源告警。容器租约不升级: 买家拿不到宿主机权限, 失败只可能是节点/网络问题, 按常规重试。
+func (s *Service) escalateBareMetalReclaim(t *Task, lastErr string) {
+	var pl LeaseTaskPayload
+	if err := jsonUnmarshal(t.Payload, &pl); err != nil || pl.LeaseID == 0 {
+		return
+	}
+	l, err := s.repo.getLease(s.repo.db, pl.LeaseID)
+	if err != nil || l == nil || l.DeliveryKind != "bare_metal" || l.NodeID != t.NodeID {
+		if err != nil {
+			slog.Error("整机回收升级: 读取租约失败", "lease_id", pl.LeaseID, "error", err)
+		}
+		return
+	}
+	n, err := s.repo.getNode(s.repo.db, t.NodeID)
+	if err != nil || n == nil {
+		slog.Error("整机回收升级: 读取节点失败", "node_id", t.NodeID, "error", err)
+		return
+	}
+	what := "到期回收"
+	if t.Kind == KindKillSessions {
+		what = "冻结断开"
+	}
+	slog.Error("运营告警: 整机租约管理连接无法执行, 已通知供给方带外处置", "task_id", t.ID, "kind", t.Kind,
+		"node_id", t.NodeID, "lease_no", l.LeaseNo, "attempt", t.Attempts, "error", lastErr)
+	if _, err := s.repo.setResourceAlert(s.repo.db, l.ID, fmt.Sprintf("整机%s失败(节点 #%d, 第 %d 次): %s; 已通知供给方断网/关机后重装",
+		what, t.NodeID, t.Attempts, truncate(lastErr, 200))); err != nil {
+		slog.Error("写租约资源告警失败", "lease_id", l.ID, "error", err)
+	}
+	s.notify(n.SupplierID, "整机租约需立即带外处置",
+		fmt.Sprintf("节点「%s」上的整机租约 %s 需要%s, 但平台经管理连接执行失败(%s)。买家在租期内持有 sudo, 可能已阻断平台管理。"+
+			"请立即通过机房/BMC(IPMI)将该机断网或关机, 之后重装操作系统并重新安装管理公钥, 在节点页提交重装确认; "+
+			"在此之前该机不会再被分配。", n.NodeName, l.LeaseNo, what, truncate(lastErr, 120)), t.NodeID)
 }
 
 func parseLeaseTask(t *Task) (LeaseTaskPayload, error) {

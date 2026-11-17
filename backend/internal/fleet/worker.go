@@ -29,10 +29,11 @@ type errTaskAborted struct{ msg string }
 func (e errTaskAborted) Error() string { return e.msg }
 
 // taskExecutor 一种任务类型的执行器。timeout 为单次执行上限(与锁租约无关)。run 返回 (结果, 错误): errTaskAborted/errProbeAborted → failed;
-// 其他错误 → 指数退避重试, 达到 max_attempts → dead 并调用 onDead(若有)。
+// 其他错误 → 指数退避重试(每次失败调用 onRetry, 若有), 达到 max_attempts → dead 并调用 onDead(若有)。
 type taskExecutor struct {
 	timeout time.Duration
 	run     func(ctx context.Context, t *Task) (any, error)
+	onRetry func(t *Task, lastErr string)
 	onDead  func(t *Task, lastErr string)
 }
 
@@ -192,6 +193,9 @@ func (s *Service) execute(ctx context.Context, t *Task) {
 		} else {
 			slog.Warn("fleet 任务失败, 稍后重试", "task_id", t.ID, "node_id", t.NodeID, "kind", t.Kind,
 				"attempt", t.Attempts, "retry_in", retryBackoff(t.Attempts), "error", err)
+			if e, ok := s.executorFor(t.Kind); ok && e.onRetry != nil {
+				e.onRetry(t, err.Error())
+			}
 		}
 	default:
 		slog.Info("fleet 任务完成", "task_id", t.ID, "node_id", t.NodeID, "kind", t.Kind, "lease_id", taskLeaseID(t),
