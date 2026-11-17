@@ -51,6 +51,7 @@ const (
 	KindKillSessions = "kill_sessions"
 	KindStop         = "stop"
 	KindPurge        = "purge"
+	KindSyncAccess   = "sync_access"
 )
 
 // 探活模式(写在 probe 任务 payload 中)。

@@ -31,7 +31,7 @@ func TestFleetDisabledByDefaultKeepsDefaults(t *testing.T) {
 }
 
 func TestFleetEnabledListsEveryMissingKey(t *testing.T) {
-	_, err := Load(writeFleetConfig(t, "server:\n  mode: debug\nfleet:\n  enabled: true\n"))
+	_, err := Load(writeFleetConfig(t, "server:\n  mode: debug\nfleet:\n  enabled: true\n  access_mode: gateway\n"))
 	if err == nil {
 		t.Fatal("enabled fleet without required keys must fail to load")
 	}
@@ -52,6 +52,7 @@ security:
   credential_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 fleet:
   enabled: true
+  access_mode: gateway
   controller_egress_ips: ["123.56.177.241"]
   base_images:
     - name: pytorch-2.4-cuda12
@@ -67,6 +68,45 @@ accessgw:
   hmac_secret: 0123456789abcdef0123456789abcdef
   host_key_fingerprint: SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s
 `
+
+// 直连映射(默认): 不需要任何 accessgw.* 与 selftest_key_file。
+func TestFleetDirectModeNeedsNoGateway(t *testing.T) {
+	_, err := Load(writeFleetConfig(t, "server:\n  mode: debug\nfleet:\n  enabled: true\n"))
+	if err == nil {
+		t.Fatal("enabled fleet without required keys must fail to load")
+	}
+	for _, key := range []string{"accessgw.", "fleet.selftest_key_file"} {
+		if strings.Contains(err.Error(), key) {
+			t.Errorf("direct mode must not require %s: %v", key, err)
+		}
+	}
+	d := strings.Repeat("d", 64)
+	body := `
+server:
+  mode: debug
+security:
+  credential_key: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+fleet:
+  enabled: true
+  controller_egress_ips: ["123.56.177.241"]
+  base_images:
+    - name: pytorch
+      ref: r.example.com/a@sha256:` + d + `
+  probe_image: r.example.com/p@sha256:` + d + `
+  min_driver_version: "535"
+`
+	cfg, err := Load(writeFleetConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Fleet.AccessMode != AccessModeDirect || cfg.Fleet.GatewayMode() {
+		t.Fatalf("access_mode default: %q", cfg.Fleet.AccessMode)
+	}
+	_, err = Load(writeFleetConfig(t, strings.Replace(body, "  enabled: true\n", "  enabled: true\n  access_mode: relay\n", 1)))
+	if err == nil || !strings.Contains(err.Error(), "fleet.access_mode 须为 direct 或 gateway: relay") {
+		t.Fatalf("unknown access_mode must be rejected: %v", err)
+	}
+}
 
 func TestFleetEnabledValidConfigLoads(t *testing.T) {
 	digest := strings.Repeat("a", 64)
@@ -153,5 +193,61 @@ func TestFleetEnabledRejectsMalformedCredentialKey(t *testing.T) {
 	body = strings.Replace(body, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "not-hex", 1)
 	if _, err := Load(writeFleetConfig(t, body)); err != nil {
 		t.Fatalf("fleet disabled must not validate credential_key: %v", err)
+	}
+}
+
+// 生产经 .env 注入: fleet.base_images 不能用 YAML 列表时, FLEET_BASE_IMAGES 按 JSON 解析并覆盖配置文件。
+func TestFleetBaseImagesFromEnvJSON(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	body := strings.ReplaceAll(validFleetYAML, "%s", digest)
+	ref := "registry.example.com/omnis/lease-base@sha256:" + strings.Repeat("b", 64)
+	t.Setenv("FLEET_BASE_IMAGES", `[{"name":"PyTorch 2.7 / CUDA 12.8","ref":"`+ref+`"}]`)
+	cfg, err := Load(writeFleetConfig(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Fleet.BaseImages) != 1 || cfg.Fleet.BaseImages[0].Name != "PyTorch 2.7 / CUDA 12.8" || cfg.Fleet.BaseImages[0].Ref != ref {
+		t.Fatalf("env base images: %+v", cfg.Fleet.BaseImages)
+	}
+
+	t.Setenv("FLEET_BASE_IMAGES", `[{"name":"x","ref":"registry.example.com/omnis/lease-base:latest"}]`)
+	if _, err := Load(writeFleetConfig(t, body)); err == nil || !strings.Contains(err.Error(), "fleet.base_images[0]") {
+		t.Fatalf("tag-only env image must be rejected: %v", err)
+	}
+	t.Setenv("FLEET_BASE_IMAGES", `name=x`)
+	if _, err := Load(writeFleetConfig(t, body)); err == nil || !strings.Contains(err.Error(), "JSON") {
+		t.Fatalf("malformed env must fail: %v", err)
+	}
+}
+
+// 其余 fleet/accessgw 键全部经环境变量注入(生产 /opt/wanxiang/backend/.env 的写法)。
+func TestFleetEnabledFromEnvOnly(t *testing.T) {
+	d := strings.Repeat("c", 64)
+	for k, v := range map[string]string{
+		"SECURITY_CREDENTIAL_KEY":       strings.Repeat("0123456789abcdef", 4),
+		"FLEET_ENABLED":                 "true",
+		"FLEET_ACCESS_MODE":             "gateway",
+		"FLEET_CONTROLLER_EGRESS_IPS":   "123.56.177.241",
+		"FLEET_BASE_IMAGES":             `[{"name":"pytorch","ref":"r.example.com/a@sha256:` + d + `"}]`,
+		"FLEET_PROBE_IMAGE":             "r.example.com/p@sha256:" + d,
+		"FLEET_MODEL_PULL_IMAGE":        "r.example.com/m@sha256:" + d,
+		"FLEET_MIN_DRIVER_VERSION":      "535",
+		"FLEET_SELFTEST_KEY_FILE":       "/etc/omnis/selftest_ed25519",
+		"ACCESSGW_PUBLIC_HOST":          "gw.example.com",
+		"ACCESSGW_INTERNAL_LISTEN":      "0.0.0.0:9090",
+		"ACCESSGW_EGRESS_IPS":           "1.2.3.4,5.6.7.8",
+		"ACCESSGW_UPSTREAM_PUBKEY":      "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample gw",
+		"ACCESSGW_HMAC_SECRET":          strings.Repeat("s", 32),
+		"ACCESSGW_HOST_KEY_FINGERPRINT": "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s",
+	} {
+		t.Setenv(k, v)
+	}
+	cfg, err := Load(writeFleetConfig(t, "server:\n  mode: debug\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Fleet.Enabled || len(cfg.Fleet.BaseImages) != 1 || len(cfg.AccessGW.EgressIPs) != 2 || cfg.AccessGW.PublicPort != 2222 ||
+		cfg.Fleet.ModelPullImage == "" || cfg.AccessGW.InternalListen != "0.0.0.0:9090" {
+		t.Fatalf("env-only config: %+v %+v", cfg.Fleet, cfg.AccessGW)
 	}
 }

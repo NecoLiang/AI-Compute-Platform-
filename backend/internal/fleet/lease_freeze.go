@@ -6,6 +6,8 @@ package fleet
 //       网关只放行 lease_state=active, 迁移同时刷新 access_changed_at, 新登录立即被拒。容器不停、卡不释放
 //       (核查现场); 冻结中到期由到期扫描停容器释放卡、保留数据卷(expireSuspended)。
 //       reserved/pending/provisioning: 租约不动, 开通流水线在 ⓪/⑥ 发现订单 frozen 即放弃。
+//       直连模式(fleet.access_mode=direct)没有网关拦截, kill_sessions 先把容器从全部网络断开(端口映射撤销)
+//       再断会话; 整机租约把账户 authorized_keys 改为只留平台公钥。
 // 解冻: 见 unfreezeLeaseTx。
 
 import (
@@ -101,6 +103,10 @@ func (s *Service) unfreezeLeaseTx(tx *sqlx.Tx, o *compute.Order) (*compute.Manag
 				return nil, err
 			}
 			if err := s.mustTransition(tx, l, to, ""); err != nil {
+				return nil, err
+			}
+			// 直连模式: 冻结时容器已断开网络, 入队 sync_access 重新接入(parked 只同步公钥, 开窗时接入)。
+			if err := s.enqueueSyncAccessTx(tx, l, "订单解冻"); err != nil {
 				return nil, err
 			}
 		}

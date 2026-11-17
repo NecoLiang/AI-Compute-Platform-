@@ -591,7 +591,7 @@ func (s *Service) reconcileNode(ctx context.Context, nodeID int64, leases []Leas
 				}
 				down(l, cause, "容器已停止且重启失败: "+err.Error())
 			case restarted:
-				slog.Info("在租容器已重启并通过网关自检", "lease_no", l.LeaseNo, "node_id", nodeID)
+				slog.Info("在租容器已重启并通过自检", "lease_no", l.LeaseNo, "node_id", nodeID)
 				up(l)
 			}
 		default:
@@ -607,12 +607,13 @@ var errGatewayDown = errors.New("访问网关不可用")
 var errLeaseMoved = errors.New("租约已不在租")
 
 // restartLeaseContainer 节点重启/容器退出后的恢复(docs/25 §25.5.2 重启策略):
-// ① 节点主机指纹(dialManaged 已校验) ② 重新下发 DOCKER-USER 规则(每节点一次) ③ docker start
-// ④ 容器 sshd 主机密钥须与开通时一致 ⑤ 经网关以系统自检身份登录, 容器内可见 GPU 须与租约卡槽一致。
+// ① 节点主机指纹(dialManaged 已校验) ② 网关模式: 重新下发 DOCKER-USER 规则(每节点一次) ③ docker start
+// ④ 容器 sshd 主机密钥须与开通时一致 ⑤ 以系统自检身份登录(网关模式经网关; 直连模式先同步公钥/接入网络再直连),
+// 容器内可见 GPU 须与租约卡槽一致。
 // ②失败不启动容器; ④⑤失败把容器停回去(不让未自检通过的环境对外), 下一轮再试。
 // 返回 (false, nil) 表示租约已不在租, 未操作。
 func (s *Service) restartLeaseContainer(ctx context.Context, client Runner, n *Node, l *Lease, fw *bool) (bool, error) {
-	if !*fw {
+	if !*fw && !s.directMode() {
 		if _, err := s.applyFirewall(ctx, client, n); err != nil {
 			return false, fmt.Errorf("重新下发租约端口防火墙规则失败(未启动容器): %w", err)
 		}
@@ -633,7 +634,7 @@ func (s *Service) restartLeaseContainer(ctx context.Context, client Runner, n *N
 	if err != nil || !strings.Contains(out, "@@started") {
 		return false, fmt.Errorf("docker start 失败: %v", errText(err))
 	}
-	if err := s.verifyRestarted(ctx, client, cur); err != nil {
+	if err := s.verifyRestarted(ctx, client, n, cur); err != nil {
 		s.stopBack(ctx, client, l.LeaseNo)
 		if errors.Is(err, errLeaseMoved) {
 			return false, nil
@@ -643,14 +644,16 @@ func (s *Service) restartLeaseContainer(ctx context.Context, client Runner, n *N
 	return true, nil
 }
 
-func (s *Service) verifyRestarted(ctx context.Context, client Runner, l *Lease) error {
-	return s.verifyContainer(ctx, client, l, SlotLeased, LeaseActive, LeaseSuspended)
+func (s *Service) verifyRestarted(ctx context.Context, client Runner, n *Node, l *Lease) error {
+	return s.verifyContainer(ctx, client, n, l, SlotLeased, LeaseActive, LeaseSuspended)
 }
 
-// verifyContainer 容器启动后自检: sshd 主机密钥与开通时一致、经网关系统身份登录、容器内可见 GPU 与租约在本节点上
-// 处于 slotState 的卡槽一致; 最后复核租约仍在本节点且处于 okStates 之一, 否则 errLeaseMoved。
+// verifyContainer 容器启动后自检: sshd 主机密钥与开通时一致、以系统身份登录(网关模式经网关; 直连模式先写公钥并接入
+// 租约网络, 再直连 节点地址:租约端口)、容器内可见 GPU 与租约在本节点上处于 slotState 的卡槽一致; 最后复核租约仍在
+// 本节点且处于 okStates 之一, 否则 errLeaseMoved。
 // 对账重启用 leased + active/suspended; 包夜开窗(S4 T-095)用 reserved + parked(开窗事务提交前租约仍是 parked)。
-func (s *Service) verifyContainer(ctx context.Context, client Runner, l *Lease, slotState string, okStates ...string) error {
+// 直连模式下复核时租约已被冻结(suspended): 断开网络并结束会话(网关模式由网关拒绝登录), 断开失败返回错误(容器被停回去)。
+func (s *Service) verifyContainer(ctx context.Context, client Runner, n *Node, l *Lease, slotState string, okStates ...string) error {
 	hk, err := hostKeyCommand(l.LeaseNo)
 	if err != nil {
 		return err
@@ -666,17 +669,13 @@ func (s *Service) verifyContainer(ctx context.Context, client Runner, l *Lease, 
 	if l.UpstreamHostKeyFP == nil || *l.UpstreamHostKeyFP != fp {
 		return fmt.Errorf("容器 sshd 主机密钥与开通时不一致(%s), 不恢复访问", fp)
 	}
-	if s.gateway == nil {
-		return fmt.Errorf("%w: 访问网关(cmd/accessgw)未接入, 无法经网关自检", errGatewayDown)
-	}
-	got, err := s.gateway.RecheckLease(ctx, l.LeaseNo)
-	if err != nil {
-		var de *gatewayDialError
-		var he *gatewayHostKeyError
-		if errors.As(err, &de) || errors.As(err, &he) {
-			return fmt.Errorf("%w: 经网关自检登录失败: %v", errGatewayDown, err)
+	var got string
+	if s.directMode() {
+		if got, err = s.directRecheck(ctx, client, n, l); err != nil {
+			return err
 		}
-		return fmt.Errorf("经网关自检登录失败: %w", err)
+	} else if got, err = s.gatewayRecheck(ctx, l); err != nil {
+		return err
 	}
 	slots, err := s.repo.leaseSlotsOnNode(s.repo.db, l.ID, l.NodeID)
 	if err != nil {
@@ -700,7 +699,61 @@ func (s *Service) verifyContainer(ctx context.Context, client Runner, l *Lease, 
 	if cur == nil || !slices.Contains(okStates, cur.State) || cur.NodeID != l.NodeID {
 		return errLeaseMoved
 	}
+	if s.directMode() && cur.State == LeaseSuspended {
+		if _, err := s.cutContainerAccess(ctx, client, n, cur); err != nil {
+			return fmt.Errorf("租约已冻结, 断开访问失败: %w", err)
+		}
+	}
 	return nil
+}
+
+// directRecheck 直连模式重启复检: 写公钥并接入租约网络(冻结中的租约不接入), 再以平台密钥直连登录执行 nvidia-smi -L。
+// 冻结中的租约无法从公网登录, 改为经管理连接 docker exec 读取 GPU 列表。
+func (s *Service) directRecheck(ctx context.Context, client Runner, n *Node, l *Lease) (string, error) {
+	mode := syncConnect
+	if l.State == LeaseSuspended {
+		mode = syncCut
+	}
+	res, err := s.syncContainerAccess(ctx, client, n, l, mode)
+	if err != nil {
+		return "", err
+	}
+	if res.Absent || !res.Running {
+		return "", fmt.Errorf("租约容器启动后未在运行")
+	}
+	if mode == syncCut {
+		cmd, err := containerGPUListCommand(l.LeaseNo)
+		if err != nil {
+			return "", err
+		}
+		out, err := runRemote(ctx, client, cmd, cmdTimeout)
+		if err != nil {
+			return "", fmt.Errorf("读取容器内 GPU 列表失败: %w", err)
+		}
+		return out, nil
+	}
+	user, port, fp, err := directEndpoint(l)
+	if err != nil {
+		return "", err
+	}
+	return s.directLogin(ctx, n, user, port, fp)
+}
+
+// gatewayRecheck 网关模式重启复检: 经网关以系统自检身份登录执行 nvidia-smi -L。
+func (s *Service) gatewayRecheck(ctx context.Context, l *Lease) (string, error) {
+	if s.gateway == nil {
+		return "", fmt.Errorf("%w: 访问网关(cmd/accessgw)未接入, 无法经网关自检", errGatewayDown)
+	}
+	got, err := s.gateway.RecheckLease(ctx, l.LeaseNo)
+	if err != nil {
+		var de *gatewayDialError
+		var he *gatewayHostKeyError
+		if errors.As(err, &de) || errors.As(err, &he) {
+			return "", fmt.Errorf("%w: 经网关自检登录失败: %v", errGatewayDown, err)
+		}
+		return "", fmt.Errorf("经网关自检登录失败: %w", err)
+	}
+	return got, nil
 }
 
 // stopBack 重启后校验未通过: 把容器停回去(尽力而为, 失败只记日志; 下一轮对账会再次处理)。

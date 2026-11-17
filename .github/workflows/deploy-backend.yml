@@ -55,6 +55,15 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
+      # internal/fleet TestRealSSHPiperdChain: 与网关镜像同一版本、同一校验和的 sshpiperd + failtoban。
+      - name: Fetch sshpiperd
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/sp.tgz https://github.com/tg123/sshpiper/releases/download/v1.6.1/sshpiperd_with_plugins_linux_x86_64.tar.gz
+          echo "95d423a70e843a7512a72fbb16c0fa5dc59217cf064cb3e277520fddffded1e1  /tmp/sp.tgz" | sha256sum -c -
+          mkdir -p /tmp/sshpiperd && tar -xzf /tmp/sp.tgz -C /tmp/sshpiperd sshpiperd plugins/failtoban
+          echo "SSHPIPERD_DIR=/tmp/sshpiperd" >> "$GITHUB_ENV"
+
       - name: Test
         run: go test ./... -v
 

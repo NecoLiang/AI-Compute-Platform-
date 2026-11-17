@@ -13,6 +13,7 @@ import (
 
 	"tokenfactory/internal/catalog"
 	"tokenfactory/internal/modeldeploy"
+	"tokenfactory/pkg/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -466,4 +467,23 @@ func TestModelDeployStopsWithLease(t *testing.T) {
 			assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM model_deployments WHERE lease_active_claim IS NOT NULL`))
 		})
 	}
+}
+
+// 买家看到的端口转发命令随访问模式: 网关模式经网关登录名, 直连模式 root@节点地址:租约映射端口。
+func TestModelDeployPortForwardCmdByAccessMode(t *testing.T) {
+	e := newMDEnv(t)
+	v := e.toStarting(t, false)
+	get := func() string {
+		t.Helper()
+		got, err := e.md.GetDeployment(mdBuyer, e.order.OrderNo, v.DeployNo)
+		require.NoError(t, err)
+		require.NotNil(t, got.Access)
+		return got.Access.PortForwardCmd
+	}
+	l := e.leaseNow(t)
+	require.NotNil(t, l.UpstreamPort)
+	assert.Equal(t, "ssh -p 2222 -N -L 8000:omnis-engine:8000 "+l.LeaseNo+"@gw.test", get())
+
+	e.s.cfg.AccessMode = config.AccessModeDirect
+	assert.Equal(t, fmt.Sprintf("ssh -p %d -N -L 8000:omnis-engine:8000 root@127.0.0.1", *l.UpstreamPort), get())
 }

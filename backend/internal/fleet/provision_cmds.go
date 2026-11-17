@@ -29,6 +29,13 @@ func shB64(script string) string {
 	return "echo " + base64.StdEncoding.EncodeToString([]byte(script)) + " | base64 -d | sh"
 }
 
+// execB64 同 shB64, 但以 exec 替换当前 shell 执行脚本: 作为容器入口时脚本(及其末尾 exec 的 sshd)就是 PID 1。
+// 管道形式(shB64)下 PID 1 是外层 sh, 主 sshd 只是它的子进程: kill_sessions 按"保留 PID 1"会连主 sshd 一起杀掉,
+// 容器随之退出; PID 1 的 sh 也不转发 SIGTERM, docker stop 只能等超时强杀。
+func execB64(script string) string {
+	return `exec sh -c "$(echo ` + base64.StdEncoding.EncodeToString([]byte(script)) + ` | base64 -d)"`
+}
+
 // gatewayIPv4s DOCKER-USER 规则与容器 from= 用的网关出口 IP。iptables 规则只写 IPv4: IPv6 出口须另行规划,
 // 此处明确拒绝而不是静默漏放行。
 func gatewayIPv4s(ips []string) ([]string, error) {
@@ -195,7 +202,7 @@ func createContainerCommand(sp leaseContainerSpec) (string, error) {
 	label := "--label omnis.lease=" + sp.LeaseNo
 	run := fmt.Sprintf("docker run -d --name %s %s --gpus %s --cpus %d --memory %dg --memory-swap %dg --pids-limit 8192 "+
 		"--shm-size %dg%s -v %s:/root/workspace --network %s -p %d:22 --restart no --entrypoint /bin/sh %s -c '%s'",
-		c, label, g, sp.CPUs, sp.MemGB, sp.MemGB, shmSizeGB(sp.MemGB), storage, v, nw, sp.Port, sp.Image, shB64(sp.InitShell))
+		c, label, g, sp.CPUs, sp.MemGB, sp.MemGB, shmSizeGB(sp.MemGB), storage, v, nw, sp.Port, sp.Image, execB64(sp.InitShell))
 	return "set -e; (docker network inspect " + nw + " >/dev/null 2>&1 || docker network create " + label + " " + nw + " >/dev/null); " +
 		"docker volume create " + label + " " + v + " >/dev/null; docker rm -f " + c + " >/dev/null 2>&1 || true; " +
 		run + " >/dev/null; echo @@created", nil

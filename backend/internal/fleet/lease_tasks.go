@@ -10,7 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// 租约收尾任务执行器(docs/25 §25.7, T-087): stop / purge(含 cleanup_only)/ kill_sessions。
+// 租约收尾任务执行器(docs/25 §25.7, T-087): stop / purge(含 cleanup_only)/ kill_sessions; 直连模式的 sync_access 见 direct.go。
 //
 // 共同约束:
 //   - 执行前读取租约当前状态, 已不需要执行(解冻、续租恢复、换节点等)→ errTaskAborted(failed, 不重试);
@@ -25,9 +25,13 @@ const (
 )
 
 func (s *Service) registerLeaseExecutors() {
-	s.registerExecutor(KindStop, taskExecutor{timeout: stopExecTimeout, run: s.runStopTask, onDead: s.leaseTaskDead})
-	s.registerExecutor(KindPurge, taskExecutor{timeout: purgeExecTimeout, run: s.runPurgeTask, onDead: s.leaseTaskDead})
-	s.registerExecutor(KindKillSessions, taskExecutor{timeout: killExecTimeout, run: s.runKillSessionsTask, onDead: s.leaseTaskDead})
+	s.registerExecutor(KindStop, taskExecutor{timeout: stopExecTimeout, run: s.runStopTask, onRetry: s.leaseTaskRetry,
+		onDead: s.leaseTaskDead})
+	s.registerExecutor(KindPurge, taskExecutor{timeout: purgeExecTimeout, run: s.runPurgeTask, onRetry: s.leaseTaskRetry,
+		onDead: s.leaseTaskDead})
+	s.registerExecutor(KindKillSessions, taskExecutor{timeout: killExecTimeout, run: s.runKillSessionsTask, onRetry: s.leaseTaskRetry,
+		onDead: s.leaseTaskDead})
+	s.registerExecutor(KindSyncAccess, taskExecutor{timeout: syncAccessExecTimeout, run: s.runSyncAccessTask, onDead: s.leaseTaskDead})
 }
 
 // leaseTaskDead stop/purge/kill_sessions 重试耗尽: 运营告警 + 租约 resource_alert(运营租约列表可见)。
@@ -42,6 +46,53 @@ func (s *Service) leaseTaskDead(t *Task, lastErr string) {
 			slog.Error("写租约资源告警失败", "lease_id", pl.LeaseID, "error", err)
 		}
 	}
+	s.escalateBareMetalReclaim(t, lastErr)
+}
+
+// bareMetalEscalateAt 整机收尾任务第几次失败时升级为供给方带外处置(退避 1m+2m, 约 3 分钟内连续两次失败)。
+const bareMetalEscalateAt = 2
+
+// leaseTaskRetry 收尾任务失败待重试: 整机租约在第 bareMetalEscalateAt 次失败时即升级, 不等重试耗尽(约 4 小时)。
+func (s *Service) leaseTaskRetry(t *Task, lastErr string) {
+	if t.Attempts == bareMetalEscalateAt {
+		s.escalateBareMetalReclaim(t, lastErr)
+	}
+}
+
+// escalateBareMetalReclaim 整机租约的停止/清除/断开会话经管理连接执行不了时, 平台侧已无强制手段: 买家持有 sudo,
+// 可以改 sshd、删管理公钥、封管理端口。唯一可靠的兜底是供给方的带外控制(断网/BMC 关机)后重装, 因此通知供给方
+// 立即处置并写租约资源告警。容器租约不升级: 买家拿不到宿主机权限, 失败只可能是节点/网络问题, 按常规重试。
+func (s *Service) escalateBareMetalReclaim(t *Task, lastErr string) {
+	var pl LeaseTaskPayload
+	if err := jsonUnmarshal(t.Payload, &pl); err != nil || pl.LeaseID == 0 {
+		return
+	}
+	l, err := s.repo.getLease(s.repo.db, pl.LeaseID)
+	if err != nil || l == nil || l.DeliveryKind != "bare_metal" || l.NodeID != t.NodeID {
+		if err != nil {
+			slog.Error("整机回收升级: 读取租约失败", "lease_id", pl.LeaseID, "error", err)
+		}
+		return
+	}
+	n, err := s.repo.getNode(s.repo.db, t.NodeID)
+	if err != nil || n == nil {
+		slog.Error("整机回收升级: 读取节点失败", "node_id", t.NodeID, "error", err)
+		return
+	}
+	what := "到期回收"
+	if t.Kind == KindKillSessions {
+		what = "冻结断开"
+	}
+	slog.Error("运营告警: 整机租约管理连接无法执行, 已通知供给方带外处置", "task_id", t.ID, "kind", t.Kind,
+		"node_id", t.NodeID, "lease_no", l.LeaseNo, "attempt", t.Attempts, "error", lastErr)
+	if _, err := s.repo.setResourceAlert(s.repo.db, l.ID, fmt.Sprintf("整机%s失败(节点 #%d, 第 %d 次): %s; 已通知供给方断网/关机后重装",
+		what, t.NodeID, t.Attempts, truncate(lastErr, 200))); err != nil {
+		slog.Error("写租约资源告警失败", "lease_id", l.ID, "error", err)
+	}
+	s.notify(n.SupplierID, "整机租约需立即带外处置",
+		fmt.Sprintf("节点「%s」上的整机租约 %s 需要%s, 但平台经管理连接执行失败(%s)。买家在租期内持有 sudo, 可能已阻断平台管理。"+
+			"请立即通过机房/BMC(IPMI)将该机断网或关机, 之后重装操作系统并重新安装管理公钥, 在节点页提交重装确认; "+
+			"在此之前该机不会再被分配。", n.NodeName, l.LeaseNo, what, truncate(lastErr, 120)), t.NodeID)
 }
 
 func parseLeaseTask(t *Task) (LeaseTaskPayload, error) {
@@ -453,30 +504,52 @@ func (s *Service) runKillSessionsTask(ctx context.Context, t *Task) (any, error)
 		return nil, err
 	}
 	defer client.Close()
+	if s.directMode() {
+		// 直连模式: 先切断入口(容器断开全部网络 / 整机 authorized_keys 只留平台公钥), 再结束已有会话。
+		n, err := s.repo.GetNode(t.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		if n == nil {
+			return nil, errTaskAborted{fmt.Sprintf("节点 #%d 已不存在", t.NodeID)}
+		}
+		if l.DeliveryKind == "bare_metal" {
+			if _, _, err := s.syncBareMetalKeys(ctx, client, n, l, true); err != nil {
+				return nil, err
+			}
+			return s.bareMetalKillSessions(ctx, client, l)
+		}
+		return s.cutContainerAccess(ctx, client, n, l)
+	}
 	if l.DeliveryKind == "bare_metal" {
 		return s.bareMetalKillSessions(ctx, client, l)
 	}
+	return s.killContainerSessions(ctx, client, l)
+}
+
+// killContainerSessions 结束租约容器内的全部会话(sshd 子进程); 容器未运行视为已完成。
+func (s *Service) killContainerSessions(ctx context.Context, client Runner, l *Lease) (KillSessionsOutcome, error) {
+	res := KillSessionsOutcome{LeaseNo: l.LeaseNo}
 	cmd, err := killSessionsCommand(l.LeaseNo)
 	if err != nil {
-		return nil, errTaskAborted{err.Error()}
+		return res, errTaskAborted{err.Error()}
 	}
 	out, err := runRemote(ctx, client, cmd, cmdTimeout)
 	if err != nil {
-		return nil, fmt.Errorf("断开容器内会话失败: %w", err)
+		return res, fmt.Errorf("断开容器内会话失败: %w", err)
 	}
-	res := KillSessionsOutcome{LeaseNo: l.LeaseNo}
 	for _, line := range nonEmptyLines(out) {
 		if line == "@@notrunning" {
 			return res, nil
 		}
 		if strings.HasPrefix(line, "@@killed ") {
 			if _, err := fmt.Sscanf(line, "@@killed %d", &res.Killed); err != nil {
-				return nil, fmt.Errorf("断开会话输出无法解析: %q", truncate(line, 80))
+				return res, fmt.Errorf("断开会话输出无法解析: %q", truncate(line, 80))
 			}
 			res.Running = true
 			slog.Info("冻结租约容器内会话已断开", "lease_no", l.LeaseNo, "killed", res.Killed)
 			return res, nil
 		}
 	}
-	return nil, fmt.Errorf("断开会话无结论输出: %q", truncate(strings.TrimSpace(out), 120))
+	return res, fmt.Errorf("断开会话无结论输出: %q", truncate(strings.TrimSpace(out), 120))
 }

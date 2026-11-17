@@ -40,3 +40,50 @@ The backend joins `config_default` for MySQL/Redis and
 `wanxiang-frontend_default` for the frontend. Port 8080 is bound only to
 `127.0.0.1`; the frontend container can use
 `http://wanxiang-backend:8080/api/v1`.
+
+## Managed rental (fleet) images and access gateway
+
+The backend also creates the internal network `omnis-accessgw-internal`
+(172.30.21.0/24, no outbound route) and mounts `/opt/wanxiang/backend/secrets`
+read-only at `/etc/omnis` (the fleet self-test key). Both are inert while
+`FLEET_ENABLED` is unset/false.
+
+`.github/workflows/fleet-images.yml` builds the four platform images
+(`images/probe`, `images/lease-base`, `images/model-pull`, `accessgw/`),
+pushes them to `ghcr.io/<owner>/omnis-fleet-<name>:<commit>` and, when the
+`ACR_REGISTRY`, `ACR_NAMESPACE`, `ACR_USERNAME` and `ACR_PASSWORD` secrets
+exist, to Alibaba Cloud ACR as well. It then runs the production command
+templates against the pushed images on a GPU-less runner
+(`TestFleetImagesSmoke`, `TestModelPullImageSmoke`). The job summary lists the
+`ref@sha256` values to put in the fleet configuration; configuration only
+accepts digests.
+
+### Buyer access mode
+
+`FLEET_ACCESS_MODE` selects how buyers reach a lease (docs/25 §25.6.0):
+
+- `direct` (default): the buyer connects with their registered public keys to
+  `node address:mapped lease port` and is root only inside the lease
+  container. The platform cuts access on the node through its management SSH:
+  expiry stops the container, freeze disconnects it from every Docker network
+  (which drops the port mapping) and kills its sessions, unfreeze reconnects
+  it. No gateway, secondary IP, second EIP, port 2222, `gw.*` DNS record,
+  `ACCESSGW_*` variables or `FLEET_SELFTEST_KEY_FILE` are needed. Suppliers
+  must open the lease port range inbound to the public (same-number
+  forwarding behind NAT, no source NAT).
+- `gateway`: the buyer logs in through the SSH gateway. Only this mode needs
+  the access gateway below.
+
+Before enabling fleet in either mode, migrations up to
+`038_sync_access.up.sql` must have been applied to the production database
+(production has no `schema_migrations` table; run each one manually with
+approval).
+
+The internal network and the `/etc/omnis` mount described above stay in
+place but are unused in `direct` mode.
+
+### Access gateway (`FLEET_ACCESS_MODE=gateway` only)
+
+The access gateway runs on the same ECS behind its own egress IP; see
+`accessgw/README.md` for the console prerequisites, `accessgw/setup.sh` and
+the variables needed to enable fleet in gateway mode.

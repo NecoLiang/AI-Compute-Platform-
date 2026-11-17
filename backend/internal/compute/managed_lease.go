@@ -164,12 +164,16 @@ func (s *Service) BeginManagedProvisioningTx(tx *sqlx.Tx, orderID int64) (*Order
 	return o, nil
 }
 
-// ManagedAccess 托管订单交付记录中写给买家的网关连接信息(不含节点 IP/端口)。
+// ManagedAccess 托管订单交付记录中写给买家的连接信息: 网关模式为网关入口(不含节点 IP/端口), 直连模式为
+// 节点地址 + 租约映射端口(fleet.access_mode)。Note 为空时用网关模式的说明。
 type ManagedAccess struct {
-	GatewayHost string
-	GatewayPort int
-	Login       string
+	Host  string
+	Port  int
+	Login string
+	Note  string
 }
+
+const managedGatewayNote = "平台托管租约: 经访问网关登录; 密码即本订单访问凭证 access_value, 推荐在账户中添加 SSH 公钥登录"
 
 // ActivateManagedOrderTx 开通步骤 ⑥ 的订单侧: provisioning → active, lease_start=自检通过时刻,
 // lease_end 按计费周期换算; 生成交付记录与访问凭证(access_value 即网关登录密码, C-06 沿用),
@@ -218,8 +222,11 @@ func (s *Service) ActivateManagedOrderTx(tx *sqlx.Tx, orderID int64, selftestAt 
 		return nil, err
 	}
 
-	info, err := json.Marshal(DeliverInfo{IpAddress: acc.GatewayHost, SshPort: acc.GatewayPort, Username: acc.Login,
-		CredentialNote: "平台托管租约: 经访问网关登录; 密码即本订单访问凭证 access_value, 推荐在账户中添加 SSH 公钥登录"})
+	note := acc.Note
+	if note == "" {
+		note = managedGatewayNote
+	}
+	info, err := json.Marshal(DeliverInfo{IpAddress: acc.Host, SshPort: acc.Port, Username: acc.Login, CredentialNote: note})
 	if err != nil {
 		return nil, err
 	}

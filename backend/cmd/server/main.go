@@ -164,26 +164,29 @@ func main() {
 			fleetSvc.SetBreachRefunder(paymentSvc)
 		}
 
-		// 访问网关 (docs/25 §25.6, T-085): 系统自检身份 + 内部接口(独立监听, 不挂公网路由)。
-		// 任一环节不可用即启动失败, 不降级为"跳过自检"。
-		signer, serr := fleet.LoadSelftestSigner(cfg.Fleet.SelftestKeyFile)
-		if serr != nil {
-			slog.Error("fleet.enabled=true 但系统自检私钥不可用", "error", serr)
-			os.Exit(1)
+		// 访问网关 (docs/25 §25.6, T-085): 仅 fleet.access_mode=gateway 时装配。系统自检身份 + 内部接口(独立监听,
+		// 不挂公网路由), 任一环节不可用即启动失败, 不降级为"跳过自检"。直连模式(缺省)买家直连节点映射端口,
+		// 平台在节点 Docker 层断连, 不需要网关。
+		if cfg.Fleet.GatewayMode() {
+			signer, serr := fleet.LoadSelftestSigner(cfg.Fleet.SelftestKeyFile)
+			if serr != nil {
+				slog.Error("fleet.enabled=true 但系统自检私钥不可用", "error", serr)
+				os.Exit(1)
+			}
+			gwClient, gerr := fleet.NewGatewayClient(cfg.AccessGW, signer, rdb)
+			if gerr != nil {
+				slog.Error("fleet.enabled=true 但访问网关自检客户端配置不完整", "error", gerr)
+				os.Exit(1)
+			}
+			fleetSvc.SetGateway(gwClient)
+			gwAPI, aerr := fleet.NewGatewayAPI(fleetSvc, rdb, cfg.AccessGW.HMACSecret, gwClient.SelftestFingerprint())
+			if aerr != nil {
+				slog.Error("访问网关内部接口无法初始化", "error", aerr)
+				os.Exit(1)
+			}
+			internalSrv = &http.Server{Addr: cfg.AccessGW.InternalListen, Handler: gwAPI.Router(),
+				ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
 		}
-		gwClient, gerr := fleet.NewGatewayClient(cfg.AccessGW, signer, rdb)
-		if gerr != nil {
-			slog.Error("fleet.enabled=true 但访问网关自检客户端配置不完整", "error", gerr)
-			os.Exit(1)
-		}
-		fleetSvc.SetGateway(gwClient)
-		gwAPI, aerr := fleet.NewGatewayAPI(fleetSvc, rdb, cfg.AccessGW.HMACSecret, gwClient.SelftestFingerprint())
-		if aerr != nil {
-			slog.Error("访问网关内部接口无法初始化", "error", aerr)
-			os.Exit(1)
-		}
-		internalSrv = &http.Server{Addr: cfg.AccessGW.InternalListen, Handler: gwAPI.Router(),
-			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
 	}
 
 	catalogSvc := catalog.NewService(catalog.NewRepository(sqlDB))

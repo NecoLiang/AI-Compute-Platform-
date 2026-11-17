@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
-// ports P11/P12: 在租约端口段的空闲端口起临时监听, 网关自检必须能连上(P11), 主服务出口必须连不上(P12)。
+// ports P11/P12: 在租约端口段的空闲端口起临时监听。
+//   - 网关模式: 网关自检必须能连上(P11), 主服务出口必须连不上(P12)。
+//   - 直连模式(portsDirect): 平台从公网入口必须能连上(P11); 断开监听容器的网络后必须连不上、重新接入后必须恢复(P12),
+//     即实测本节点 Docker 能按网络撤销/恢复端口映射——冻结断连与解冻恢复依赖这一点。
 func (p *probeRun) ports(ctx context.Context) {
 	image := p.s.cfg.ProbeImage
 	if p.mode == ProbePortRecheck {
@@ -48,6 +51,10 @@ func (p *probeRun) ports(ctx context.Context) {
 		return
 	}
 	name := fmt.Sprintf("omnis-probe-%d-%s", p.n.ID, randomSuffix())
+	if p.s.directMode() {
+		p.portsDirect(ctx, image, name, port)
+		return
+	}
 	cmd, err := portListenerCommand(image, name, port)
 	if err != nil {
 		p.portsFail(err.Error())
@@ -94,6 +101,90 @@ func (p *probeRun) ports(ctx context.Context) {
 	default:
 		p.set("P12", true, fmt.Sprintf("从平台主服务出口连接 %s:%d 失败(符合预期)。注: 只能证明主服务出口连不上, 不能证明对全网关闭", host, port))
 	}
+}
+
+// portsDirect 直连模式 P11/P12(见 ports)。
+func (p *probeRun) portsDirect(ctx context.Context, image, name string, port int) {
+	cmd, err := portListenerNetCommand(image, name, port)
+	if err != nil {
+		p.portsFail(err.Error())
+		return
+	}
+	defer p.cleanupNet(name)
+	out, err := p.run(ctx, cmd)
+	if err != nil {
+		p.portsFail(fmt.Sprintf("端口 %d 上的临时监听容器未能启动: %s", port, errText(err)))
+		return
+	}
+	if !strings.Contains(out, "@@up") {
+		p.portsFail(fmt.Sprintf("端口 %d 上的临时监听容器已创建, 但 15 秒内宿主机本地未监听(容器内监听进程未起: 检查探针镜像是否含 python3)", port))
+		return
+	}
+	host := *p.n.SSHHost
+	d := p.s.dialer.with(5*time.Second, 2)
+	reach := func() error {
+		conn, err := d.TCPCheck(ctx, host, port)
+		if err == nil {
+			_ = conn.Close()
+		}
+		return err
+	}
+
+	switch err := reach(); {
+	case errors.Is(err, ErrAddrNotAllowed):
+		slog.Warn("探活 P11: 目标地址命中拒绝名单", "node_id", p.n.ID, "error", err)
+		p.portsFail("管理端口不可达")
+		return
+	case err != nil:
+		slog.Warn("探活 P11: 直连租约端口失败", "node_id", p.n.ID, "host", host, "port", port, "error", err)
+		p.portsFail(fmt.Sprintf("从平台连接 %s:%d 失败(检查租约端口段是否已对公网放行入方向, NAT 节点须同号映射端口段)", host, port))
+		return
+	default:
+		p.set("P11", true, fmt.Sprintf("从平台连接 %s:%d 成功。注: 只能证明平台出口可达, 买家能否连上取决于端口段是否对公网开放", host, port))
+	}
+
+	toggle := func(connect bool, want string) error {
+		cmd, err := probeNetToggleCommand(name, port, connect)
+		if err != nil {
+			return err
+		}
+		out, err := p.run(ctx, cmd)
+		if err != nil {
+			return fmt.Errorf("%s", errText(err))
+		}
+		if !strings.Contains(out, want) {
+			return fmt.Errorf("宿主机本地端口状态与预期不符: %s", truncate(strings.TrimSpace(out), 80))
+		}
+		return nil
+	}
+	if err := toggle(false, "@@closed"); err != nil {
+		p.set("P12", false, fmt.Sprintf("断开监听容器网络后端口 %d 未关闭(%v): 本节点 Docker 不能按网络撤销端口映射, 无法切断买家连接", port, err))
+		return
+	}
+	if err := reach(); err == nil {
+		p.set("P12", false, fmt.Sprintf("断开监听容器网络后平台仍能连上 %s:%d: 本节点 Docker 不能按网络撤销端口映射(或端口前有其他转发), 无法切断买家连接", host, port))
+		return
+	}
+	if err := toggle(true, "@@open"); err != nil {
+		p.set("P12", false, fmt.Sprintf("重新接入网络后端口 %d 未恢复(%v): 本节点 Docker 不能恢复端口映射, 解冻后买家将无法连接", port, err))
+		return
+	}
+	if err := reach(); err != nil {
+		p.set("P12", false, fmt.Sprintf("重新接入网络后宿主机本地已恢复, 但平台连接 %s:%d 失败: %v", host, port, err))
+		return
+	}
+	p.set("P12", true, fmt.Sprintf("断开网络后 %s:%d 不可连、重新接入后恢复(冻结断连/解冻恢复可用)", host, port))
+}
+
+// cleanupNet 删除直连端口自检的临时容器与网络(独立超时)。
+func (p *probeRun) cleanupNet(name string) {
+	cmd, err := cleanupNetCommand(name)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _ = p.client.Run(ctx, cmd)
 }
 
 func (p *probeRun) portsFail(msg string) {

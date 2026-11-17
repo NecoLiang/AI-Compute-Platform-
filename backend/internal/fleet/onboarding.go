@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"tokenfactory/pkg/config"
 	"tokenfactory/pkg/errcode"
 	"tokenfactory/pkg/netguard"
 
@@ -38,6 +39,7 @@ func hostKeyState(n *Node) HostKeyState {
 // Onboarding GET /supplier/nodes/:id/onboarding 返回内容。
 type Onboarding struct {
 	NodeID              int64             `json:"node_id"`
+	AccessMode          string            `json:"access_mode"` // gateway / direct(fleet.access_mode)
 	VerifyStatus        string            `json:"verify_status"`
 	AuthorizedKeysLine  string            `json:"authorized_keys_line"`
 	ControllerEgressIPs []string          `json:"controller_egress_ips"`
@@ -53,6 +55,7 @@ type Onboarding struct {
 }
 
 // Onboarding ③: 管理公钥行(带 from= 限制)、控制面/网关出口 IP、按发行版生成的租约端口放行脚本。
+// 直连模式: 买家直连租约端口段, 不需要网关出口 IP 与来源限制脚本(gateway_egress_ips 为空、firewall_scripts 为空对象)。
 func (s *Service) Onboarding(supplierID, nodeID int64) (*Onboarding, error) {
 	n, err := s.getOwned(supplierID, nodeID)
 	if err != nil {
@@ -61,7 +64,8 @@ func (s *Service) Onboarding(supplierID, nodeID int64) (*Onboarding, error) {
 	if n.MgmtPubkey == nil || *n.MgmtPubkey == "" {
 		return nil, errcode.New(errcode.InternalError, "节点缺少管理公钥, 请删除节点后重新添加")
 	}
-	if len(s.gwEgress) == 0 {
+	direct := s.directMode()
+	if !direct && len(s.gwEgress) == 0 {
 		return nil, errcode.New(errcode.InternalError, "accessgw.egress_ips 未配置: 无法生成租约端口放行规则")
 	}
 	line, err := authorizedKeysLine(*n.MgmtPubkey, s.cfg.ControllerEgressIPs)
@@ -69,13 +73,23 @@ func (s *Service) Onboarding(supplierID, nodeID int64) (*Onboarding, error) {
 		return nil, errcode.Newf(errcode.InternalError, "生成管理公钥行失败: %v", err)
 	}
 	start, end := portRange(n)
-	scripts, err := firewallScripts(s.gwEgress, start, end)
-	if err != nil {
-		return nil, errcode.Newf(errcode.InternalError, "生成端口放行脚本失败: %v", err)
+	scripts := map[string]string{}
+	gwIPs := []string{}
+	portReq := "管理 SSH 端口对控制面出口 IP 可达; 租约端口段只对网关出口 IP 开放(见放行脚本)"
+	mode := config.AccessModeGateway
+	if direct {
+		mode = config.AccessModeDirect
+		portReq = fmt.Sprintf("管理 SSH 端口对控制面出口 IP 可达; 租约端口段 %d-%d 对公网(买家)开放入方向(云安全组/NAT 端口映射须同号映射), "+
+			"买家用自己的公钥直连 节点地址:租约端口; 节点不得对来源地址做 SNAT(平台公钥行限定了控制面出口 IP)", start, end)
+	} else {
+		if scripts, err = firewallScripts(s.gwEgress, start, end); err != nil {
+			return nil, errcode.Newf(errcode.InternalError, "生成端口放行脚本失败: %v", err)
+		}
+		gwIPs = s.gwEgress
 	}
 	return &Onboarding{
-		NodeID: n.ID, VerifyStatus: n.VerifyStatus, AuthorizedKeysLine: line,
-		ControllerEgressIPs: s.cfg.ControllerEgressIPs, GatewayEgressIPs: s.gwEgress,
+		NodeID: n.ID, AccessMode: mode, VerifyStatus: n.VerifyStatus, AuthorizedKeysLine: line,
+		ControllerEgressIPs: s.cfg.ControllerEgressIPs, GatewayEgressIPs: gwIPs,
 		LeasePortStart: start, LeasePortEnd: end,
 		SSHHost: n.SSHHost, SSHPort: n.SSHPort, SSHUser: n.SSHUser,
 		HostKey: hostKeyState(n), FirewallScripts: scripts,
@@ -83,7 +97,7 @@ func (s *Service) Onboarding(supplierID, nodeID int64) (*Onboarding, error) {
 			"Linux x86_64 + systemd; NVIDIA 驱动 ≥ " + s.cfg.MinDriverVersion,
 			"Docker ≥ 24 + nvidia-container-toolkit, docker run --gpus 可用",
 			"管理账户须能执行 docker(docker 组或 root), 不要求 sudo; 注意 docker 组权限等同 root",
-			"管理 SSH 端口对控制面出口 IP 可达; 租约端口段只对网关出口 IP 开放(见放行脚本)",
+			portReq,
 			"分卡出租要求 Docker 数据目录位于 xfs+pquota(--storage-opt size= 可用), 否则只能整机出租",
 		},
 	}, nil

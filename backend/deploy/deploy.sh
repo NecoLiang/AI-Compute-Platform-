@@ -12,6 +12,8 @@ esac
 deploy_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 compose_file="$deploy_dir/compose.yml"
 env_file="$deploy_dir/.env"
+# fleet 自检私钥目录(deploy/accessgw/setup.sh 写入 selftest_ed25519); fleet 关闭时为空目录。
+secrets_dir="$deploy_dir/secrets"
 image="wanxiang-backend:$release_tag"
 candidate="wanxiang-backend-candidate"
 
@@ -42,6 +44,8 @@ for dependency in wanxiang-mysql wanxiang-redis; do
 done
 
 docker image inspect "$image" >/dev/null
+mkdir -p "$secrets_dir"
+chmod 700 "$secrets_dir"
 docker rm -f "$candidate" >/dev/null 2>&1 || true
 
 cleanup() {
@@ -75,6 +79,7 @@ docker run -d \
   --env SERVER_MODE=release \
   --env REDIS_ADDR=wanxiang-redis:6379 \
   --network config_default \
+  --volume "$secrets_dir:/etc/omnis:ro" \
   --read-only \
   --tmpfs /tmp \
   --cap-drop ALL \

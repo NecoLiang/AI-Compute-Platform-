@@ -351,7 +351,7 @@ type LeaseSource interface {
   "access": {
     "base_url": "http://omnis-engine:8000/v1",
     "served_model": "qwen2.5-7b-instruct",
-    "port_forward_cmd": "ssh -p 2222 -N -L 8000:omnis-engine:8000 l-7f3k9q2a@gw.omnisline.com"
+    "port_forward_cmd": "ssh -p 40007 -N -L 8000:omnis-engine:8000 root@203.0.113.20"
   },
   "cache": null,
   "restart_count": 1,
@@ -375,7 +375,7 @@ type LeaseSource interface {
 | `state` | `pending/checking/pulling/starting/running/restarting/stopping/stopped/failed`（§27.6） |
 | `health` | `unknown/healthy/degraded/unhealthy`；只在 `running/restarting` 有意义 |
 | `health_reason` | `container_down` `oom_killed` `health_failed` `canary_failed` `gpu_fatal`（unhealthy）；`capacity_saturated` `preempting` `ttft_slow` `gpu_hot` `ecc_corrected_rising` `recently_restarted`（degraded）；`node_unreachable`（unknown）。`health_reason_text` 为中文说明 |
-| `access` | 仅 `starting/running/restarting` 非 null。`base_url` 在租约容器内可用；`port_forward_cmd` 仅平台配置了网关地址时给出（否则省略） |
+| `access` | 仅 `starting/running/restarting` 非 null。`base_url` 在租约容器内可用；`port_forward_cmd` 随 `fleet.access_mode`：`direct`（默认）为 `ssh -p <租约映射端口> -N -L 8000:omnis-engine:8000 root@<节点地址>`（示例即此形式，租约尚无映射端口时省略）；`gateway` 为 `ssh -p <网关端口> -N -L 8000:omnis-engine:8000 <lease_no>@<网关地址>`，仅平台配置了网关地址时给出 |
 | `cache` | 仅 `pulling` 时非 null：`{"state":"downloading","bytes_done":8053063680,"weights_bytes":16000000000}`；`state` 取 `downloading/ready/failed/evicting` |
 | `engine_cpus/engine_memory_gb` | 引擎容器配额（租约配额对半，见 docs/27 "S5 实现口径"），启动前为 null |
 | `next_restart_at` | 已排定的自动重启时间（退避中）；为 null 表示没有等待中的重启 |

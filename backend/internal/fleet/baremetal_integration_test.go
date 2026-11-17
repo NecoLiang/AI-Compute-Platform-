@@ -332,6 +332,48 @@ func TestBareMetalFreezeAndSuspendedExpiry(t *testing.T) {
 	assert.Equal(t, VerifyNeedsReimage, e.node(t).VerifyStatus)
 }
 
+// 买家用 sudo 阻断了平台管理(脚本执行失败): 第 2 次失败即通知供给方带外断网/关机并重装, 不等重试耗尽;
+// 死信时再通知一次。容器租约不走这条升级。
+func TestBareMetalReclaimFailureEscalatesToSupplier(t *testing.T) {
+	e := newBMEnv(t, true)
+	expireLease(t, e.provEnv)
+	e.s.ExpiryRound(context.Background())
+	require.Equal(t, LeasePurging, e.leaseNow(t).State)
+	escalations := func() int {
+		return countRows(t, e.db, `SELECT COUNT(*) FROM notifications WHERE user_id=20 AND title='整机租约需立即带外处置'
+			AND content LIKE ?`, "%"+e.lease.LeaseNo+"%BMC%")
+	}
+	fail := func() *Task {
+		t.Helper()
+		e.host.mu.Lock()
+		e.host.fail = &fakeReply{Stderr: "Permission denied", Code: 1}
+		e.host.mu.Unlock()
+		got := runOne(t, e.s)
+		require.NotNil(t, got)
+		require.Equal(t, KindPurge, got.Kind)
+		return got
+	}
+
+	got := fail()
+	assert.Equal(t, TaskPending, got.State)
+	assert.Equal(t, 0, escalations(), "第 1 次失败按常规重试")
+	assert.Nil(t, e.leaseNow(t).ResourceAlert)
+
+	e.db.MustExec(`UPDATE node_tasks SET run_after=NOW() WHERE id=?`, got.ID)
+	got = fail()
+	assert.Equal(t, TaskPending, got.State)
+	assert.Equal(t, 1, escalations(), "第 2 次失败即升级")
+	l := e.leaseNow(t)
+	require.NotNil(t, l.ResourceAlert)
+	assert.Contains(t, *l.ResourceAlert, "整机到期回收失败")
+
+	e.db.MustExec(`UPDATE node_tasks SET run_after=NOW(), max_attempts=3 WHERE id=?`, got.ID)
+	got = fail()
+	assert.Equal(t, TaskDead, got.State)
+	assert.Equal(t, 2, escalations(), "死信时再通知一次")
+	assert.Equal(t, VerifyNeedsReimage, e.node(t).VerifyStatus, "闸门保持, 节点不可售")
+}
+
 // 供给方先重装、清除任务连到新系统(指纹不符): 节点保持 needs_reimage(不变成 key_mismatch);
 // 重装确认时 purging 租约随重装结案, 待执行的 purge 作废。
 func TestBareMetalReimageConfirmFinalizesPurging(t *testing.T) {

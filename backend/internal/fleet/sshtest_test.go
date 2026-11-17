@@ -39,6 +39,7 @@ type fakeNode struct {
 	pwLogins   int
 	pwTries    int // 收到的密码/键盘交互认证次数(含失败): 用于断言密码根本没有发出
 	xidLines   []string
+	down       bool // 模拟入口被切断(容器断开网络): 新连接立即关闭
 }
 
 // fakeXidHeader 与 xidCommand 真实输出同格式的头部: 节点时钟取当前时间, 日志自两天前开始(时间窗完整覆盖)。
@@ -154,6 +155,32 @@ func (f *fakeNode) Fingerprint() string {
 	return ssh.FingerprintSHA256(f.hostKey.PublicKey())
 }
 
+// HostKey 当前主机公钥。
+func (f *fakeNode) HostKey() ssh.PublicKey {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hostKey.PublicKey()
+}
+
+// HostKeyLine 主机公钥的 authorized_keys 格式(容器 sshd 主机公钥读取命令的输出)。
+func (f *fakeNode) HostKeyLine() string {
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(f.HostKey())))
+}
+
+// SetAuthorized 整体替换授权公钥(模拟 authorized_keys 被重写)。
+func (f *fakeNode) SetAuthorized(keys []ssh.PublicKey) {
+	f.mu.Lock()
+	f.authorized = append([]ssh.PublicKey(nil), keys...)
+	f.mu.Unlock()
+}
+
+// SetDown 切断/恢复入口。
+func (f *fakeNode) SetDown(down bool) {
+	f.mu.Lock()
+	f.down = down
+	f.mu.Unlock()
+}
+
 func (f *fakeNode) Override(prefix string, r fakeReply) {
 	f.mu.Lock()
 	f.overrides[prefix] = r
@@ -197,8 +224,11 @@ func (f *fakeNode) serve() {
 func (f *fakeNode) handle(c net.Conn) {
 	defer c.Close()
 	f.mu.Lock()
-	hk := f.hostKey
+	hk, down := f.hostKey, f.down
 	f.mu.Unlock()
+	if down {
+		return
+	}
 	cfg := &ssh.ServerConfig{
 		PasswordCallback: func(_ ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
 			f.mu.Lock()

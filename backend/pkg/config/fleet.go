@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"regexp"
@@ -18,7 +19,12 @@ import (
 // enabled=false(默认)时 fleet 不接线、托管商品不可提交审核与下单, 人工模式零变化;
 // enabled=true 时缺任何必填项启动即失败, 并一次列出全部缺失键, 不做降级。
 type FleetConfig struct {
-	Enabled             bool
+	Enabled bool
+	// AccessMode 买家访问租约的方式(docs/25 §25.6 修订):
+	//   direct(默认)  买家直连 节点IP:租约映射端口, 只拿容器内 root; 平台经节点管理 SSH 随时断网/停容器/撤公钥,
+	//                 不经任何平台中转, 不需要 accessgw.* 与 selftest_key_file;
+	//   gateway       经 SSH 网关(cmd/accessgw)映射登录, 节点租约端口只对网关出口开放。
+	AccessMode          string
 	Workers             int
 	ProbeConcurrency    int
 	ControllerEgressIPs []string
@@ -114,6 +120,7 @@ type AccessGWConfig struct {
 func loadFleet(v *viper.Viper, cfg *Config) error {
 	f := FleetConfig{
 		Enabled:             v.GetBool("fleet.enabled"),
+		AccessMode:          strings.ToLower(strings.TrimSpace(v.GetString("fleet.access_mode"))),
 		Workers:             v.GetInt("fleet.workers"),
 		ProbeConcurrency:    v.GetInt("fleet.probe_concurrency"),
 		ControllerEgressIPs: cleanList(v.GetStringSlice("fleet.controller_egress_ips")),
@@ -146,7 +153,14 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 			PoolAddrs:    cleanList(v.GetStringSlice("fleet.mining.pool_addrs")),
 		},
 	}
-	if err := v.UnmarshalKey("fleet.base_images", &f.BaseImages); err != nil {
+	// 环境变量 FLEET_BASE_IMAGES 只能是字符串, 按 JSON 解析: [{"name":"…","ref":"…@sha256:…"}]。
+	if s, ok := v.Get("fleet.base_images").(string); ok {
+		if strings.TrimSpace(s) != "" {
+			if err := json.Unmarshal([]byte(s), &f.BaseImages); err != nil {
+				return fmt.Errorf("fleet.base_images 格式错误(环境变量应为 JSON [{\"name\",\"ref\"}] 列表): %w", err)
+			}
+		}
+	} else if err := v.UnmarshalKey("fleet.base_images", &f.BaseImages); err != nil {
 		return fmt.Errorf("fleet.base_images 格式错误(应为 [{name, ref}] 列表): %w", err)
 	}
 	if r := strings.TrimSpace(v.GetString("fleet.engine_port_range")); r != "" {
@@ -176,7 +190,19 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 	return validateFleet(cfg)
 }
 
+// 买家访问方式(FleetConfig.AccessMode)。
+const (
+	AccessModeDirect  = "direct"
+	AccessModeGateway = "gateway"
+)
+
+// GatewayMode 是否经 SSH 网关交付(否则为直连映射)。
+func (f FleetConfig) GatewayMode() bool { return f.AccessMode == AccessModeGateway }
+
 func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
+	if f.AccessMode == "" {
+		f.AccessMode = AccessModeDirect
+	}
 	if f.Workers <= 0 {
 		f.Workers = 8
 	}
@@ -291,7 +317,12 @@ func validateFleet(cfg *Config) error {
 	if f.MinDriverVersion == "" {
 		missing = append(missing, "fleet.min_driver_version")
 	}
-	if f.SelftestKeyFile == "" {
+	switch f.AccessMode {
+	case AccessModeDirect, AccessModeGateway:
+	default:
+		invalid = append(invalid, "fleet.access_mode 须为 direct 或 gateway: "+f.AccessMode)
+	}
+	if f.GatewayMode() && f.SelftestKeyFile == "" {
 		missing = append(missing, "fleet.selftest_key_file")
 	}
 	if strings.TrimSpace(cfg.Security.CredentialKey) == "" {
@@ -300,6 +331,36 @@ func validateFleet(cfg *Config) error {
 		// 节点管理私钥用它加密落库; 非法密钥不能"带病启动"(否则节点接入/探活全部 50000)。
 		invalid = append(invalid, "security.credential_key 须为 64 位 hex(32 字节)")
 	}
+	if f.GatewayMode() {
+		missing, invalid = validateAccessGW(gw, missing, invalid)
+	}
+	if f.Probe.MinPerfRatio > 1 {
+		invalid = append(invalid, "fleet.probe.min_perf_ratio 须在 (0,1]")
+	}
+	if !modelCacheDirRe.MatchString(f.ModelCacheDir) || strings.Contains(f.ModelCacheDir, "..") {
+		invalid = append(invalid, "fleet.model_cache_dir 须为绝对路径, 仅含字母数字与 ._/-, 不含 ..")
+	}
+	if f.EnginePortStart < 1024 || f.EnginePortEnd > 65535 || f.EnginePortStart > f.EnginePortEnd {
+		invalid = append(invalid, "fleet.engine_port_range 须为 \"起-止\", 1024 ≤ 起 ≤ 止 ≤ 65535")
+	}
+	if f.ModelPullImage != "" && !IsDigestRef(f.ModelPullImage) {
+		invalid = append(invalid, "fleet.model_pull_image 须按 digest 固定(…@sha256:<64hex>)")
+	}
+	if len(missing) == 0 && len(invalid) == 0 {
+		return nil
+	}
+	msg := "fleet.enabled=true 但配置不完整"
+	if len(missing) > 0 {
+		msg += "; 缺少: " + strings.Join(missing, ", ")
+	}
+	if len(invalid) > 0 {
+		msg += "; 非法: " + strings.Join(invalid, "; ")
+	}
+	return fmt.Errorf("%s", msg)
+}
+
+// validateAccessGW 网关模式(fleet.access_mode=gateway)才需要的 accessgw.* 项。
+func validateAccessGW(gw AccessGWConfig, missing, invalid []string) ([]string, []string) {
 	if gw.PublicHost == "" {
 		missing = append(missing, "accessgw.public_host")
 	}
@@ -329,29 +390,7 @@ func validateFleet(cfg *Config) error {
 	} else if !strings.HasPrefix(gw.HostKeyFingerprint, "SHA256:") {
 		invalid = append(invalid, "accessgw.host_key_fingerprint 须为 SHA256:... 格式(ssh-keygen -lf 输出)")
 	}
-	if f.Probe.MinPerfRatio > 1 {
-		invalid = append(invalid, "fleet.probe.min_perf_ratio 须在 (0,1]")
-	}
-	if !modelCacheDirRe.MatchString(f.ModelCacheDir) || strings.Contains(f.ModelCacheDir, "..") {
-		invalid = append(invalid, "fleet.model_cache_dir 须为绝对路径, 仅含字母数字与 ._/-, 不含 ..")
-	}
-	if f.EnginePortStart < 1024 || f.EnginePortEnd > 65535 || f.EnginePortStart > f.EnginePortEnd {
-		invalid = append(invalid, "fleet.engine_port_range 须为 \"起-止\", 1024 ≤ 起 ≤ 止 ≤ 65535")
-	}
-	if f.ModelPullImage != "" && !IsDigestRef(f.ModelPullImage) {
-		invalid = append(invalid, "fleet.model_pull_image 须按 digest 固定(…@sha256:<64hex>)")
-	}
-	if len(missing) == 0 && len(invalid) == 0 {
-		return nil
-	}
-	msg := "fleet.enabled=true 但配置不完整"
-	if len(missing) > 0 {
-		msg += "; 缺少: " + strings.Join(missing, ", ")
-	}
-	if len(invalid) > 0 {
-		msg += "; 非法: " + strings.Join(invalid, "; ")
-	}
-	return fmt.Errorf("%s", msg)
+	return missing, invalid
 }
 
 // modelCacheDirRe 与 fleet 包内节点命令的路径白名单(safePathRe)一致。

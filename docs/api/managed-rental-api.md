@@ -6,6 +6,8 @@
 > **当前范围**：v1.2 S1（T-076~T-081）节点接入、探活、卡槽、运营停用/恢复与任务重试；S2（T-089）整机托管与重装确认；S2（T-085）访问网关内部接口（见文末「访问网关内部接口」）；S2（T-086）买家公钥、连接信息、会话记录（「买家连接」）与运营租约/会话检索（「运营接口」）。
 > 托管订单的下单、开通、取消退款口径见 [compute-api.md](compute-api.md)「托管订单（S2）」与 [payment-api.md](payment-api.md)「托管订单（S2）」。续租（extend/restart）、冻结/解冻的订单侧接口见 compute-api.md「托管订单续租」「托管订单冻结与解冻」；租约侧的到期、宽限、清除回执、冻结效果与挖矿特征扫描见本文「租约生命周期（S2 T-087/T-088）」。
 
+**访问模式**（2026-11-16，docs/25 §25.6.0）：`fleet.access_mode=direct`（缺省）买家用登记的公钥直连 `节点地址:租约映射端口`，只拿容器内 root，平台在节点 Docker 层断网/停容器切断；`gateway` 经 SSH 网关登录（本文「访问网关内部接口」只在该模式启用）。下文按模式区分的字段已标注。
+
 **开关**：所有接口仅在 `fleet.enabled=true` 时注册。关闭时（默认）这些路径未注册（HTTP 404），`POST /supplier/nodes` 传 `mgmt_mode:"ssh"` 返回 40001「托管履约未启用(fleet.enabled=false)」，托管商品不可提交审核与下单（40001），人工模式行为不变。
 
 **通用口径**
@@ -75,7 +77,7 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 
 ```json
 {"code":0,"data":{
-  "node_id":7,"verify_status":"unverified",
+  "node_id":7,"access_mode":"gateway","verify_status":"unverified",
   "authorized_keys_line":"from=\"198.51.100.10,198.51.100.11\",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA... omnis-node-7",
   "controller_egress_ips":["198.51.100.10","198.51.100.11"],
   "gateway_egress_ips":["192.0.2.20"],
@@ -90,7 +92,8 @@ curl -X POST http://localhost:8080/api/v1/supplier/nodes \
 
 - `authorized_keys_line` 供给方追加到管理账户 `~/.ssh/authorized_keys`（推荐方式，无需提交密码）。`from=` 限定为控制面出口 IP（`fleet.controller_egress_ips`，只接受单个 IP，不接受 CIDR）。
 - `firewall_scripts` 在 `DOCKER-USER` 链按 `conntrack --ctorigdstport` 只放行网关出口 IP 访问租约端口段，幂等（先删后加），附发行版持久化命令。
-- 50000：`accessgw.egress_ips` 未配置（无法生成放行规则）或节点缺少管理公钥。
+- 50000：`accessgw.egress_ips` 未配置（无法生成放行规则，仅 `gateway` 模式）或节点缺少管理公钥。
+- `access_mode`：`gateway` / `direct`（`fleet.access_mode`）。**`direct` 时** `gateway_egress_ips=[]`、`firewall_scripts={}`（不下发来源限制规则），`requirements` 中端口项为「租约端口段 `<start>-<end>` 对公网(买家)开放入方向（云安全组/NAT 须同号映射），节点不得对来源地址做 SNAT」。前端据此隐藏放行脚本，改为提示开放端口段。
 
 ## PUT /supplier/nodes/:id/ssh · 连接信息 / 一次性引导 ✅
 
@@ -177,7 +180,10 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 ## 买家连接（S2 T-086）✅
 
 登录即可调用（buyer 组，任何角色），归属在服务层校验。仅 `fleet.enabled=true` 时注册。
-买家通过访问网关 `ssh -p <gateway_port> <login>@<gateway_host>` 登录：公钥（本节管理）或访问凭证（密码，沿用 compute 的 `GET /orders/:id/access-credential` 与 `POST /orders/:id/access-credential/reveal`）。
+- `direct`（缺省）：买家 `ssh -p <port> <login>@<host>` 直连（见 `GET /orders/:id/access`），**只支持公钥**（本节管理）；访问凭证口令不能用于登录。
+- `gateway`：买家通过访问网关 `ssh -p <gateway_port> <login>@<gateway_host>` 登录：公钥或访问凭证（密码，沿用 compute 的 `GET /orders/:id/access-credential` 与 `POST /orders/:id/access-credential/reveal`）。
+
+`direct` 模式下添加/删除公钥会给本人 `pending/provisioning/active/parked/suspended` 租约各入队一条 `sync_access` 节点任务（未开始的合并），通常数秒内写进租约容器（整机写账户 `authorized_keys`）；冻结中的租约只更新公钥、保持断开。
 
 ### GET /user/ssh-keys · 我的公钥 ✅
 
@@ -213,6 +219,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 → `{"code":0,"message":"success","data":{"id":3,"deleted":true},"request_id":"..."}`
 - 软删除（`revoked_at`），同一事务内刷新本人 `active/parked/suspended/grace` 租约的 `access_changed_at`：网关在下一次撤销轮询（≤ 5s 轮询 + 2s 滞后）清掉按该公钥缓存的放行，之后用该公钥登录被拒。
+- `direct` 模式：入队 `sync_access` 从租约容器 `/etc/omnis/buyer_keys`（整机为账户 `authorized_keys`）移除该公钥，任务完成后新登录被拒；同样不断开已建立的会话。买家在容器内自己写入 `~/.ssh/authorized_keys` 的公钥不受平台管理。
 - **已建立的 SSH 会话不会被断开**，只拦截之后的新登录：删除公钥不入队 `kill_sessions`，租约状态不变（sshpiperd v1.6.1 插件无法切断已建立的管道，见 docs/25 §25.6.3 S2 实现口径）。需要立即踢掉在线会话时，只能由运营冻结订单（租约 `suspended` + 节点侧 `kill_sessions`，见「租约生命周期 · 冻结」）。「删除公钥是否应同时断开该公钥的在线会话」**待业务方决策**，在此之前按上述口径执行。
 - 写审计 `buyer_ssh_key.revoke`。40001 `id` 非法；40400 不存在 / 非本人 / 已删除。
 
@@ -220,9 +227,28 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 `:id` 为订单号（与 compute 订单接口一致）。
 
+`direct`（缺省）：
+
 ```json
 {"code":0,"message":"success","data":{
-  "gateway_host":"gw.omnisline.com","gateway_port":2222,
+  "access_mode":"direct","gateway_host":"","gateway_port":0,
+  "host":"203.0.113.50","port":40007,
+  "host_key_fingerprint":"SHA256:Zk3tq0m2b7v4Yd8rXo1nP5sC9wE6uA0fJ2hL4kG8iQs",
+  "login":"root","lease_state":"active","delivery_kind":"container",
+  "access_until":"2026-11-28T10:00:00+08:00","grace_until":null,
+  "auth_methods":["publickey"]},
+ "request_id":"..."}
+```
+
+- 连接命令 `ssh -p <port> <login>@<host>`；首次连接核对 `host_key_fingerprint`（租约 sshd 主机指纹）。`host` 为节点地址、`port` 为租约映射端口，**开通前（未写入）省略**；换节点后随新节点变化。
+- 容器租约 `login=root`（容器内 root，拿不到宿主机）；整机租约 `login=omnis-<lease_no>`、`port` 为节点管理 SSH 端口、指纹为节点主机指纹。
+- 仅公钥（`auth_methods=["publickey"]`）。到期停容器、冻结断开容器网络，届时连接失败；能否登录同样以 `lease_state=active` 且未过 `access_until` 为准。
+
+`gateway`：
+
+```json
+{"code":0,"message":"success","data":{
+  "access_mode":"gateway","gateway_host":"gw.omnisline.com","gateway_port":2222,
   "login":"l-4g7bq4xc","lease_state":"active","delivery_kind":"container",
   "access_until":"2026-11-28T10:00:00+08:00","grace_until":null,
   "auth_methods":["publickey","password"]},
@@ -231,7 +257,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 
 - `gateway_host/port` 来自 `accessgw.public_host/public_port`；`login` 即租约号，换节点/续租不变。**不返回节点地址与容器端口。**
 - `delivery_kind`：`container`（按卡，登录进租约容器）/ `bare_metal`（整机）。前端据此切换整机文案并隐藏「一键部署」入口（整机提交部署返回 40001，见 model-deploy-api.md）。
-- 整机订单（T-089）登录方式相同（`ssh -p <gateway_port> <login>@<gateway_host>`），落地为宿主机账户 `omnis-<login>`，`sudo` 免密；整机无宽限，`grace_until` 恒为 `null`，到期即断开，**家目录与买家写入的数据随节点重装清除，须在到期前自行导出**。
+- 整机订单（T-089，`gateway`）登录方式相同（`ssh -p <gateway_port> <login>@<gateway_host>`），落地为宿主机账户 `omnis-<login>`，`sudo` 免密；整机无宽限，`grace_until` 恒为 `null`，到期即断开，**家目录与买家写入的数据随节点重装清除，须在到期前自行导出**。
 - 能否登录以 `lease_state=active` 且未过 `access_until` 为准；其他状态（`pending/provisioning/parked/suspended/grace/...`）照常返回本结构，前端据 `lease_state` 提示。
 - **错误**（按此顺序判定）：40400 订单不存在；40300 非本人订单；40400 人工交付订单「该订单为人工交付, 没有网关连接信息」；40400 订单尚无租约。
 
@@ -254,6 +280,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ```
 
 - `key_name`：本人登记该指纹时的名称（公钥删除后仍显示，便于核对）；密码登录或指纹未在本人名下登记为 `null`。
+- `direct` 模式不经平台中转，**不产生会话记录**（列表为空）。
 - `ended_at=null` 表示会话进行中（或网关尚未上报结束）。`bytes_up/bytes_down` 在 S2 恒为 0（sshpiperd v1.6.1 插件拿不到字节数）。系统自检会话不记录。
 
 ### GET /orders/:id/nights · 包夜订单每晚记录 ✅
@@ -355,7 +382,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 触发：运营 `PATCH /admin/orders/:id/status`（`frozen`）、`POST /admin/risk/alerts/:id/freeze`，或挖矿特征扫描自动冻结。三者走同一路径（compute 订单事务内调用租约钩子）：
 
 - 订单 → `frozen`，订单访问凭证吊销（交付状态 `revoked`）。
-- 租约 `active/parked` → `suspended`（记 `suspended_at`，刷新撤销游标，网关新登录立即被拒），入队 `kill_sessions`（优先级 1）断开现有会话。**容器不停、GPU 不释放**（保留核查现场；冻结期间仍计入供给方占用）。
+- 租约 `active/parked` → `suspended`（记 `suspended_at`，刷新撤销游标，网关新登录立即被拒），入队 `kill_sessions`（优先级 1）断开现有会话。`direct` 模式下 `kill_sessions` 先把租约容器从全部 Docker 网络断开（端口映射撤销，新连接失败；断开失败任务重试），再结束容器内 sshd 会话；整机改为账户 `authorized_keys` 只留平台公钥（买家有 sudo，不可强制）。解冻回到 `active` 时入队 `sync_access` 重新接入网络，端口不变。**容器不停、GPU 不释放**（保留核查现场；冻结期间仍计入供给方占用）。
 - 租约不在租（`reserved/pending/provisioning/grace/...`）：租约状态不动，只刷新撤销游标；开通中的流水线发现订单 `frozen` 即放弃。
 - 解冻见 compute-api.md「托管订单冻结与解冻」。
 
@@ -484,6 +511,7 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ### GET /admin/node-tasks?state=&node_id=&page=&page_size= · 节点任务 ✅
 
 `state` ∈ `pending/running/succeeded/failed/dead`（其他值 40001），缺省为全部。分页信封 `data:{list,total,page,page_size}`。
+`kind` 新增 `sync_access`（2026-11-16，迁移 038，仅 `direct` 模式产生）：`result` 形如 `{"lease_no":"l-…","mode":"connect|keys|cut","result":{"keys":true,"connected":true,"disconnected":false,"running":true,"port":40007}}`，整机另带 `keys`（写入行数）。
 `Task`：`id, node_id, lease_id, deployment_id, kind, state, priority, attempts, max_attempts, run_after, locked_until, payload, result, last_error, created_at, updated_at`；`payload/result` 为 JSON（未完成任务 `result` 为 `null`）。`running` 任务的 `locked_until` 是心跳租约（约 3 分钟，执行期间每分钟续期）；已过期仍为 `running` 表示 worker 已中断，1 分钟内被回收。探活任务 `result`：`{"mode":"full","pass":true,"report_id":31,"failed_checks":[],"awaiting_host_key":"SHA256:...","discarded":false}`。
 
 ### POST /admin/node-tasks/:id/retry · 重试死信 ✅
@@ -562,8 +590,8 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | P8 | 主机资源 | CPU/内存/Docker 数据目录所在盘/OS/内核 + 驱动 ≥ `fleet.min_driver_version` |
 | P9 | 容器运行时 | Docker ≥ 24；拉取 `fleet.probe_image`；`docker run --gpus "device=<空闲卡>"` 可见卡数一致 |
 | P10 | 磁盘配额（非必检） | `--storage-opt size=1G`；不支持则只能整机出租 |
-| P11 | 租约端口：网关可达 | 端口段内**从末尾向下**选空闲端口起临时 TCP 监听容器，由访问网关从其出口做 TCP 连通自检（S2 T-085：系统自检身份登录 `p-<token>` 下发任务，见下文「访问网关内部接口」`probe`）。网关未配置、不可达、主机指纹不符或未在 10s 内回报 → 判不通过 |
-| P12 | 租约端口：未裸露 | 同一端口从主服务出口直连，必须连不上 |
+| P11 | 租约端口：网关可达（`direct`：平台从公网入口可达） | **`direct`**：临时监听容器接入专用临时网络并映射到端口段内空闲端口，主服务直连 `ssh_host:端口` 必须连上（不通 → 提示端口段须对公网放行入方向）。**`gateway`**：端口段内**从末尾向下**选空闲端口起临时 TCP 监听容器，由访问网关从其出口做 TCP 连通自检（S2 T-085：系统自检身份登录 `p-<token>` 下发任务，见下文「访问网关内部接口」`probe`）。网关未配置、不可达、主机指纹不符或未在 10s 内回报 → 判不通过 |
+| P12 | 租约端口：未裸露（`direct`：可切断） | **`direct`**：断开监听容器的网络后必须连不上、重新接入后必须恢复（证明 Docker 断网能切断买家连接；入口前另有转发时失败）；临时容器与网络随后删除。**`gateway`**：同一端口从主服务出口直连，必须连不上 |
 | P13 | 短压测 | 空闲卡逐卡 FP16 矩阵乘（默认 60s）+ 降频采样 + 压测后复扫 Xid/ECC；低于 `gpu_catalog.probe_baseline_tflops × fleet.probe.min_perf_ratio`、降频、掉卡的卡标 `faulty`；**全部卡不通过才判不通过**；无空闲卡时通过并注明 |
 
 在租/预留/排空的卡只做只读检查（P4/P7），侵入项只用空闲卡与未分配端口。
@@ -575,6 +603,8 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 ---
 
 ## 访问网关内部接口（S2 T-085）✅
+
+> 仅 `fleet.access_mode=gateway` 时启用；`direct`（缺省）不启动内部接口。
 
 仅供访问网关插件（`backend/cmd/accessgw`，运行在 sshpiperd v1.6.1 下）调用。**不在公网 API 上**：主服务在 `accessgw.internal_listen`（内网地址）上单独起一个 HTTP 服务，只挂下列路径；公网路由组不注册它们。设计见 docs/25 §25.6.2/§25.6.3 及其「S2 实现口径（T-085）」。
 

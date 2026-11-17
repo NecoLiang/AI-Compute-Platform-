@@ -18,6 +18,10 @@ services:
     networks:
       - middleware
       - frontend
+      - accessgw
+    # fleet.selftest_key_file 指向 /etc/omnis/selftest_ed25519(由 deploy/accessgw/setup.sh 生成, root 0400)。
+    volumes:
+      - ./secrets:/etc/omnis:ro
     read_only: true
     tmpfs:
       - /tmp
@@ -39,3 +43,11 @@ networks:
   frontend:
     external: true
     name: wanxiang-frontend_default
+  # 主服务 ↔ 访问网关专用网络(无外网出口, 不改变主服务的出口 IP)。网关经它访问内部接口
+  # accessgw.internal_listen(:9090), 主服务经它连接网关做开通自检。见 deploy/accessgw/README.md。
+  accessgw:
+    name: omnis-accessgw-internal
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.21.0/24

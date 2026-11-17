@@ -39,25 +39,17 @@ done
 [ -d /etc/sudoers.d ] || { echo "@@missing /etc/sudoers.d"; exit 3; }
 `
 
-// bareMetalProvisionScript 开通: 创建账户(已存在则沿用, 幂等)、authorized_keys 只写网关上游公钥并带
-// from="<网关出口IP>"、sudoers.d 授予免密 sudo(visudo 校验通过才落盘), 输出 "@@account <账户>"。
-// 账户密码字段为 '*'(不可密码登录, 但不是 sshd 视为锁定的 '!'), 登录只能经网关公钥。
-func bareMetalProvisionScript(leaseNo, upstreamPub string, gwIPs []string) (string, error) {
+// bareMetalProvisionScript 开通: 创建账户(已存在则沿用, 幂等)、authorized_keys 重写为 authLines(网关模式: 网关上游公钥
+// 带 from=网关出口 IP; 直连模式: 平台管理公钥 + 买家公钥)、sudoers.d 授予免密 sudo(visudo 校验通过才落盘),
+// 输出 "@@account <账户>"。账户密码字段为 '*'(不可密码登录, 但不是 sshd 视为锁定的 '!'), 只能公钥登录。
+func bareMetalProvisionScript(leaseNo string, authLines []string) (string, error) {
 	u, err := bareMetalUser(leaseNo)
 	if err != nil {
 		return "", err
 	}
-	line, err := upstreamKeyLine(upstreamPub)
+	w, err := authorizedKeysWrite(authLines)
 	if err != nil {
 		return "", err
-	}
-	ips, err := gatewayIPv4s(gwIPs)
-	if err != nil {
-		return "", err
-	}
-	auth := fmt.Sprintf(`from="%s" %s`, strings.Join(ips, ","), line)
-	if !authorizedLineRe.MatchString(auth) {
-		return "", fmt.Errorf("authorized_keys 行含非法字符")
 	}
 	var b strings.Builder
 	b.WriteString("set -e\numask 077\n")
@@ -69,11 +61,9 @@ H=$(getent passwd "$U" | cut -d: -f6)
 case "$H" in /*/"$U") ;; *) echo "@@badhome $H"; exit 4;; esac
 [ -d "$H" ] || { echo "@@badhome $H"; exit 4; }
 G=$(id -g "$U")
-mkdir -p "$H/.ssh"
 `)
-	b.WriteString("printf '%s\\n' '" + auth + "' > \"$H/.ssh/authorized_keys\"\n")
-	b.WriteString(`chmod 700 "$H/.ssh"; chmod 600 "$H/.ssh/authorized_keys"; chown -R "$U:$G" "$H/.ssh"
-T=/etc/sudoers.d/.omnis-tmp-$U
+	b.WriteString(w)
+	b.WriteString(`T=/etc/sudoers.d/.omnis-tmp-$U
 printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$U" > "$T"
 chmod 440 "$T"
 visudo -cf "$T" >/dev/null 2>&1 || { rm -f "$T"; echo @@sudoers_invalid; exit 5; }
@@ -135,7 +125,7 @@ echo "@@killed $n"
 `, nil
 }
 
-// parseBareMetalOut 解析脚本结论行: 返回标记(account/absent/locked/removed/killed)与其后的值;
+// parseBareMetalOut 解析脚本结论行: 返回标记(account/absent/locked/removed/killed/keys)与其后的值;
 // @@missing/@@badhome/@@sudoers_invalid/@@busy/@@userdel_failed 转为可读错误(可重试, 由运营处理节点环境)。
 func parseBareMetalOut(out string) (tag, val string, err error) {
 	for _, l := range nonEmptyLines(out) {
@@ -145,7 +135,7 @@ func parseBareMetalOut(out string) (tag, val string, err error) {
 		}
 		t, v, _ := strings.Cut(rest, " ")
 		switch t {
-		case "account", "absent", "locked", "removed", "killed":
+		case "account", "absent", "locked", "removed", "killed", "keys":
 			return t, v, nil
 		case "missing":
 			return "", "", fmt.Errorf("宿主机缺少 %s(整机托管需要 useradd/userdel/usermod/pkill/pgrep/visudo/getent 与 /etc/sudoers.d)", truncate(v, 60))

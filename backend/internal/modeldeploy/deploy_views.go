@@ -26,14 +26,17 @@ func (s *Service) viewByID(id int64) (*DeploymentView, error) {
 }
 
 type viewRefs struct {
-	OrderNo string `db:"order_no"`
-	LeaseNo string `db:"lease_no"`
+	OrderNo   string `db:"order_no"`
+	LeaseNo   string `db:"lease_no"`
+	NodeHost  string `db:"node_host"`  // 直连模式端口转发: 节点地址
+	LeasePort int    `db:"lease_port"` // 直连模式端口转发: 租约容器 22 的映射端口
 }
 
 func (s *Service) toView(d *Deployment, withEvents, admin bool) (*DeploymentView, error) {
 	var refs viewRefs
-	if err := s.repo.db.Get(&refs, `SELECT o.order_no, COALESCE(l.lease_no,'') AS lease_no FROM orders o
-		LEFT JOIN leases l ON l.id=? WHERE o.id=?`, d.LeaseID, d.OrderID); err != nil {
+	if err := s.repo.db.Get(&refs, `SELECT o.order_no, COALESCE(l.lease_no,'') AS lease_no,
+		COALESCE(n.ssh_host,'') AS node_host, COALESCE(l.upstream_port,0) AS lease_port FROM orders o
+		LEFT JOIN leases l ON l.id=? LEFT JOIN supplier_nodes n ON n.id=l.node_id WHERE o.id=?`, d.LeaseID, d.OrderID); err != nil {
 		return nil, err
 	}
 	e, err := s.repo.GetEntry(d.ModelID)
@@ -62,7 +65,12 @@ func (s *Service) toView(d *Deployment, withEvents, admin bool) (*DeploymentView
 	if e != nil && (d.State == DepRunning || d.State == DepRestarting || d.State == DepStarting) {
 		v.Access = &AccessInfo{BaseURL: "http://" + engineNetworkAlias + ":8000/v1", ServedModel: e.ModelKey}
 		if s.rt != nil {
-			if st := s.rt.Settings(); st.GatewayHost != "" && st.GatewayPort > 0 && refs.LeaseNo != "" {
+			st := s.rt.Settings()
+			switch {
+			case st.DirectAccess && refs.NodeHost != "" && refs.LeasePort > 0:
+				v.Access.PortForwardCmd = fmt.Sprintf("ssh -p %d -N -L 8000:%s:8000 root@%s",
+					refs.LeasePort, engineNetworkAlias, refs.NodeHost)
+			case !st.DirectAccess && st.GatewayHost != "" && st.GatewayPort > 0 && refs.LeaseNo != "":
 				v.Access.PortForwardCmd = fmt.Sprintf("ssh -p %d -N -L 8000:%s:8000 %s@%s",
 					st.GatewayPort, engineNetworkAlias, refs.LeaseNo, st.GatewayHost)
 			}
