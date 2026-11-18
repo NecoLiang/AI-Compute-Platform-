@@ -214,48 +214,9 @@ func cleanupCommand(name string) (string, error) {
 	return "docker rm -f " + name + " >/dev/null 2>&1; true", nil
 }
 
-// benchScript P13: 每张可见卡一个线程做 FP16 8192² 矩阵乘, 持续 argv[1] 秒, 输出一行 JSON。
-// CUDA_DEVICE_ORDER=PCI_BUS_ID 保证与 nvidia-smi -L 的顺序一致, 以便按 UUID 对应。
-const benchScript = `import os, sys, json, time, subprocess, threading
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-secs = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
-uuids = []
-for l in subprocess.check_output(["nvidia-smi", "-L"], text=True).splitlines():
-    if "UUID: " in l:
-        uuids.append(l.split("UUID: ")[1].rstrip(")").strip())
-import torch
-res = [None] * torch.cuda.device_count()
-def run(i):
-    r = {"index": i, "uuid": uuids[i] if i < len(uuids) else "", "ok": False, "tflops": 0.0, "error": ""}
-    try:
-        torch.cuda.set_device(i)
-        n = 8192
-        a = torch.randn(n, n, device="cuda", dtype=torch.float16)
-        b = torch.randn(n, n, device="cuda", dtype=torch.float16)
-        for _ in range(3):
-            c = a @ b
-        torch.cuda.synchronize()
-        it, t0 = 0, time.time()
-        while time.time() - t0 < secs:
-            for _ in range(10):
-                c = a @ b
-            torch.cuda.synchronize()
-            it += 10
-        dt = time.time() - t0
-        if not bool(torch.isfinite(c).all()):
-            raise RuntimeError("non-finite result")
-        r["tflops"] = round(2.0 * n ** 3 * it / dt / 1e12, 1)
-        r["ok"] = True
-    except Exception as e:
-        r["error"] = str(e)[:200]
-    res[i] = r
-ts = [threading.Thread(target=run, args=(i,)) for i in range(len(res))]
-for t in ts:
-    t.start()
-for t in ts:
-    t.join()
-print(json.dumps({"results": [r for r in res if r is not None]}))
-`
+// benchBinary P13 压测程序(探针镜像 deploy/images/probe/bench.cpp): 每张可见卡一个线程做 cuBLAS FP16 8192² 矩阵乘,
+// 持续参数指定的秒数, 输出一行 {"results":[…]}; UUID 取自 CUDA 设备属性, 与 nvidia-smi 一致。
+const benchBinary = "omnis-bench"
 
 // benchCommand P13: 只压空闲卡; 容器名固定以便超时后清理。
 func benchCommand(image, name string, freeUUIDs []string, seconds int) (string, error) {
@@ -276,7 +237,7 @@ func benchCommand(image, name string, freeUUIDs []string, seconds int) (string, 
 		return "", err
 	}
 	return fmt.Sprintf("docker run --rm --name %s --label omnis.probe=1 --network none --gpus %s %s %s %d",
-		name, g, image, pyExec(benchScript), seconds), nil
+		name, g, image, benchBinary, seconds), nil
 }
 
 // throttleSampleCommand 压测期间每 interval 秒采样一次降频原因, 共 rounds 轮。

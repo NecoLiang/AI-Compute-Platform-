@@ -29,7 +29,7 @@ type FleetConfig struct {
 	ProbeConcurrency    int
 	ControllerEgressIPs []string
 	BaseImages          []BaseImage
-	// ProbeImage 平台探针镜像(ref@sha256), P9/P13 在其中执行; 镜像须含 python3+torch(CUDA), 见 docs/25 §25.12。
+	// ProbeImage 平台探针镜像(ref@sha256), P9/P13 在其中执行; 镜像须含 python3 与 omnis-bench(cuBLAS), 见 docs/25 §25.12。
 	ProbeImage       string
 	MinDriverVersion string
 	HostReserveCPU   int

@@ -1,8 +1,9 @@
 name: Fleet Images
 
 # 托管零租平台镜像(docs/25 §25.12、docs/27 §27.4.3): 探针、租约基础、权重拉取、访问网关。
-# 构建 linux/amd64 → 推送 ghcr.io/<owner>/omnis-fleet-<name>:<commit>(配置了 ACR_* secrets 时同时推阿里云 ACR,
-# 国内节点从 ghcr 拉取极慢, 生产配置应写 ACR 的 digest)→ 用生产命令模板在无 GPU 的 runner 上冒烟。
+# 构建 linux/amd64 → 推送 ghcr.io/<owner>/omnis-fleet-<name>:<commit>(配置了 ACR_* secrets 时同时推国内仓库:
+# ACR_REGISTRY/ACR_NAMESPACE 可以是任意 Docker Registry v2 兼容仓库, 如阿里云 ACR、腾讯云 TCR、华为云 SWR 或自建;
+# 国内节点从 ghcr 拉取极慢, 生产配置应写国内仓库的 digest)→ 用生产命令模板在无 GPU 的 runner 上冒烟。
 # 生产配置只认 digest: 作业摘要里列出每个镜像的 ref@sha256, 原样写入 fleet.probe_image / fleet.base_images /
 # fleet.model_pull_image 与 deploy/accessgw/.env 的 ACCESSGW_IMAGE。
 on:
@@ -25,6 +26,7 @@ on:
       - "backend/internal/fleet/images_smoke_test.go"
       # 冒烟用的生产命令模板
       - "backend/internal/fleet/*_cmds.go"
+      - "backend/internal/fleet/commands.go"
       - "backend/internal/fleet/keys.go"
       - "backend/internal/fleet/onboarding.go"
       - "backend/internal/modeldeploy/pull_image_smoke_test.go"
@@ -161,5 +163,5 @@ jobs:
             echo "- fleet.model_pull_image: \`$SMOKE_PULL_IMAGE\`"
             echo "- ACCESSGW_IMAGE: \`$SMOKE_ACCESSGW_IMAGE\`"
             echo
-            echo "国内节点请改用构建作业摘要中 ACR 仓库的同一 digest。"
+            echo "国内节点请改用构建作业摘要中国内仓库的同一 digest。"
           } >> "$GITHUB_STEP_SUMMARY"

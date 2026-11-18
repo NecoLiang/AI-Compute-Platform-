@@ -362,8 +362,20 @@ func TestParseContainerAndPorts(t *testing.T) {
 	assert.False(t, p[40002])
 }
 
+func TestBenchCommand(t *testing.T) {
+	cmd, err := benchCommand(testProbeImage, "omnis-probe-7-0a1b2c3d", []string{"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"}, 60)
+	require.NoError(t, err)
+	assert.True(t, strings.HasSuffix(cmd, ` --network none --gpus '"device=GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"' `+testProbeImage+" omnis-bench 60"), cmd)
+	_, err = benchCommand("busybox:latest", "omnis-probe-7-0a1b2c3d", []string{"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"}, 60)
+	assert.Error(t, err)
+	_, err = benchCommand(testProbeImage, "omnis-probe-7-0a1b2c3d", nil, 60)
+	assert.Error(t, err)
+	_, err = benchCommand(testProbeImage, "omnis-probe-7-0a1b2c3d", []string{"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"}, 1)
+	assert.Error(t, err)
+}
+
 func TestParseBenchAndThrottle(t *testing.T) {
-	out := "Unable to find image 'probe' locally\nsome torch warning\n" +
+	out := "Unable to find image 'probe' locally\nsome warning\n" +
 		`{"results":[{"index":0,"uuid":"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11","ok":true,"tflops":612.4,"error":""},{"index":1,"uuid":"GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d","ok":false,"tflops":0,"error":"CUDA error: an illegal memory access was encountered"}]}` + "\n"
 	r, err := ParseBench(out)
 	require.NoError(t, err)
