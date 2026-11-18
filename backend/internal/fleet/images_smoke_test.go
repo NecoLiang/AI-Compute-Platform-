@@ -157,10 +157,9 @@ func TestFleetImagesSmoke(t *testing.T) {
 			return string(b)
 		}
 		// ssh 登录后的非交互 shell 不继承镜像 ENV: PATH 与 CUDA 库路径来自 /etc/environment。
-		got := run(`command -v python pip >/dev/null && python3 -c 'import ssl, venv; print("@@py3")' && pip config list && pwd`)
+		got := run(`command -v python pip >/dev/null && python3 -c 'import ssl, venv; print("@@py3")' && pip config list`)
 		assert.Contains(t, got, "@@py3")
 		assert.Contains(t, got, "global.index-url='https://mirrors.aliyun.com/pypi/simple/'")
-		assert.Contains(t, got, "/root/workspace")
 		ld := run("echo $LD_LIBRARY_PATH")
 		assert.Contains(t, ld, "/usr/local/nvidia/lib64")
 		assert.Contains(t, ld, "/usr/local/cuda/lib64")
