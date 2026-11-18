@@ -72,10 +72,10 @@ scp backend/deploy/accessgw/compose.yml backend/deploy/accessgw/setup.sh wanxian
 ```dotenv
 FLEET_ENABLED=true
 FLEET_CONTROLLER_EGRESS_IPS=123.56.177.241
-FLEET_BASE_IMAGES=[{"name":"PyTorch 2.7.1 / CUDA 12.8","ref":"<lease-base ref@sha256>"}]
+FLEET_BASE_IMAGES=[{"name":"CUDA 12.8 / Python 3.10","ref":"<lease-base ref@sha256>"}]
 FLEET_PROBE_IMAGE=<probe ref@sha256>
 FLEET_MODEL_PULL_IMAGE=<model-pull ref@sha256>
-FLEET_MIN_DRIVER_VERSION=535
+FLEET_MIN_DRIVER_VERSION=570
 FLEET_DENY_CIDRS=172.21.160.0/20,123.56.177.241,<EIP2>
 ```
 

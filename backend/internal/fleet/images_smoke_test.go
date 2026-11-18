@@ -3,7 +3,6 @@ package fleet
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -21,7 +20,7 @@ import (
 
 // 平台镜像冒烟(deploy/images, .github/workflows/fleet-images.yml): 在本机 Docker(Linux, 无 GPU)上用生产的命令模板
 // 原样执行一遍不依赖 GPU 的部分, 验证镜像满足模板的全部假设。依赖 GPU 的 P9/P13 与 --storage-opt 配额(P10)
-// 只能在真机上验收, 这里只检查镜像内的前提(CUDA 版 torch、压测脚本可编译、dd 小写入可用)。
+// 只能在真机上验收, 这里只检查镜像内的前提(压测程序与 cuBLAS 可加载、dd 小写入可用)。
 //
 //	SMOKE_PROBE_IMAGE  探针镜像 ref@sha256(本机已拉取或可拉取)
 //	SMOKE_BASE_IMAGE   租约基础镜像 ref@sha256
@@ -48,13 +47,23 @@ func TestFleetImagesSmoke(t *testing.T) {
 		return out
 	}
 
-	t.Run("probe_python_torch", func(t *testing.T) {
-		out := mustHost(t, "docker run --rm --network none "+probe+` python3 -c 'import torch; print("@@cuda", torch.version.cuda)'`)
-		assert.Contains(t, out, "@@cuda 12.8")
-		// P13 压测脚本在探针镜像的 python3 下能编译(运行需要 GPU)。
-		out = mustHost(t, "docker run --rm --network none "+probe+" "+
-			pyExec(`compile(__import__("base64").b64decode("`+base64.StdEncoding.EncodeToString([]byte(benchScript))+`").decode(), "bench", "exec"); print("@@compiled")`))
-		assert.Contains(t, out, "@@compiled")
+	t.Run("probe_bench_no_gpu", func(t *testing.T) {
+		// P13 生产命令只去掉挂卡参数: 压测程序与 cuBLAS 动态库可加载, 无 GPU 时按约定输出空结果(运行需要 GPU)。
+		name := "omnis-probe-1-" + randHex(t, 4)
+		uuids := []string{"GPU-" + randHex(t, 4) + "-" + randHex(t, 2) + "-" + randHex(t, 2) + "-" + randHex(t, 2) + "-" + randHex(t, 6)}
+		cmd, err := benchCommand(probe, name, uuids, 5)
+		require.NoError(t, err)
+		g, err := gpusFlag(uuids)
+		require.NoError(t, err)
+		noGPU := strings.Replace(cmd, " --gpus "+g, "", 1)
+		require.NotEqual(t, cmd, noGPU)
+		out := mustHost(t, noGPU)
+		results, err := ParseBench(out)
+		require.NoError(t, err, out)
+		assert.Empty(t, results)
+		out = mustHost(t, "docker run --rm --network none "+probe+` sh -c 'ldd /usr/local/bin/omnis-bench; ldd /usr/local/bin/omnis-bench | grep -q "not found" || echo @@resolved'`)
+		assert.Contains(t, out, "@@resolved")
+		assert.Contains(t, out, "libcublas.so.12")
 	})
 
 	t.Run("probe_quota_command_shape", func(t *testing.T) {
@@ -148,9 +157,12 @@ func TestFleetImagesSmoke(t *testing.T) {
 			return string(b)
 		}
 		// ssh 登录后的非交互 shell 不继承镜像 ENV: PATH 与 CUDA 库路径来自 /etc/environment。
-		got := run(`command -v python3 pip >/dev/null && python3 -c 'import torch; print("@@torch", torch.__version__)' && pwd`)
-		assert.Contains(t, got, "@@torch 2.7.1")
-		assert.Contains(t, run("echo $LD_LIBRARY_PATH"), "/usr/local/nvidia/lib64")
+		got := run(`command -v python pip >/dev/null && python3 -c 'import ssl, venv; print("@@py3")' && pip config list`)
+		assert.Contains(t, got, "@@py3")
+		assert.Contains(t, got, "global.index-url='https://mirrors.aliyun.com/pypi/simple/'")
+		ld := run("echo $LD_LIBRARY_PATH")
+		assert.Contains(t, ld, "/usr/local/nvidia/lib64")
+		assert.Contains(t, ld, "/usr/local/cuda/lib64")
 
 		_, err = dial(ssh.PublicKeys(newSigner(t)))
 		require.Error(t, err, "only the gateway upstream key may log in")
