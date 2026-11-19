@@ -204,7 +204,7 @@ func (d *Dialer) Connect(conn net.Conn, user string, auth []ssh.AuthMethod, pinn
 	return &Client{c: ssh.NewClient(c, chans, reqs), d: d}, info, nil
 }
 
-// Client 一条管理连接, 可并发开多个会话(P13 压测时并行采样降频)。
+// Client 一条管理连接, 可并发开多个会话。
 type Client struct {
 	c *ssh.Client
 	d *Dialer

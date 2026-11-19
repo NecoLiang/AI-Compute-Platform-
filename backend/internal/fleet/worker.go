@@ -229,7 +229,7 @@ func (s *Service) runProbeTask(ctx context.Context, t *Task) (any, error) {
 	}
 	out, err := s.runProbe(ctx, t.NodeID, pl)
 	var aborted errProbeAborted
-	if errors.As(err, &aborted) && !aborted.stale && pl.Mode != ProbePortRecheck {
+	if errors.As(err, &aborted) && !aborted.stale {
 		s.abandonVerifying(t, pl.Generation, aborted.msg)
 	}
 	if err != nil {
@@ -243,7 +243,7 @@ func (s *Service) runProbeTask(ctx context.Context, t *Task) (any, error) {
 // probeDead 探活重试耗尽: 本代次的完整探活不会再执行, 节点不能停在 verifying。
 func (s *Service) probeDead(t *Task, lastErr string) {
 	var pl ProbePayload
-	if err := jsonUnmarshal(t.Payload, &pl); err != nil || pl.Mode == ProbePortRecheck {
+	if err := jsonUnmarshal(t.Payload, &pl); err != nil {
 		return
 	}
 	s.abandonVerifying(t, pl.Generation, "探活多次执行失败")

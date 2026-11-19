@@ -485,7 +485,7 @@ func (s *Service) ConfirmHostKey(supplierID, nodeID int64, fingerprint, ip strin
 		if !n.sshReady() {
 			return nil
 		}
-		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "host_key_confirm", 5)
+		taskID, err = s.enqueueProbeTx(tx, n, "host_key_confirm", 5)
 		return err
 	})
 	return taskID, err
@@ -493,13 +493,9 @@ func (s *Service) ConfirmHostKey(supplierID, nodeID int64, fingerprint, ip strin
 
 // enqueueProbeTx 入队探活并返回负责本次请求的任务 id。调用方须已在 tx 内锁住节点行。
 //
-// 复用规则(CR-S1 M4): 只复用"同一代次"的未结束 probe; 请求完整探活时只复用完整探活(port_recheck 不能代替完整探活,
-// 否则节点会停在 verifying 却没有完整探活来结束它)。旧代次的排队任务与被完整探活取代的排队复检直接置 failed;
-// 旧代次的在跑任务不动, 其结论在提交时被代次守卫作废。完整探活确有任务后才把 unverified/failed/key_mismatch/needs_reimage → verifying。
-func (s *Service) enqueueProbeTx(tx *sqlx.Tx, n *Node, mode, trigger string, priority int) (int64, error) {
-	if mode != ProbePortRecheck {
-		mode = ProbeFull
-	}
+// 复用规则(CR-S1 M4): 只复用"同一代次"的未结束 probe; 旧代次的排队任务直接置 failed,
+// 旧代次的在跑任务不动, 其结论在提交时被代次守卫作废。确有任务后才把 unverified/failed/key_mismatch/needs_reimage → verifying。
+func (s *Service) enqueueProbeTx(tx *sqlx.Tx, n *Node, trigger string, priority int) (int64, error) {
 	var gen int
 	if err := tx.Get(&gen, `SELECT generation FROM supplier_nodes WHERE id=? FOR UPDATE`, n.ID); err != nil {
 		return 0, err
@@ -514,34 +510,24 @@ func (s *Service) enqueueProbeTx(tx *sqlx.Tx, n *Node, mode, trigger string, pri
 		if err := jsonUnmarshal(t.Payload, &pl); err != nil {
 			pl.Generation = -1 // 无法解析: 视为旧代次
 		}
-		tMode := ProbeFull
-		if pl.Mode == ProbePortRecheck {
-			tMode = ProbePortRecheck
-		}
 		switch {
 		case pl.Generation != gen:
 			if err := s.repo.failPendingTask(tx, t.ID, "节点状态已变化, 任务作废"); err != nil {
 				return 0, err
 			}
-		case taskID == 0 && (tMode == ProbeFull || mode == ProbePortRecheck):
+		case taskID == 0:
 			taskID = t.ID
-		case mode == ProbeFull && tMode == ProbePortRecheck:
-			if err := s.repo.failPendingTask(tx, t.ID, "已被完整探活取代"); err != nil {
-				return 0, err
-			}
 		}
 	}
 	if taskID == 0 {
 		if taskID, err = s.repo.insertTask(tx, n.ID, KindProbe, priority,
-			ProbePayload{Mode: mode, Trigger: trigger, Generation: gen}); err != nil {
+			ProbePayload{Mode: ProbeFull, Trigger: trigger, Generation: gen}); err != nil {
 			return 0, err
 		}
 	}
-	if mode == ProbeFull {
-		if _, err := s.repo.setVerifyStatus(tx, n.ID,
-			[]string{VerifyUnverified, VerifyFailed, VerifyKeyMismatch, VerifyNeedsReimage}, VerifyVerifying); err != nil {
-			return 0, err
-		}
+	if _, err := s.repo.setVerifyStatus(tx, n.ID,
+		[]string{VerifyUnverified, VerifyFailed, VerifyKeyMismatch, VerifyNeedsReimage}, VerifyVerifying); err != nil {
+		return 0, err
 	}
 	return taskID, nil
 }

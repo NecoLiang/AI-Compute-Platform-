@@ -19,7 +19,7 @@ type GPUModel struct {
 	VRAMGB     *int     `db:"vram_gb" json:"vram_gb"`
 	VRAMType   *string  `db:"vram_type" json:"vram_type"`
 	FP16TFLOPS *float64 `db:"fp16_tflops" json:"fp16_tflops"` // 口径: FP16 稠密 Tensor
-	// ProbeBaselineTFLOPS 托管探活 P13 实测基准(docs/25 §25.4); nil=未标定, P13 只验稳定性。
+	// ProbeBaselineTFLOPS 原托管探活 P13 实测基准; P13 已于 2026-11-19 移除, 字段仅保留展示与兼容, 不参与探活。
 	ProbeBaselineTFLOPS *float64 `db:"probe_baseline_tflops" json:"probe_baseline_tflops"`
 	Interconnect        *string  `db:"interconnect" json:"interconnect"`
 	// ComputeCapability CUDA 算力架构, 如 "8.0"/"8.9"/"9.0"(docs/27 §27.2)。

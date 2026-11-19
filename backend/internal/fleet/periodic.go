@@ -13,14 +13,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// 周期探活(docs/25 §25.4.4): 每 60s 对 verified 节点做 SSH 轻量探活; 完整探活 12h 一次、端口复测 24h 一次(入队)。
+// 周期探活(docs/25 §25.4.4): 每 60s 对 verified 节点做 SSH 轻量探活; 完整探活 12h 一次(入队)。
 
 const (
-	lightInterval    = 60 * time.Second
-	lightTimeout     = 45 * time.Second
-	offlineAfter     = 90 * time.Second
-	fullEvery        = 12 * time.Hour
-	portRecheckEvery = 24 * time.Hour
+	lightInterval = 60 * time.Second
+	lightTimeout  = 45 * time.Second
+	offlineAfter  = 90 * time.Second
+	fullEvery     = 12 * time.Hour
 )
 
 // RunPeriodic 阻塞运行直到 ctx 取消。
@@ -80,7 +79,7 @@ func (s *Service) periodicRound(ctx context.Context) {
 	wg.Wait()
 }
 
-// schedulePeriodic 距上次完整探活超过 12h 入队完整探活; 距上次端口检查(完整探活或复测)超过 24h 入队端口复测。
+// schedulePeriodic 距上次完整探活超过 12h 入队完整探活。
 func (s *Service) schedulePeriodic(n *Node) {
 	if !n.sshReady() {
 		return
@@ -90,24 +89,7 @@ func (s *Service) schedulePeriodic(n *Node) {
 		slog.Error("fleet 读取探活报告时间失败", "node_id", n.ID, "error", err)
 		return
 	}
-	mode := ""
-	if full == nil || time.Since(*full) >= fullEvery {
-		mode = ProbeFull
-	} else {
-		recheck, err := s.repo.latestReportAt(n.ID, "port_recheck")
-		if err != nil {
-			slog.Error("fleet 读取探活报告时间失败", "node_id", n.ID, "error", err)
-			return
-		}
-		last := *full
-		if recheck != nil && recheck.After(last) {
-			last = *recheck
-		}
-		if time.Since(last) >= portRecheckEvery {
-			mode = ProbePortRecheck
-		}
-	}
-	if mode == "" {
+	if full != nil && time.Since(*full) < fullEvery {
 		return
 	}
 	err = s.inTx(func(tx *sqlx.Tx) error {
@@ -115,11 +97,11 @@ func (s *Service) schedulePeriodic(n *Node) {
 		if err != nil || cur == nil || cur.VerifyStatus != VerifyVerified {
 			return err
 		}
-		_, err = s.enqueueProbeTx(tx, cur, mode, "periodic", 8)
+		_, err = s.enqueueProbeTx(tx, cur, "periodic", 8)
 		return err
 	})
 	if err != nil {
-		slog.Error("fleet 周期探活入队失败", "node_id", n.ID, "mode", mode, "error", err)
+		slog.Error("fleet 周期探活入队失败", "node_id", n.ID, "error", err)
 	}
 }
 

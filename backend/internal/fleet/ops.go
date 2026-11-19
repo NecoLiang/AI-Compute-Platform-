@@ -30,7 +30,7 @@ func (s *Service) Verify(supplierID, nodeID int64) (int64, error) {
 		if !n.sshReady() {
 			return errcode.New(errcode.ParamInvalid, "请先填写 SSH 连接信息(host/port/user)")
 		}
-		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "supplier", 5)
+		taskID, err = s.enqueueProbeTx(tx, n, "supplier", 5)
 		return err
 	})
 	return taskID, err
@@ -233,7 +233,7 @@ func (s *Service) Resume(operatorID, nodeID int64, ip string) (int64, error) {
 			return nil
 		}
 		n.VerifyStatus = VerifyUnverified
-		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "resume", 3)
+		taskID, err = s.enqueueProbeTx(tx, n, "resume", 3)
 		return err
 	})
 	if err != nil {
@@ -334,9 +334,6 @@ func (s *Service) prepareProbeRetry(tx *sqlx.Tx, t *Task) error {
 	}
 	if _, err := tx.Exec(`UPDATE node_tasks SET payload=? WHERE id=? AND state='dead'`, string(raw), t.ID); err != nil {
 		return err
-	}
-	if pl.Mode == ProbePortRecheck {
-		return nil
 	}
 	_, err = s.repo.setVerifyStatus(tx, n.ID, []string{VerifyUnverified, VerifyFailed}, VerifyVerifying)
 	return err

@@ -210,7 +210,7 @@ func shmSizeGB(memGB int) int {
 	return s
 }
 
-// pickLeasePort 租约端口从端口段**开头**向上分配(P11 自检从末尾向下选, 二者相向), 排除已被租约占用
+// pickLeasePort 租约端口从端口段**开头**向上分配, 排除已被租约占用
 // 与当前节点上正在监听的端口。无可用端口返回 0。
 func pickLeasePort(start, end int, leased, listening map[int]bool) int {
 	for p := start; p <= end; p++ {

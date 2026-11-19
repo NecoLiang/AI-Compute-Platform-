@@ -29,12 +29,13 @@ type FleetConfig struct {
 	ProbeConcurrency    int
 	ControllerEgressIPs []string
 	BaseImages          []BaseImage
-	// ProbeImage 平台探针镜像(ref@sha256), P9/P13 在其中执行; 镜像须含 python3 与 omnis-bench(cuBLAS), 见 docs/25 §25.12。
+	// ProbeImage 平台工具镜像(ref@sha256): 开通时下发防火墙、整机租约 chroot、挖矿扫描在其中执行, 见 docs/25 §25.12。
+	// 探活(P1–P8)不再使用它。
 	ProbeImage       string
 	MinDriverVersion string
 	HostReserveCPU   int
 	HostReserveMemGB int
-	// SelftestKeyFile 主服务经网关做开通自检/P11 时使用的 ed25519 私钥文件(0400)。
+	// SelftestKeyFile 主服务经网关做开通自检时使用的 ed25519 私钥文件(0400)。
 	// 网关按其指纹识别"系统自检身份", 只允许登录 provisioning 租约与探活临时路由。
 	SelftestKeyFile string
 	// DenyCIDRs 追加到内置拒绝名单(pkg/netguard.DefaultDenyCIDRs)的目标地址段, 典型为平台自身 VPC/内网网段、
@@ -53,7 +54,6 @@ type FleetConfig struct {
 	Grace          FleetGrace
 	Outage         FleetOutage
 	Credit         FleetCredit
-	Probe          FleetProbe
 	Mining         FleetMining
 }
 
@@ -101,10 +101,6 @@ type FleetCredit struct {
 	StopBelow int
 }
 
-type FleetProbe struct {
-	MinPerfRatio float64
-}
-
 // AccessGWConfig 访问网关(cmd/accessgw)与主服务内部接口(docs/25 §25.6.2)。
 type AccessGWConfig struct {
 	PublicHost     string
@@ -145,7 +141,6 @@ func loadFleet(v *viper.Viper, cfg *Config) error {
 			YeepayPartialRefundConfirmed: v.GetBool("fleet.outage.yeepay_partial_refund_confirmed"),
 		},
 		Credit: FleetCredit{StopBelow: v.GetInt("fleet.credit.stop_below")},
-		Probe:  FleetProbe{MinPerfRatio: v.GetFloat64("fleet.probe.min_perf_ratio")},
 		Mining: FleetMining{
 			Interval:     v.GetDuration("fleet.mining.interval"),
 			ProcessNames: cleanList(v.GetStringSlice("fleet.mining.process_names")),
@@ -239,9 +234,6 @@ func applyFleetDefaults(f *FleetConfig, gw *AccessGWConfig) {
 	if f.Credit.StopBelow <= 0 {
 		f.Credit.StopBelow = 60
 	}
-	if f.Probe.MinPerfRatio <= 0 {
-		f.Probe.MinPerfRatio = 0.7
-	}
 	if f.ModelCacheDir == "" {
 		f.ModelCacheDir = "/data/omnis-models"
 	}
@@ -333,9 +325,6 @@ func validateFleet(cfg *Config) error {
 	}
 	if f.GatewayMode() {
 		missing, invalid = validateAccessGW(gw, missing, invalid)
-	}
-	if f.Probe.MinPerfRatio > 1 {
-		invalid = append(invalid, "fleet.probe.min_perf_ratio 须在 (0,1]")
 	}
 	if !modelCacheDirRe.MatchString(f.ModelCacheDir) || strings.Contains(f.ModelCacheDir, "..") {
 		invalid = append(invalid, "fleet.model_cache_dir 须为绝对路径, 仅含字母数字与 ._/-, 不含 ..")

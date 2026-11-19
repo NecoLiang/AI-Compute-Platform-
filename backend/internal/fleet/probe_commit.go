@@ -17,9 +17,6 @@ func (e passConflict) Error() string { return e.msg }
 // commitProbe 把一次探活的结论落库: 报告 + 节点状态 + 卡槽 + 派生库存, 然后通知与刷新健康度。
 func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 	kind := "verify"
-	if p.mode == ProbePortRecheck {
-		kind = "port_recheck"
-	}
 	out := &ProbeOutcome{Mode: p.mode}
 	n := p.n
 
@@ -68,25 +65,10 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 		return out, nil
 	}
 
-	var inv *Inventory
-	if p.mode == ProbeFull {
-		p.inv.DockerVersion = p.docker.ServerVersion
-		inv = &p.inv
-	}
+	p.inv.DockerVersion = p.docker.ServerVersion
+	inv := &p.inv
 
 	if len(p.failed()) == 0 {
-		if p.mode == ProbePortRecheck {
-			if stale, err := s.probeStale(p); err != nil || stale {
-				out.Discarded = stale
-				return out, err
-			}
-			id, err := s.repo.insertReport(s.repo.db, n.ID, kind, true, p.list(), nil)
-			if err != nil {
-				return nil, err
-			}
-			out.Pass, out.ReportID = true, id
-			return out, nil
-		}
 		var productID int64
 		err := s.inTx(func(tx *sqlx.Tx) error {
 			cur, err := s.repo.lockNode(tx, n.ID)
@@ -147,7 +129,7 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 			if p.trigger != "periodic" || n.VerifyStatus != VerifyVerified {
 				msg := fmt.Sprintf("节点「%s」探活通过, 已可接单。", n.NodeName)
 				if len(inv.Faulty) > 0 {
-					msg += fmt.Sprintf("其中 %d 张卡未通过健康/压测检查, 已标记故障不计入可售。", len(inv.Faulty))
+					msg += fmt.Sprintf("其中 %d 张卡未通过健康检查或被宿主机进程占用, 不计入可售。", len(inv.Faulty))
 				}
 				s.notify(n.SupplierID, "节点探活通过", msg, n.ID)
 			}
@@ -215,9 +197,6 @@ func (s *Service) commitFail(p *probeRun, kind string, inv *Inventory, out *Prob
 	s.refreshHealth(n)
 	if p.trigger != "periodic" || wasVerified {
 		what := "探活"
-		if kind == "port_recheck" {
-			what = "租约端口复检"
-		}
 		msg := fmt.Sprintf("节点「%s」%s未通过(%s), 请查看探活报告按提示处理后重新发起探活。", n.NodeName, what, strings.Join(failed, "、"))
 		if wasVerified {
 			msg = fmt.Sprintf("节点「%s」%s未通过(%s), 已停止接受新租约(存量租约不受影响)。请按报告处理后重新发起探活。", n.NodeName, what, strings.Join(failed, "、"))

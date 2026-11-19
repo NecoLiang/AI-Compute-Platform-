@@ -16,12 +16,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// 探活 P1–P13(docs/25 §25.4.3)。所有命令为 commands.go 中的固定模板, 参数只来自平台生成值与数据库并经白名单校验。
+// 探活 P1–P8(docs/25 §25.4.3): 连通(P1–P3)与只读的硬件/主机检查(P4–P8), 不在节点上起容器、不占卡。
+// 原 P9 容器运行时、P10 磁盘配额、P11/P12 租约端口、P13 短压测已移除(2026-11-19)。所有命令为 commands.go 中的固定模板, 参数只来自平台生成值与数据库并经白名单校验。
 
 var checkNames = map[string]string{
 	"P1": "TCP 可达", "P2": "SSH 握手与指纹", "P3": "管理密钥认证", "P4": "GPU 清单", "P5": "声明一致性",
-	"P6": "拓扑", "P7": "健康", "P8": "主机资源", "P9": "容器运行时", "P10": "磁盘配额能力",
-	"P11": "租约端口: 网关可达", "P12": "租约端口: 未裸露", "P13": "短压测",
+	"P6": "拓扑", "P7": "健康", "P8": "主机资源",
 }
 
 // 单条命令 60s, 拉镜像 30min(docs/25 §25.11)。
@@ -30,8 +30,7 @@ const (
 	pullTimeout = 30 * time.Minute
 )
 
-var fullChecks = []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P13"}
-var recheckChecks = []string{"P1", "P2", "P3", "P11", "P12"}
+var fullChecks = []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8"}
 
 // errProbeAborted 任务无法执行(节点已删除/停用/缺凭证/代次已变): 任务置 failed, 不写报告。
 // stale=true 表示任务已过时(节点代次已变), 节点状态归新代次的操作所有, 中止时不做任何回写。
@@ -58,9 +57,8 @@ type probeRun struct {
 	inv      Inventory
 	gpus     []GPU
 	docker   DockerInfo
-	freeIdx  map[int]bool // 本次可做侵入项的空闲卡(不含在租/预留/排空)
-	await    bool         // 首次连接, 待供给方确认指纹
-	mismatch string       // 指纹变化时的观测值
+	await    bool   // 首次连接, 待供给方确认指纹
+	mismatch string // 指纹变化时的观测值
 	// topoLinks P6 解析出的两两拓扑(index×index), 探活结论落库后写入卡槽(新卡槽在通过时才建)。
 	topoLinks [][]string
 }
@@ -103,13 +101,9 @@ func (p *probeRun) list() []Check {
 }
 
 func newProbeRun(s *Service, n *Node, mode string) *probeRun {
-	ids := fullChecks
-	if mode == ProbePortRecheck {
-		ids = recheckChecks
-	}
-	p := &probeRun{s: s, n: n, mode: mode, checks: map[string]*Check{}, order: ids, freeIdx: map[int]bool{}}
-	for _, id := range ids {
-		p.checks[id] = &Check{ID: id, Name: checkNames[id], Required: id != "P10", Skipped: true, Detail: "未执行(前置检查未通过)"}
+	p := &probeRun{s: s, n: n, mode: mode, checks: map[string]*Check{}, order: fullChecks}
+	for _, id := range fullChecks {
+		p.checks[id] = &Check{ID: id, Name: checkNames[id], Required: true, Skipped: true, Detail: "未执行(前置检查未通过)"}
 	}
 	return p
 }
@@ -122,10 +116,8 @@ func randomSuffix() string {
 
 // runProbe 执行一次探活并落库, 返回结论。基础设施错误(DB 等)返回 error 由 worker 重试。
 func (s *Service) runProbe(ctx context.Context, nodeID int64, pl ProbePayload) (*ProbeOutcome, error) {
-	mode := pl.Mode
-	if mode != ProbePortRecheck {
-		mode = ProbeFull
-	}
+	// 已移除的 port_recheck 模式的遗留任务按完整探活执行。
+	mode := ProbeFull
 	n, err := s.repo.GetNode(nodeID)
 	if err != nil {
 		return nil, err
@@ -146,16 +138,14 @@ func (s *Service) runProbe(ctx context.Context, nodeID int64, pl ProbePayload) (
 	}
 	p := newProbeRun(s, n, mode)
 	p.trigger, p.gen = pl.Trigger, pl.Generation
-	if mode == ProbeFull {
-		if p.product, err = s.products.ManagedProduct(n.ProductID); err != nil {
-			return nil, err
-		}
-		if p.product == nil {
-			return nil, errProbeAborted{msg: "节点所属商品不存在"}
-		}
-		if p.cat, err = s.repo.catalogEntry(p.product.GpuModel); err != nil {
-			return nil, err
-		}
+	if p.product, err = s.products.ManagedProduct(n.ProductID); err != nil {
+		return nil, err
+	}
+	if p.product == nil {
+		return nil, errProbeAborted{msg: "节点所属商品不存在"}
+	}
+	if p.cat, err = s.repo.catalogEntry(p.product.GpuModel); err != nil {
+		return nil, err
 	}
 	if err := p.connect(ctx); err != nil {
 		return nil, err
@@ -163,16 +153,7 @@ func (s *Service) runProbe(ctx context.Context, nodeID int64, pl ProbePayload) (
 	if p.client != nil {
 		defer p.client.Close()
 		if !p.await {
-			if mode == ProbeFull {
-				p.inventory(ctx)
-				p.runtime(ctx)
-			}
-			if p.checks["P3"].OK && (mode == ProbePortRecheck || p.checks["P9"].OK) {
-				p.ports(ctx)
-			}
-			if mode == ProbeFull && p.checks["P9"].OK {
-				p.bench(ctx)
-			}
+			p.inventory(ctx)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -247,6 +228,15 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // run 执行一条固定模板命令(单条默认 60s); 非 0 退出码返回 stderr/stdout 摘要作为错误。

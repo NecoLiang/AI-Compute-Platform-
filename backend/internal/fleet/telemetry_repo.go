@@ -6,7 +6,7 @@ package fleet
 //   - 轻探活(60s): 逐卡显存已用/总量、温度、功耗、降频原因、ECC → gpu_slots 遥测列;
 //     内核日志 Xid(自上次成功扫描起, 至少 2 分钟) → gpu_xid_events + 节点覆盖区间。
 //   - 完整探活(12h): 两两拓扑(nvidia-smi topo -m) → gpu_slots.topo_links; 模型缓存目录容量 → supplier_nodes.cache_*;
-//     P7 的 24h Xid 与 P13 后 10min 复扫同样落 gpu_xid_events 并并入覆盖区间。
+//     P7 的 24h Xid 同样落 gpu_xid_events 并并入覆盖区间。
 //
 // 全部写入都以节点代次(generation)为守卫: 停用/恢复/改连接信息/确认指纹之后, 旧连接采到的数据不再写回。
 // 时间统一用平台(应用)时钟写入, 读取方同样用应用时钟判新鲜度。

@@ -98,13 +98,6 @@ func (g *stubGateway) RecheckLease(ctx context.Context, leaseNo string) (string,
 	return g.SelfTestLease(ctx, leaseNo)
 }
 
-func (g *stubGateway) SelfTestPort(_ context.Context, _ int64, _ string, port int) error {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.ports = append(g.ports, port)
-	return g.err
-}
-
 // syncBuffer slog 输出捕获(多 goroutine 写)。
 type syncBuffer struct {
 	mu sync.Mutex
@@ -150,7 +143,6 @@ func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 		// 既有测试按网关模式编写; 直连模式见 direct_integration_test.go(newDirectProvEnv)。
 		AccessMode: config.AccessModeGateway,
 		ProbeImage: testProbeImage, MinDriverVersion: "535.104",
-		Probe:          config.FleetProbe{MinPerfRatio: 0.7},
 		ModelCacheDir:  "/data/omnis-models",
 		BaseImages:     []config.BaseImage{{Name: "pytorch", Ref: testBaseImage}},
 		HostReserveCPU: 2, HostReserveMemGB: 8,
@@ -161,7 +153,6 @@ func newTestFleet(t *testing.T, db *sqlx.DB) *Service {
 			UpstreamPubkey: testUpstreamPub}, key)
 	// 保留 NewService 构造的目标地址策略, 只放开回环(测试 SSH 服务器在 127.0.0.1)。
 	s.dialer.allowLoopback, s.dialer.DialTimeout, s.dialer.Attempts = true, 2*time.Second, 1
-	s.benchSecs, s.sampleN, s.sampleGap = 5, 1, 1
 	return s
 }
 
@@ -324,45 +315,27 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotZero(t, taskID)
 
-	// 网关未接入(S2): P11 判不通过并写明原因, 其余项全部通过, 节点 failed, 不生成卡槽。
-	done = runTasks(t, s)
-	require.Len(t, done, 1)
-	o = outcomeOf(t, done[0])
-	assert.False(t, o.Pass)
-	assert.Equal(t, []string{"P11"}, o.Failed)
-	result, checks := latestChecks(t, db, id)
-	assert.Equal(t, "fail", result)
-	assert.Contains(t, checks["P11"].Detail, "尚未接入")
-	for _, cid := range []string{"P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P12", "P13"} {
-		assert.True(t, checks[cid].OK, "%s: %s", cid, checks[cid].Detail)
-	}
-	n, _ = s.repo.GetNode(id)
-	assert.Equal(t, VerifyFailed, n.VerifyStatus)
-	assert.Equal(t, "offline", n.Status)
-	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM gpu_slots WHERE node_id=?`, id))
-	cmds := strings.Join(fake.Commands(), "\n")
-	assert.Contains(t, cmds, "docker pull -q "+testProbeImage)
-	assert.Contains(t, cmds, `--gpus '"device=`+fakeUUID0+","+fakeUUID1+`"'`)
-	assert.Contains(t, cmds, "-p 47009:8000", "自检端口从段尾向下选")
-	assert.Contains(t, cmds, "docker rm -f omnis-probe-", "临时容器必须清理")
-
-	// 注入网关自检后再次探活: 通过, 生成 2 个空闲卡槽, 派生库存 2, 商品回到在售。
-	gw := &stubGateway{}
-	s.gateway = gw
-	_, err = s.Verify(10, id)
-	require.NoError(t, err)
+	// 完整探活 P1–P8 全部通过: 生成 2 个空闲卡槽, 派生库存 2, 商品回到在售。探活只读, 不在节点上起容器。
 	done = runTasks(t, s)
 	require.Len(t, done, 1)
 	o = outcomeOf(t, done[0])
 	require.True(t, o.Pass, "failed=%v", o.Failed)
-	assert.Equal(t, []int{47009}, gw.ports)
+	result, checks := latestChecks(t, db, id)
+	assert.Equal(t, "pass", result)
+	require.Len(t, checks, len(fullChecks))
+	for _, cid := range fullChecks {
+		assert.True(t, checks[cid].OK, "%s: %s", cid, checks[cid].Detail)
+	}
+	cmds := strings.Join(fake.Commands(), "\n")
+	assert.NotContains(t, cmds, "docker run", "探活不得在节点上起容器")
+	assert.NotContains(t, cmds, "docker pull", "探活不拉镜像")
 	n, _ = s.repo.GetNode(id)
 	assert.Equal(t, VerifyVerified, n.VerifyStatus)
 	assert.Equal(t, "online", n.Status)
 	require.NotNil(t, n.DriverVersion)
 	assert.Equal(t, "535.104.05", *n.DriverVersion)
 	require.NotNil(t, n.DiskQuotaSupported)
-	assert.True(t, *n.DiskQuotaSupported)
+	assert.False(t, *n.DiskQuotaSupported, "不再检测磁盘配额: 容器节点只能整机出租")
 	slots, err := s.Slots(10, id)
 	require.NoError(t, err)
 	require.Len(t, slots, 2)
@@ -427,25 +400,6 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 	stock, status = productStock(t, db)
 	assert.Equal(t, 2, stock)
 	assert.Equal(t, "active", status)
-
-	// 压测不达标: GPU1 算力低于基准 70% → 该卡 faulty, 其余卡照常出租。
-	fake.Override("docker run --rm --name omnis-probe-", fakeReply{Stdout: `{"results":[{"index":0,"uuid":"` + fakeUUID0 +
-		`","ok":true,"tflops":648.2,"error":""},{"index":1,"uuid":"` + fakeUUID1 + `","ok":true,"tflops":300.5,"error":""}]}` + "\n"})
-	_, err = s.Verify(10, id)
-	require.NoError(t, err)
-	done = runTasks(t, s)
-	fake.ClearOverrides()
-	require.True(t, outcomeOf(t, done[0]).Pass)
-	_, checks = latestChecks(t, db, id)
-	assert.Contains(t, checks["P13"].Detail, "低于基准")
-	assert.Equal(t, SlotFaulty, slotState(t, db, id, 1))
-	stock, _ = productStock(t, db)
-	assert.Equal(t, 1, stock)
-	_, err = s.Verify(10, id)
-	require.NoError(t, err)
-	runTasks(t, s)
-	stock, _ = productStock(t, db)
-	assert.Equal(t, 2, stock)
 
 	// 单卡停用/启用、排空/恢复。
 	require.NoError(t, s.SetSlotState(10, id, 0, SlotWithheld, ""))
@@ -578,8 +532,8 @@ func TestProbeDiscardedWhenSSHChanged(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.ConfirmHostKey(10, id, fake.Fingerprint(), "")
 	require.NoError(t, err)
-	// 压测进行中供给方改了 SSH 用户名(同一 host/port, 指纹保留): commit 时守卫不匹配, 结论作废。
-	fake.OnCommand("docker run --rm --name omnis-probe-", func() {
+	// 探活进行中(P8 读主机资源时)供给方改了 SSH 用户名(同一 host/port, 指纹保留): commit 时守卫不匹配, 结论作废。
+	fake.OnCommand("echo @@nproc", func() {
 		db.MustExec(`UPDATE supplier_nodes SET ssh_user='omnis' WHERE id=?`, id)
 	})
 	task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)

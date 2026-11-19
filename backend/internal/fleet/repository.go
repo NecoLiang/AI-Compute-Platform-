@@ -493,7 +493,7 @@ func (r *Repository) freeSlotUUIDs(q sqlx.Queryer, nodeID int64) (map[int]string
 
 func (r *Repository) catalogEntry(model string) (*CatalogEntry, error) {
 	var c CatalogEntry
-	err := r.db.Get(&c, `SELECT model_name, vendor, vram_gb, probe_baseline_tflops FROM gpu_catalog WHERE model_name=?`,
+	err := r.db.Get(&c, `SELECT model_name, vendor, vram_gb FROM gpu_catalog WHERE model_name=?`,
 		strings.TrimSpace(model))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

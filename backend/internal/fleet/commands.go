@@ -5,7 +5,6 @@ package fleet
 // 同样视为不可信, 回填到命令前必须过校验。
 
 import (
-	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strings"
@@ -21,7 +20,7 @@ const (
 	cmdDocker      = "docker info --format '{{json .}}'"
 	cmdPorts       = "ss -Htln"
 	cmdDockerAlive = "docker ps -q --filter label=omnis.lease"
-	// cmdLightGPUApps 轻探活读宿主机 GPU 计算进程; 前后任一次看到平台探针容器(完整探活压测进行中)则只输出 @@probe, 本轮不判占用。
+	// cmdLightGPUApps 轻探活读宿主机 GPU 计算进程; 前后任一次看到平台探针容器(omnis.probe=1, 如防火墙下发/挖矿扫描)则只输出 @@probe, 本轮不判占用。
 	cmdLightGPUApps = `p1=$(docker ps -q --filter label=omnis.probe=1) || exit 1; ` +
 		`a=$(nvidia-smi --query-compute-apps=gpu_uuid,pid --format=csv,noheader) || exit 1; ` +
 		`p2=$(docker ps -q --filter label=omnis.probe=1) || exit 1; ` +
@@ -122,7 +121,7 @@ func checkUUIDs(uuids []string) error {
 	return nil
 }
 
-// gpusFlag --gpus 参数: 指定空闲卡; 无空闲卡时 "0" 只验运行时(docs/25 §25.4.4 不触碰在租资源)。
+// gpusFlag --gpus 参数: 只挂指定的卡(租约容器), 不触碰其他卡; 空列表为 "0"。
 func gpusFlag(uuids []string) (string, error) {
 	if len(uuids) == 0 {
 		return "0", nil
@@ -140,113 +139,11 @@ func pullCommand(image string) (string, error) {
 	return "docker pull -q " + image, nil
 }
 
-// runtimeCheckCommand P9: 探针容器只挂空闲卡, 列出容器内可见 GPU。
-func runtimeCheckCommand(image string, freeUUIDs []string) (string, error) {
-	if err := checkImage(image); err != nil {
-		return "", err
-	}
-	g, err := gpusFlag(freeUUIDs)
-	if err != nil {
-		return "", err
-	}
-	if len(freeUUIDs) == 0 {
-		return "docker run --rm --network none --gpus " + g + " " + image + " true", nil
-	}
-	return "docker run --rm --network none --gpus " + g + " " + image + " nvidia-smi -L", nil
-}
-
-// quotaCheckCommand P10: --storage-opt size= 不只要能启动, 还要真正限住写入(overlay2 over xfs+pquota)。
-// containerd snapshotter(存储驱动 overlayfs)接受该参数却静默忽略, 只看能否启动会误判; 因此在 64M 配额内
-// 先写 8M(必须成功, 排除写入本身不可用), 再写 128M(必须失败)。输出 @@enforced / @@not-enforced / @@small-fail。
-func quotaCheckCommand(image string) (string, error) {
-	if err := checkImage(image); err != nil {
-		return "", err
-	}
-	return "docker run --rm --network none --storage-opt size=64M " + image + ` sh -c '` +
-		`dd if=/dev/zero of=/tmp/omnis-q1 bs=1M count=8 >/dev/null 2>&1 || { echo @@small-fail; exit 0; }; ` +
-		`if dd if=/dev/zero of=/tmp/omnis-q2 bs=1M count=128 conv=fsync >/dev/null 2>&1; then echo @@not-enforced; else echo @@enforced; fi'`, nil
-}
-
-// pyExec 把固定 Python 脚本以 base64 交给容器内 python3 执行, 规避多层引号。
-func pyExec(script string) string {
-	return `python3 -c 'exec(__import__("base64").b64decode("` + base64.StdEncoding.EncodeToString([]byte(script)) + `"))'`
-}
-
-// listenerScript 端口自检临时监听: 接受连接后立即关闭。
-const listenerScript = `import socket
-s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("0.0.0.0", 8000))
-s.listen(16)
-while True:
-    c, _ = s.accept()
-    c.close()
-`
-
 func checkPort(port int) error {
 	if port < 1024 || port > 65535 {
 		return fmt.Errorf("端口非法: %d", port)
 	}
 	return nil
-}
-
-// portListenerCommand P11/P12: 在租约端口段的空闲端口上起临时监听容器, 并在宿主机本地确认已监听。
-// 容器自带 --rm 与 omnis.probe 标签, 超时被杀时由 cleanupCommand 兜底删除。
-func portListenerCommand(image, name string, port int) (string, error) {
-	if err := checkImage(image); err != nil {
-		return "", err
-	}
-	if !containerRe.MatchString(name) {
-		return "", fmt.Errorf("容器名非法: %q", name)
-	}
-	if err := checkPort(port); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf(`docker run -d --rm --name %s --label omnis.probe=1 -p %d:8000 %s %s >/dev/null && `+
-		`for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do if timeout 2 bash -c '</dev/tcp/127.0.0.1/%d' 2>/dev/null; then echo @@up; exit 0; fi; sleep 1; done; echo @@down`,
-		name, port, image, pyExec(listenerScript), port), nil
-}
-
-func cleanupCommand(name string) (string, error) {
-	if !containerRe.MatchString(name) {
-		return "", fmt.Errorf("容器名非法: %q", name)
-	}
-	return "docker rm -f " + name + " >/dev/null 2>&1; true", nil
-}
-
-// benchBinary P13 压测程序(探针镜像 deploy/images/probe/bench.cpp): 每张可见卡一个线程做 cuBLAS FP16 8192² 矩阵乘,
-// 持续参数指定的秒数, 输出一行 {"results":[…]}; UUID 取自 CUDA 设备属性, 与 nvidia-smi 一致。
-const benchBinary = "omnis-bench"
-
-// benchCommand P13: 只压空闲卡; 容器名固定以便超时后清理。
-func benchCommand(image, name string, freeUUIDs []string, seconds int) (string, error) {
-	if err := checkImage(image); err != nil {
-		return "", err
-	}
-	if !containerRe.MatchString(name) {
-		return "", fmt.Errorf("容器名非法: %q", name)
-	}
-	if len(freeUUIDs) == 0 {
-		return "", fmt.Errorf("无空闲卡可压测")
-	}
-	if seconds < 5 || seconds > 600 {
-		return "", fmt.Errorf("压测时长非法: %d", seconds)
-	}
-	g, err := gpusFlag(freeUUIDs)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("docker run --rm --name %s --label omnis.probe=1 --network none --gpus %s %s %s %d",
-		name, g, image, benchBinary, seconds), nil
-}
-
-// throttleSampleCommand 压测期间每 interval 秒采样一次降频原因, 共 rounds 轮。
-func throttleSampleCommand(rounds, interval int) (string, error) {
-	if rounds < 1 || rounds > 60 || interval < 1 || interval > 60 {
-		return "", fmt.Errorf("采样参数非法")
-	}
-	return fmt.Sprintf("for i in $(seq 1 %d); do sleep %d; echo @@t$i; nvidia-smi --query-gpu=uuid,clocks_throttle_reasons.active --format=csv,noheader; done",
-		rounds, interval), nil
 }
 
 // installKeyCommand 一次性引导: 幂等追加平台公钥行到 ~/.ssh/authorized_keys。

@@ -699,7 +699,7 @@ func ParseComputeApps(out string) (map[string][]string, error) {
 	return res, nil
 }
 
-// ===== P11/P12 端口 =====
+// ===== 监听端口(租约端口分配) =====
 
 // ParseListeningPorts 解析 ss -Htln 的本地监听端口。
 func ParseListeningPorts(out string) map[int]bool {
@@ -721,42 +721,6 @@ func ParseListeningPorts(out string) map[int]bool {
 	return res
 }
 
-// ===== P13 短压测 =====
-
-// BenchResult 探针镜像内单卡矩阵乘结果。
-type BenchResult struct {
-	Index  int     `json:"index"`
-	UUID   string  `json:"uuid"`
-	OK     bool    `json:"ok"`
-	TFLOPS float64 `json:"tflops"`
-	Error  string  `json:"error"`
-}
-
-// ParseBench 取输出中最后一个 {"results":[…]} 行; 容器内其他日志忽略。
-func ParseBench(out string) ([]BenchResult, error) {
-	lines := nonEmptyLines(out)
-	for i := len(lines) - 1; i >= 0; i-- {
-		if !strings.HasPrefix(lines[i], `{"results"`) {
-			continue
-		}
-		var r struct {
-			Results []BenchResult `json:"results"`
-		}
-		if err := json.Unmarshal([]byte(lines[i]), &r); err != nil {
-			return nil, fmt.Errorf("压测结果无法解析: %v", err)
-		}
-		return r.Results, nil
-	}
-	return nil, fmt.Errorf("压测无结果输出: %s", truncate(strings.Join(lastN(lines, 3), " | "), 300))
-}
-
-func lastN(s []string, n int) []string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
-}
-
 // 降频原因位(NVML clocksThrottleReasons)。
 const (
 	throttleSwPowerCap          = 0x4
@@ -766,49 +730,6 @@ const (
 	throttleHwPowerBrake        = 0x80
 	throttleFailMask     uint64 = throttleHwSlowdown | throttleSwThermal | throttleHwThermal | throttleHwPowerBrake
 )
-
-// ParseThrottle 解析采样命令输出(多轮 "uuid, 0x…"), 返回每卡各轮按位或的结果。
-// "[Not Supported]" 记 0。
-func ParseThrottle(out string) (map[string]uint64, error) {
-	res := map[string]uint64{}
-	for _, l := range nonEmptyLines(out) {
-		if strings.HasPrefix(l, "@@") {
-			continue
-		}
-		f := splitCSV(l)
-		if len(f) != 2 || !uuidRe.MatchString(f[0]) {
-			return nil, fmt.Errorf("降频采样输出格式异常: %q", truncate(l, 120))
-		}
-		if naValue(f[1]) {
-			res[f[0]] |= 0
-			continue
-		}
-		v, err := strconv.ParseUint(strings.TrimPrefix(strings.ToLower(f[1]), "0x"), 16, 64)
-		if err != nil {
-			return nil, fmt.Errorf("降频原因无法解析: %q", f[1])
-		}
-		res[f[0]] |= v
-	}
-	return res, nil
-}
-
-// DescribeThrottle 把失败位翻译成中文。
-func DescribeThrottle(bits uint64) string {
-	var s []string
-	if bits&throttleHwSlowdown != 0 {
-		s = append(s, "硬件降频(HW Slowdown)")
-	}
-	if bits&throttleSwThermal != 0 {
-		s = append(s, "软件温控降频")
-	}
-	if bits&throttleHwThermal != 0 {
-		s = append(s, "硬件温控降频")
-	}
-	if bits&throttleHwPowerBrake != 0 {
-		s = append(s, "外部功率刹车降频(Power Brake)")
-	}
-	return strings.Join(s, "、")
-}
 
 // ===== 周期遥测(docs/27 §27.3 F3/F4) =====
 
