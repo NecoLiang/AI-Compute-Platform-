@@ -361,36 +361,3 @@ func TestParseContainerAndPorts(t *testing.T) {
 	assert.True(t, p[22] && p[40000] && p[40001])
 	assert.False(t, p[40002])
 }
-
-func TestBenchCommand(t *testing.T) {
-	cmd, err := benchCommand(testProbeImage, "omnis-probe-7-0a1b2c3d", []string{"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"}, 60)
-	require.NoError(t, err)
-	assert.True(t, strings.HasSuffix(cmd, ` --network none --gpus '"device=GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"' `+testProbeImage+" omnis-bench 60"), cmd)
-	_, err = benchCommand("busybox:latest", "omnis-probe-7-0a1b2c3d", []string{"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"}, 60)
-	assert.Error(t, err)
-	_, err = benchCommand(testProbeImage, "omnis-probe-7-0a1b2c3d", nil, 60)
-	assert.Error(t, err)
-	_, err = benchCommand(testProbeImage, "omnis-probe-7-0a1b2c3d", []string{"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"}, 1)
-	assert.Error(t, err)
-}
-
-func TestParseBenchAndThrottle(t *testing.T) {
-	out := "Unable to find image 'probe' locally\nsome warning\n" +
-		`{"results":[{"index":0,"uuid":"GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11","ok":true,"tflops":612.4,"error":""},{"index":1,"uuid":"GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d","ok":false,"tflops":0,"error":"CUDA error: an illegal memory access was encountered"}]}` + "\n"
-	r, err := ParseBench(out)
-	require.NoError(t, err)
-	require.Len(t, r, 2)
-	assert.InDelta(t, 612.4, r[0].TFLOPS, 0.01)
-	assert.False(t, r[1].OK)
-
-	_, err = ParseBench("docker: Error response from daemon: could not select device driver \"\" with capabilities: [[gpu]].\n")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "could not select device driver")
-
-	th, err := ParseThrottle("@@t0\nGPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 0x0000000000000004\nGPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d, 0x0000000000000000\n" +
-		"@@t1\nGPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11, 0x0000000000000004\nGPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d, 0x0000000000000040\n")
-	require.NoError(t, err)
-	assert.Zero(t, th["GPU-5b1d6c0e-7c3a-3f0e-9a39-0b6a6f1d2c11"]&throttleFailMask, "SW Power Cap 是满载常态, 不判降频")
-	assert.NotZero(t, th["GPU-0c3e1b2a-4d5f-6a7b-8c9d-0e1f2a3b4c5d"]&throttleFailMask)
-	assert.True(t, strings.Contains(DescribeThrottle(0x40), "硬件温控"))
-}

@@ -19,8 +19,7 @@ import (
 )
 
 // 平台镜像冒烟(deploy/images, .github/workflows/fleet-images.yml): 在本机 Docker(Linux, 无 GPU)上用生产的命令模板
-// 原样执行一遍不依赖 GPU 的部分, 验证镜像满足模板的全部假设。依赖 GPU 的 P9/P13 与 --storage-opt 配额(P10)
-// 只能在真机上验收, 这里只检查镜像内的前提(压测程序与 cuBLAS 可加载、dd 小写入可用)。
+// 原样执行一遍不依赖 GPU 的部分, 验证镜像满足模板的全部假设(挂卡只能在真机上验收)。
 //
 //	SMOKE_PROBE_IMAGE  探针镜像 ref@sha256(本机已拉取或可拉取)
 //	SMOKE_BASE_IMAGE   租约基础镜像 ref@sha256
@@ -46,51 +45,6 @@ func TestFleetImagesSmoke(t *testing.T) {
 		require.NoError(t, err, out)
 		return out
 	}
-
-	t.Run("probe_bench_no_gpu", func(t *testing.T) {
-		// P13 生产命令只去掉挂卡参数: 压测程序与 cuBLAS 动态库可加载, 无 GPU 时按约定输出空结果(运行需要 GPU)。
-		name := "omnis-probe-1-" + randHex(t, 4)
-		uuids := []string{"GPU-" + randHex(t, 4) + "-" + randHex(t, 2) + "-" + randHex(t, 2) + "-" + randHex(t, 2) + "-" + randHex(t, 6)}
-		cmd, err := benchCommand(probe, name, uuids, 5)
-		require.NoError(t, err)
-		g, err := gpusFlag(uuids)
-		require.NoError(t, err)
-		noGPU := strings.Replace(cmd, " --gpus "+g, "", 1)
-		require.NotEqual(t, cmd, noGPU)
-		out := mustHost(t, noGPU)
-		results, err := ParseBench(out)
-		require.NoError(t, err, out)
-		assert.Empty(t, results)
-		out = mustHost(t, "docker run --rm --network none "+probe+` sh -c 'ldd /usr/local/bin/omnis-bench; ldd /usr/local/bin/omnis-bench | grep -q "not found" || echo @@resolved'`)
-		assert.Contains(t, out, "@@resolved")
-		assert.Contains(t, out, "libcublas.so.12")
-	})
-
-	t.Run("probe_quota_command_shape", func(t *testing.T) {
-		// 本机多为 overlay2 over ext4: --storage-opt 直接报错或被忽略; 只要求不是"小写入失败"(镜像内 sh/dd 可用)。
-		cmd, err := quotaCheckCommand(probe)
-		require.NoError(t, err)
-		out, _ := host(t, cmd)
-		t.Logf("P10 on this host: %s", strings.TrimSpace(out))
-		assert.NotContains(t, out, "@@small-fail")
-		out = mustHost(t, "docker run --rm --network none "+probe+
-			` sh -c 'dd if=/dev/zero of=/tmp/q bs=1M count=8 >/dev/null 2>&1 && echo @@ok'`)
-		assert.Contains(t, out, "@@ok")
-	})
-
-	t.Run("probe_port_listener", func(t *testing.T) {
-		name := "omnis-probe-1-" + randHex(t, 4)
-		cmd, err := portListenerCommand(probe, name, 47010)
-		require.NoError(t, err)
-		clean, err := cleanupCommand(name)
-		require.NoError(t, err)
-		t.Cleanup(func() { _, _ = host(t, clean) })
-		out := mustHost(t, cmd)
-		assert.Contains(t, out, "@@up")
-		c, err := net.DialTimeout("tcp", "127.0.0.1:47010", 3*time.Second)
-		require.NoError(t, err)
-		_ = c.Close()
-	})
 
 	t.Run("probe_host_root_chroot", func(t *testing.T) {
 		cmd, err := hostRootCommand(probe, "echo \"@@root $(id -u)\"; command -v sh >/dev/null && echo @@hostsh")
@@ -176,34 +130,6 @@ func TestFleetImagesSmoke(t *testing.T) {
 			assert.Contains(t, out, want)
 		}
 		assert.Regexp(t, `:0016 [0-9A-F:]+ 0A `, out, "sshd listening on :22 must appear in the container's /proc/net/tcp")
-	})
-
-	t.Run("direct_probe_port_toggle", func(t *testing.T) {
-		// 直连模式 P12 的前提: 断开容器网络即撤销端口映射, 重新接入即恢复。
-		name := "omnis-probe-1-" + randHex(t, 4)
-		const port = 47030
-		cmd, err := portListenerNetCommand(probe, name, port)
-		require.NoError(t, err)
-		clean, err := cleanupNetCommand(name)
-		require.NoError(t, err)
-		t.Cleanup(func() { _, _ = host(t, clean) })
-		assert.Contains(t, mustHost(t, cmd), "@@up")
-		reach := func() error {
-			c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 3*time.Second)
-			if err == nil {
-				_ = c.Close()
-			}
-			return err
-		}
-		require.NoError(t, reach())
-		off, err := probeNetToggleCommand(name, port, false)
-		require.NoError(t, err)
-		assert.Contains(t, mustHost(t, off), "@@closed")
-		assert.Error(t, reach())
-		on, err := probeNetToggleCommand(name, port, true)
-		require.NoError(t, err)
-		assert.Contains(t, mustHost(t, on), "@@open")
-		assert.NoError(t, reach())
 	})
 
 	t.Run("direct_lease_container_access", func(t *testing.T) {

@@ -74,7 +74,7 @@ func TestSuspendDuringRunningProbeCannotVerify(t *testing.T) {
 	fake := newFakeNode(t, genPW)
 	id, taskID := onboardPending(t, s, fake, "gpu-gen-1", 47500)
 
-	fake.OnCommand("docker run --rm --name omnis-probe-", once(func() {
+	fake.OnCommand("echo @@nproc", once(func() {
 		require.NoError(t, s.Suspend(1, id, "运行中停用", ""))
 	}))
 	task, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
@@ -141,7 +141,7 @@ func TestMarkVerifiedRejectsFailedAndNeedsReimage(t *testing.T) {
 			s.gateway = &stubGateway{}
 			fake := newFakeNode(t, genPW)
 			id, _ := onboardPending(t, s, fake, "gpu-gen-3", 47540)
-			fake.OnCommand("docker run --rm --name omnis-probe-", once(func() {
+			fake.OnCommand("echo @@nproc", once(func() {
 				db.MustExec(`UPDATE supplier_nodes SET verify_status=? WHERE id=?`, st, id)
 			}))
 			done := runTasks(t, s)
@@ -192,9 +192,8 @@ func TestReimageConfirmGoesThroughVerifying(t *testing.T) {
 	assert.Equal(t, errcode.Conflict, codeOf(err), "仅 needs_reimage 可确认")
 }
 
-// 排队中的 port_recheck 不能顶替完整探活: 请求完整探活时新入队完整探活并作废排队复检,
-// 在跑的复检保留, 完整探活排在其后; 节点最终 verified 而不是停在 verifying。
-func TestFullProbeNotSatisfiedByPortRecheck(t *testing.T) {
+// 进行中的完整探活被重复请求(供给方重测/周期调度)复用, 不重复入队; 节点最终 verified 而不是停在 verifying。
+func TestFullProbeReusedWhileActive(t *testing.T) {
 	db := setupFleetDB(t)
 	seedManaged(t, db)
 	s := newTestFleet(t, db)
@@ -202,56 +201,32 @@ func TestFullProbeNotSatisfiedByPortRecheck(t *testing.T) {
 	fake := newFakeNode(t, genPW)
 	id := onboardVerified(t, s, fake, "gpu-gen-5", 47580)
 
-	enqueue := func(mode string) int64 {
+	enqueue := func() int64 {
 		var tid int64
 		require.NoError(t, s.inTx(func(tx *sqlx.Tx) error {
 			n, err := s.repo.lockNode(tx, id)
 			if err != nil {
 				return err
 			}
-			tid, err = s.enqueueProbeTx(tx, n, mode, "periodic", 8)
+			tid, err = s.enqueueProbeTx(tx, n, "periodic", 8)
 			return err
 		}))
 		return tid
 	}
 
-	// 1) 排队中的复检被完整探活取代。
-	recheck := enqueue(ProbePortRecheck)
-	assert.Equal(t, recheck, enqueue(ProbePortRecheck), "复检请求复用排队复检")
 	db.MustExec(`UPDATE supplier_nodes SET verify_status='failed' WHERE id=?`, id)
 	full, err := s.Verify(10, id)
 	require.NoError(t, err)
-	assert.NotEqual(t, recheck, full)
-	assert.Equal(t, TaskFailed, taskState(t, db, recheck))
 	assert.Equal(t, VerifyVerifying, verifyStatus(t, s, id))
 	again, err := s.Verify(10, id)
 	require.NoError(t, err)
 	assert.Equal(t, full, again, "进行中重复提交复用同一完整探活")
-	assert.Equal(t, full, enqueue(ProbePortRecheck), "复检请求可由完整探活覆盖")
+	assert.Equal(t, full, enqueue(), "周期调度复用排队中的完整探活")
 	done := runTasks(t, s)
 	require.Len(t, done, 1)
-	require.True(t, outcomeOf(t, done[0]).Pass)
-	assert.Equal(t, VerifyVerified, verifyStatus(t, s, id))
-
-	// 2) 在跑的复检: 完整探活另行入队, 排在复检之后执行。
-	recheck = enqueue(ProbePortRecheck)
-	running, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
-	require.NoError(t, err)
-	require.Equal(t, recheck, running.ID)
-	db.MustExec(`UPDATE supplier_nodes SET verify_status='failed' WHERE id=?`, id)
-	full, err = s.Verify(10, id)
-	require.NoError(t, err)
-	assert.NotEqual(t, recheck, full)
-	assert.Equal(t, TaskRunning, taskState(t, db, recheck))
-	assert.Equal(t, VerifyVerifying, verifyStatus(t, s, id))
-	none, err := s.repo.claimNext([]string{KindProbe}, taskLeaseTTL)
-	require.NoError(t, err)
-	assert.Nil(t, none, "同一节点串行: 复检未结束前不认领完整探活")
-	s.execute(context.Background(), running)
-	done = runTasks(t, s)
-	require.Len(t, done, 1)
-	assert.Equal(t, full, done[0].ID)
-	require.True(t, outcomeOf(t, done[0]).Pass)
+	out := outcomeOf(t, done[0])
+	require.True(t, out.Pass, "%+v", out)
+	assert.Equal(t, ProbeFull, out.Mode)
 	assert.Equal(t, VerifyVerified, verifyStatus(t, s, id))
 }
 

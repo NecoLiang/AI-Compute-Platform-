@@ -328,7 +328,7 @@ func (p *provisionRun) container(ctx context.Context) error {
 		}
 		disk = *n.DiskPerCardGB * l.Cards
 	case l.Cards != n.TotalCards:
-		return fmt.Errorf("节点 #%d 不支持磁盘配额(P10), 只能整机出租, 不能开通 %d/%d 卡", n.ID, l.Cards, n.TotalCards)
+		return fmt.Errorf("节点 #%d 不支持磁盘配额, 只能整机出租, 不能开通 %d/%d 卡", n.ID, l.Cards, n.TotalCards)
 	}
 	init, err := s.leaseInitScript(n)
 	if err != nil {

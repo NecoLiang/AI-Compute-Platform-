@@ -56,8 +56,7 @@ const (
 
 // 探活模式(写在 probe 任务 payload 中)。
 const (
-	ProbeFull        = "full"         // P1-P13
-	ProbePortRecheck = "port_recheck" // P1-P3 + P11/P12
+	ProbeFull = "full" // P1-P8(原 port_recheck 模式已移除, 遗留任务按 full 执行)
 )
 
 // Node supplier_nodes 一行(含托管列)。凭证类字段一律不出 JSON。
@@ -170,14 +169,14 @@ const taskColumns = `id, node_id, lease_id, deployment_id, kind, state, priority
 
 // ProbePayload probe 任务参数。
 type ProbePayload struct {
-	Mode    string `json:"mode"`    // full / port_recheck
+	Mode    string `json:"mode"`    // full
 	Trigger string `json:"trigger"` // supplier / operator / periodic / host_key_confirm / reimage_confirm / resume
 	// Generation 入队时节点的 supplier_nodes.generation。停用/恢复/重装确认/改连接信息/确认指纹会把节点代次 +1,
 	// 代次不一致的探活在开始前中止、提交时作废(不写报告、不改节点状态), 防止旧探活把节点"复活"。
 	Generation int `json:"generation"`
 }
 
-// Check 探活单项结论。Required=false 的项不通过不阻断上架(P10)。
+// Check 探活单项结论。Required=false 的项不通过不阻断上架(现 P1–P8 均为必过项; 字段保留以兼容历史报告)。
 type Check struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`

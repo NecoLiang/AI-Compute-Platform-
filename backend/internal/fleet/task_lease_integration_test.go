@@ -64,7 +64,7 @@ func TestHeartbeatKeepsLongProbeAlive(t *testing.T) {
 	fake := newFakeNode(t, genPW)
 	id, taskID := onboardPending(t, s, fake, "gpu-lease-2", 47660)
 
-	fake.OnCommand("docker run --rm --name omnis-probe-", once(func() {
+	fake.OnCommand("echo @@nproc", once(func() {
 		time.Sleep(5500 * time.Millisecond) // 超过 TTL
 		s.reclaimOnce()
 	}))
@@ -90,7 +90,7 @@ func TestLostLeaseCancelsRunningProbe(t *testing.T) {
 	fake := newFakeNode(t, genPW)
 	id, taskID := onboardPending(t, s, fake, "gpu-lease-3", 47680)
 
-	fake.OnCommand("docker run --rm --name omnis-probe-", once(func() {
+	fake.OnCommand("echo @@nproc", once(func() {
 		require.NoError(t, s.Suspend(1, id, "执行中停用", ""))
 		time.Sleep(6 * time.Second) // 节点侧命令迟迟不返回
 	}))

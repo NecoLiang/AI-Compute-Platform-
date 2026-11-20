@@ -24,7 +24,7 @@ func TestFleetDisabledByDefaultKeepsDefaults(t *testing.T) {
 	if cfg.Fleet.Enabled {
 		t.Fatal("fleet must default to disabled")
 	}
-	if cfg.Fleet.Workers != 8 || cfg.Fleet.ProbeConcurrency != 32 || cfg.Fleet.Probe.MinPerfRatio != 0.7 || cfg.AccessGW.PublicPort != 2222 ||
+	if cfg.Fleet.Workers != 8 || cfg.Fleet.ProbeConcurrency != 32 || cfg.AccessGW.PublicPort != 2222 ||
 		cfg.Fleet.ModelCacheDir != "/data/omnis-models" {
 		t.Fatalf("defaults not applied: %+v %+v", cfg.Fleet, cfg.AccessGW)
 	}

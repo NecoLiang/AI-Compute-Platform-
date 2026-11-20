@@ -232,7 +232,7 @@ func (s *Service) ReimageConfirm(supplierID, nodeID int64, expectedFP, ip string
 		if !n.sshReady() {
 			return nil
 		}
-		taskID, err = s.enqueueProbeTx(tx, n, ProbeFull, "reimage_confirm", 5)
+		taskID, err = s.enqueueProbeTx(tx, n, "reimage_confirm", 5)
 		return err
 	})
 	if err != nil {

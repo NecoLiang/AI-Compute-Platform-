@@ -135,8 +135,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 ```json
 [{"id":31,"node_id":7,"kind":"verify","result":"pass","created_at":"...",
   "checks":[{"id":"P1","name":"TCP 可达","ok":true,"required":true,"detail":"203.0.113.10:22 可达"},
-            {"id":"P10","name":"磁盘配额能力","ok":false,"required":false,"detail":"--storage-opt size= 不可用 ..."},
-            {"id":"P13","name":"短压测","ok":true,"required":true,"detail":"压测 8 张空闲卡 60s, 8 张通过; ..."}],
+            {"id":"P8","name":"主机资源","ok":true,"required":true,"detail":"CPU 192 核, 内存 2015GB, ...; Docker 28.x"}],
   "inventory":{"cpu_cores":224,"mem_gb":2015,"disk_free_gb":12946,"disk_path":"/data","disk_quota_supported":true,
                "driver_version":"535.104.05","cuda_version":"12.2","os":"Ubuntu 22.04.4 LTS","kernel":"5.15.0-113-generic",
                "docker_version":"24.0.7","gpus":[{"index":0,"uuid":"GPU-...","name":"NVIDIA H100 80GB HBM3",
@@ -144,8 +143,8 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
                "topo_groups":{"0":"g0-nvlink"},"faulty":{"3":"实测 300.5 TFLOPS 低于基准 ..."}}}]
 ```
 
-- `kind`：`verify`（完整探活）/ `port_recheck`（端口复测）。`result=pass` 表示全部必检项通过（P10 为非必检）。
-- 连接类失败的 `detail` 为通用提示：P1「管理端口不可达」、P2「SSH 握手失败」、P11「经网关连接 host:port 失败(检查是否已按上架说明放行网关出口 IP)」；不包含解析出的地址或底层错误串（只写服务端日志）。
+- `kind`：`verify`（完整探活，P1–P8）；历史报告中可能有 `port_recheck`（端口复测，2026-11-19 已移除）。`result=pass` 表示全部必检项通过（P1–P8 均为必检）。
+- 连接类失败的 `detail` 为通用提示：P1「管理端口不可达」、P2「SSH 握手失败」；不包含解析出的地址或底层错误串（只写服务端日志）。
 - `checks[].skipped=true` 表示前置项未通过未执行。`inventory` 在连接阶段失败或待确认指纹时为 `null`。
 
 ## GET /supplier/nodes/:id/slots · 卡槽 ✅
@@ -173,7 +172,7 @@ curl -X PUT .../supplier/nodes/7/ssh -H "Authorization: Bearer $TOKEN" -H "Conte
 - 可调状态：`needs_reimage`；或闸门仍在、探活连到新系统后被记为指纹不符的节点。其他状态 40900「仅待重装(needs_reimage)的节点可确认重装」。节点不属于本人 40400。
 - 节点上仍有**冻结中**（`suspended`，运营核查中）的整机租约 → 40900「节点上的租约 l-… 处于冻结核查中, 现场须保留, 待运营结案后再重装确认」；有其他在租/开通中的租约 → 40900。
 - 节点上停在 `purging` 的整机租约（清除任务因节点已重装连不上或指纹不符而反复失败）随重装确认**结案**：租约 → `purged`、卡槽 `draining → free`、未执行的 `stop/purge` 任务作废（`failed`），写清除回执（`executor="supplier_reimage"`，`steps=[{"step":"account","target":"omnis-<lease_no>","outcome":"reimaged"}]`，`reason`「节点已由供给方重装确认(新主机指纹), 租约账户随系统重装清除」）。
-- 成功：新指纹钉死为已确认（`host_key_confirmed_at` 写入），清除重装闸门，节点代次 +1（重装前入队/在跑的探活结论作废），节点 → `verifying` 并入队**完整探活**（`trigger=reimage_confirm`，P1–P13 全量，含压测）；探活**连接时以新指纹校验**，不一致 → `key_mismatch`，一致且全部必检项通过 → `verified` 并重新计入可售。写审计 `node.reimage_confirmed`（`before`：原 `verify_status` 与指纹；`after`：新指纹与 `finalized_leases` 结案租约号）。
+- 成功：新指纹钉死为已确认（`host_key_confirmed_at` 写入），清除重装闸门，节点代次 +1（重装前入队/在跑的探活结论作废），节点 → `verifying` 并入队**完整探活**（`trigger=reimage_confirm`，P1–P8）；探活**连接时以新指纹校验**，不一致 → `key_mismatch`，一致且全部必检项通过 → `verified` 并重新计入可售。写审计 `node.reimage_confirmed`（`before`：原 `verify_status` 与指纹；`after`：新指纹与 `finalized_leases` 结案租约号）。
 
 ---
 
@@ -588,17 +587,14 @@ curl -X POST http://localhost:8080/api/v1/user/ssh-keys \
 | P6 | 拓扑 | `nvidia-smi topo -m` → `topo_group` |
 | P7 | 健康 | 不可纠正 ECC、退役页/行重映射待生效或失败、24h 致命 Xid；问题卡标 `faulty`；**全部卡故障才判不通过** |
 | P8 | 主机资源 | CPU/内存/Docker 数据目录所在盘/OS/内核 + 驱动 ≥ `fleet.min_driver_version` |
-| P9 | 容器运行时 | Docker ≥ 24；拉取 `fleet.probe_image`；`docker run --gpus "device=<空闲卡>"` 可见卡数一致 |
-| P10 | 磁盘配额（非必检） | `--storage-opt size=1G`；不支持则只能整机出租 |
-| P11 | 租约端口：网关可达（`direct`：平台从公网入口可达） | **`direct`**：临时监听容器接入专用临时网络并映射到端口段内空闲端口，主服务直连 `ssh_host:端口` 必须连上（不通 → 提示端口段须对公网放行入方向）。**`gateway`**：端口段内**从末尾向下**选空闲端口起临时 TCP 监听容器，由访问网关从其出口做 TCP 连通自检（S2 T-085：系统自检身份登录 `p-<token>` 下发任务，见下文「访问网关内部接口」`probe`）。网关未配置、不可达、主机指纹不符或未在 10s 内回报 → 判不通过 |
-| P12 | 租约端口：未裸露（`direct`：可切断） | **`direct`**：断开监听容器的网络后必须连不上、重新接入后必须恢复（证明 Docker 断网能切断买家连接；入口前另有转发时失败）；临时容器与网络随后删除。**`gateway`**：同一端口从主服务出口直连，必须连不上 |
-| P13 | 短压测 | 空闲卡逐卡 FP16 矩阵乘（默认 60s）+ 降频采样 + 压测后复扫 Xid/ECC；低于 `gpu_catalog.probe_baseline_tflops × fleet.probe.min_perf_ratio`、降频、掉卡的卡标 `faulty`；**全部卡不通过才判不通过**；无空闲卡时通过并注明 |
 
-在租/预留/排空的卡只做只读检查（P4/P7），侵入项只用空闲卡与未分配端口。
+> P9–P13（容器运行时、磁盘配额、租约端口可达/可切断、短压测）已于 2026-11-19 移除：探活只做 P1–P8；`disk_quota_supported` 恒为 0，容器节点只能整机出租。
+
+P1–P8 全部为只读命令，不起容器、不占卡、不用端口段。
 
 **结论落库**：全部必检项通过 → `verified`、`status=online`、同步卡槽（健康卡 `free`、问题卡 `faulty`，此前 faulty 的卡恢复健康后回 `free`）、重算库存。任一必检项不通过 → `failed` + `status=offline`，库存扣除。周期补跑的完整探活若只是连不上（P1–P3）则只写报告，在线状态交给轻量探活判定。探活期间节点被停用/恢复、重装确认、SSH 信息被修改或指纹被确认（节点代次变化）→ 结论作废（任务 `result.discarded=true`，不写报告），不改节点状态；代次已变化后才开始执行的旧任务直接 `failed`、不连接节点。只有 `verifying`（本代次完整探活）或 `verified`（周期补跑）的节点能被探活结论置为 `verified`。
 
-**周期**：`verified` 节点每 60s SSH 轻量探活（`nvidia-smi` 利用率/温度/ECC + Docker 守护进程 + 近 2 分钟 Xid），成功写心跳与 `available_cards`；距上次成功超过 90s → `offline` + 通知，恢复后自动上线。空闲卡掉卡或出现致命错误 → `faulty` + 通知；在租卡异常仅记运营告警（租约侧处理在 S2）。完整探活每 12h、端口复测每 24h 自动入队。
+**周期**：`verified` 节点每 60s SSH 轻量探活（`nvidia-smi` 利用率/温度/ECC + Docker 守护进程 + 近 2 分钟 Xid），成功写心跳与 `available_cards`；距上次成功超过 90s → `offline` + 通知，恢复后自动上线。空闲卡掉卡或出现致命错误 → `faulty` + 通知；在租卡异常仅记运营告警（租约侧处理在 S2）。完整探活每 12h 自动入队（端口复测已移除）。
 
 ---
 

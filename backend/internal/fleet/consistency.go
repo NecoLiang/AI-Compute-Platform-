@@ -8,12 +8,11 @@ import (
 	"strings"
 )
 
-// CatalogEntry P5/P13 用到的 gpu_catalog 字段。
+// CatalogEntry P5 用到的 gpu_catalog 字段。
 type CatalogEntry struct {
-	ModelName           string   `db:"model_name"`
-	Vendor              string   `db:"vendor"`
-	VRAMGB              *int     `db:"vram_gb"`
-	ProbeBaselineTFLOPS *float64 `db:"probe_baseline_tflops"`
+	ModelName string `db:"model_name"`
+	Vendor    string `db:"vendor"`
+	VRAMGB    *int   `db:"vram_gb"`
 }
 
 var memSuffixRe = regexp.MustCompile(`(?i)[-\s]?(\d+)\s*G(B)?$`)

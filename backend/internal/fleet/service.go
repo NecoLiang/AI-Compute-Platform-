@@ -54,11 +54,9 @@ type Notifier interface {
 	Record(userID int64, notifType, title, content, link string) error
 }
 
-// GatewaySelfTester 经访问网关的自检(docs/25 §25.4.3 P11 / §25.5.1 ⑤)。由 accessgw 模块(T-085)提供;
-// 未接入时 P11 与开通自检均判为不通过并写明原因, 不伪造通过。
+// GatewaySelfTester 经访问网关的自检(docs/25 §25.5.1 ⑤)。由 accessgw 模块(T-085)提供;
+// 未接入时开通自检判为不通过并写明原因, 不伪造通过。
 type GatewaySelfTester interface {
-	// SelfTestPort P11: 由网关主机(出口 IP 即节点放行的 IP)对节点临时端口做一次 TCP 连接。
-	SelfTestPort(ctx context.Context, nodeID int64, host string, port int) error
 	// SelfTestLease 开通 ⑤: 以系统自检身份经网关公网入口登录 provisioning 租约, 执行 nvidia-smi -L 并返回输出。
 	SelfTestLease(ctx context.Context, leaseNo string) (string, error)
 	// RecheckLease 节点重启对账(T-087): 以系统自检身份经网关登录 active 租约(需主服务登记的一次性复检许可)。
@@ -74,23 +72,20 @@ type Deps struct {
 }
 
 type Service struct {
-	repo      *Repository
-	products  ProductStore
-	health    HealthRefresher
-	notifier  Notifier
-	gateway   GatewaySelfTester
-	rdb       *redis.Client  // 到期提醒去重与周期任务多实例互斥(T-087); nil 时不发到期提醒
-	outage    OutageRecorder // 停机认定(T-105); NewService 注入 outageBook, 测试可覆盖
-	refunder  OutageRefunder // 停机退费(T-106); nil 时退费补偿返回 50000
-	breach    BreachRefunder // 供给方违约退款(T-106); nil 时返回 50000
-	cfg       config.FleetConfig
-	gw        config.AccessGWConfig
-	gwEgress  []string
-	credKey   []byte
-	dialer    *Dialer
-	benchSecs int
-	sampleN   int
-	sampleGap int
+	repo     *Repository
+	products ProductStore
+	health   HealthRefresher
+	notifier Notifier
+	gateway  GatewaySelfTester
+	rdb      *redis.Client  // 到期提醒去重与周期任务多实例互斥(T-087); nil 时不发到期提醒
+	outage   OutageRecorder // 停机认定(T-105); NewService 注入 outageBook, 测试可覆盖
+	refunder OutageRefunder // 停机退费(T-106); nil 时退费补偿返回 50000
+	breach   BreachRefunder // 供给方违约退款(T-106); nil 时返回 50000
+	cfg      config.FleetConfig
+	gw       config.AccessGWConfig
+	gwEgress []string
+	credKey  []byte
+	dialer   *Dialer
 
 	extraExecutors map[string]taskExecutor // probe 之外的任务执行器(T-084 provision 等), 启动前注册
 	taskTTL        time.Duration           // 任务锁租约, 0 = taskLeaseTTL(测试可缩短)
@@ -116,7 +111,6 @@ func NewService(repo *Repository, deps Deps, cfg config.FleetConfig, gw config.A
 		repo: repo, products: deps.Products, health: deps.Health, notifier: deps.Notifier, gateway: deps.Gateway,
 		cfg: cfg, gw: gw, gwEgress: gw.EgressIPs, credKey: credKey,
 		dialer:    dialer,
-		benchSecs: 60, sampleN: 6, sampleGap: 10,
 		startedAt: time.Now(),
 	}
 	s.registerExecutor(KindProvision, taskExecutor{timeout: provisionTimeout, run: s.runProvisionTask, onDead: s.onProvisionDead})

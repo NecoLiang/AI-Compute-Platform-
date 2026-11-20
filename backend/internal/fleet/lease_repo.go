@@ -107,7 +107,7 @@ func (r *Repository) claimPort(tx *sqlx.Tx, leaseID int64, port int) (bool, erro
 	return affected(res, err)
 }
 
-// leasedPorts 节点上被租约占用的端口(开通分配与 P11 选端口都要排除)。
+// leasedPorts 节点上被租约占用的端口(开通分配时排除)。
 func (r *Repository) leasedPorts(q sqlx.Queryer, nodeID int64) (map[int]bool, error) {
 	var ports []int
 	if err := sqlx.Select(q, &ports, `SELECT port_claim FROM leases WHERE node_id=? AND port_claim IS NOT NULL`, nodeID); err != nil {

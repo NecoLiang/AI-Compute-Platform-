@@ -347,36 +347,3 @@ func TestBareMetalKeysScript(t *testing.T) {
 	_, err = bareMetalKeysScript("bad", []string{platform})
 	assert.Error(t, err)
 }
-
-func TestDirectProbePortCommands(t *testing.T) {
-	name := "omnis-probe-7-0a1b2c3d"
-	cmd, err := portListenerNetCommand(testProbeImage, name, 40099)
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(cmd, "docker network create --label omnis.probe=1 "+name+"-net >/dev/null && "), cmd)
-	assert.Contains(t, cmd, "--network "+name+"-net -p 40099:8000 "+testProbeImage+" ")
-	shSyntaxOK(t, cmd)
-
-	_, err = portListenerNetCommand("busybox:latest", name, 40099)
-	assert.Error(t, err)
-	_, err = portListenerNetCommand(testProbeImage, "omnis-probe-x", 40099)
-	assert.Error(t, err)
-	_, err = portListenerNetCommand(testProbeImage, name, 22)
-	assert.Error(t, err)
-
-	off, err := probeNetToggleCommand(name, 40099, false)
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(off, "docker network disconnect -f "+name+"-net "+name+" || exit 1; "))
-	assert.Contains(t, off, "@@closed")
-	shSyntaxOK(t, off)
-	on, err := probeNetToggleCommand(name, 40099, true)
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(on, "docker network connect "+name+"-net "+name+" || exit 1; "))
-	assert.Contains(t, on, "@@open")
-	shSyntaxOK(t, on)
-	_, err = probeNetToggleCommand("x; reboot", 40099, true)
-	assert.Error(t, err)
-
-	clean, err := cleanupNetCommand(name)
-	require.NoError(t, err)
-	assert.Equal(t, "docker rm -f "+name+" >/dev/null 2>&1; docker network rm "+name+"-net >/dev/null 2>&1; true", clean)
-}

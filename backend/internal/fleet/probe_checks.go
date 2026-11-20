@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -38,7 +37,7 @@ func (p *probeRun) inventory(ctx context.Context) {
 		p.set("P4", false, "同一张卡不能重复上架(如为本人机器请删除旧节点; 若被他人抢先登记请提交工单由运营仲裁): "+strings.Join(d, "; "))
 		return
 	}
-	// 宿主机上的 GPU 计算进程: 查不清就不能确认哪些卡可做侵入项(P9 挂卡、P13 压测), 整次探活不通过。
+	// 宿主机上的 GPU 计算进程: 查不清就不能确认哪些卡空闲可售, 整次探活不通过。
 	out, err = p.run(ctx, cmdGPUApps)
 	if err != nil {
 		p.set("P4", false, "查询 GPU 计算进程失败(无法确认空闲卡未被占用): "+err.Error())
@@ -52,7 +51,6 @@ func (p *probeRun) inventory(ctx context.Context) {
 	p.gpus, p.inv.GPUs, p.inv.DriverVersion = gpus, gpus, gpus[0].Driver
 	p.set("P4", true, fmt.Sprintf("%d 张 %s, 驱动 %s", len(gpus), gpus[0].Name, gpus[0].Driver))
 
-	// 在租/预留/排空的卡只做只读检查。
 	slots, err := p.s.repo.listSlots(p.s.repo.db, p.n.ID)
 	if err != nil {
 		p.set("P5", false, "读取卡槽失败: "+err.Error())
@@ -65,7 +63,7 @@ func (p *probeRun) inventory(ctx context.Context) {
 			busy[sl.GPUUUID] = true
 		}
 	}
-	// 非平台在租的卡上已有宿主机计算进程(供给方自用或残留): 不做侵入项、不计入可售, 进程退出后下次完整探活自动恢复。
+	// 非平台在租的卡上已有宿主机计算进程(供给方自用或残留): 不计入可售, 进程退出后下次完整探活自动恢复。
 	hostBusy := map[int]string{}
 	for _, g := range gpus {
 		if busy[g.UUID] {
@@ -73,9 +71,7 @@ func (p *probeRun) inventory(ctx context.Context) {
 		}
 		if pids := apps[strings.ToUpper(g.UUID)]; len(pids) > 0 {
 			hostBusy[g.Index] = fmt.Sprintf("宿主机计算进程占用(pid %s), 不计入可售, 进程退出后下次完整探活自动恢复", strings.Join(pids, ","))
-			continue
 		}
-		p.freeIdx[g.Index] = true
 	}
 
 	if d := CheckConsistency(p.product.GpuModel, p.cat, p.n.TotalCards, gpus); len(d) > 0 {
@@ -99,7 +95,7 @@ func (p *probeRun) inventory(ctx context.Context) {
 	}
 
 	// P7 只反映硬件健康; 占用卡在其后并入 Faulty(硬件原因优先)。
-	p.health(ctx, 24*time.Hour, "P7")
+	p.health(ctx)
 	if p.inv.Faulty == nil {
 		p.inv.Faulty = map[int]string{}
 	}
@@ -123,20 +119,19 @@ func (p *probeRun) modelCache(ctx context.Context) {
 	}
 }
 
-// health P7: ECC 不可纠正错误、退役页/行重映射、Xid; 有问题的卡记入 inv.Faulty(不计入可售)。
-// window 为 Xid 扫描时间窗, 结论写入 checkID(P13 压测后复用为 "-10min" 复扫时不写检查项)。
-func (p *probeRun) health(ctx context.Context, window time.Duration, checkID string) {
+// health P7: ECC 不可纠正错误、退役页/行重映射、近 24h 的 Xid; 有问题的卡记入 inv.Faulty(不计入可售)。
+func (p *probeRun) health(ctx context.Context) {
 	if p.inv.Faulty == nil {
 		p.inv.Faulty = map[int]string{}
 	}
 	out, err := p.run(ctx, cmdECC)
 	if err != nil {
-		p.set(checkID, false, "ECC 查询失败: "+err.Error())
+		p.set("P7", false, "ECC 查询失败: "+err.Error())
 		return
 	}
 	ecc, err := ParseECC(out)
 	if err != nil {
-		p.set(checkID, false, err.Error())
+		p.set("P7", false, err.Error())
 		return
 	}
 	var notes []string
@@ -147,7 +142,7 @@ func (p *probeRun) health(ctx context.Context, window time.Duration, checkID str
 		notes = append(notes, "行重映射输出无法解析")
 		remap = map[string]RemapRow{}
 	}
-	since, window := xidSince(window)
+	since, window := xidSince(24 * time.Hour)
 	cmd, _ := xidCommand(since)
 	xout, _ := p.run(ctx, cmd) // 以解析结果为准(错误输出带 @@err 前缀)
 	xidAt := time.Now()
@@ -180,11 +175,7 @@ func (p *probeRun) health(ctx context.Context, window time.Duration, checkID str
 		}
 		if len(why) > 0 {
 			p.inv.Faulty[g.Index] = strings.Join(why, "、")
-			delete(p.freeIdx, g.Index)
 		}
-	}
-	if checkID == "" {
-		return
 	}
 	detail := fmt.Sprintf("%d 张卡健康", len(p.gpus)-len(p.inv.Faulty))
 	for _, i := range sortedKeys(p.inv.Faulty) {
@@ -193,12 +184,11 @@ func (p *probeRun) health(ctx context.Context, window time.Duration, checkID str
 	if len(notes) > 0 {
 		detail += "; " + strings.Join(notes, "; ")
 	}
-	p.set(checkID, len(p.inv.Faulty) < len(p.gpus), detail)
+	p.set("P7", len(p.inv.Faulty) < len(p.gpus), detail)
 }
 
-var dockerVersionRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)*`)
-
-// host P8 主机资源与驱动版本; 顺带读取 docker info(P9 复用), 以 Docker 数据目录所在盘作为数据盘。
+// host P8 主机资源与驱动版本; 顺带读取 docker info(记录版本), 以 Docker 数据目录所在盘作为数据盘。
+// docker info 读不到不判 P8 不通过(容器运行时不再检查), 只在详情中注明。
 func (p *probeRun) host(ctx context.Context) {
 	dockerRoot := "/var/lib/docker"
 	out, derr := p.run(ctx, cmdDocker)
@@ -209,9 +199,6 @@ func (p *probeRun) host(ctx context.Context) {
 	}
 	if derr == nil && p.docker.DockerRootDir != "" {
 		dockerRoot = p.docker.DockerRootDir
-	}
-	if derr != nil {
-		p.set("P9", false, derr.Error())
 	}
 	if out, err := p.run(ctx, cmdSMIHeader); err == nil {
 		p.inv.CUDAVersion = ParseCUDAVersion(out)
@@ -247,77 +234,11 @@ func (p *probeRun) host(ctx context.Context) {
 		p.set("P8", false, strings.Join(diffs, "; "))
 		return
 	}
-	p.set("P8", true, fmt.Sprintf("%s / %s, %d 核, %dGB 内存, %s 可用 %dGB", h.OSPretty, h.Kernel, h.CPUCores, h.MemGB, h.DiskPath, h.DiskFreeGB))
-}
-
-// runtime P9 容器运行时 + P10 磁盘配额能力。探针容器只挂空闲卡。
-func (p *probeRun) runtime(ctx context.Context) {
-	if c := p.checks["P9"]; !c.Skipped {
-		return // docker info 已失败
+	detail := fmt.Sprintf("%s / %s, %d 核, %dGB 内存, %s 可用 %dGB", h.OSPretty, h.Kernel, h.CPUCores, h.MemGB, h.DiskPath, h.DiskFreeGB)
+	if derr != nil {
+		detail += "; 未读取到 docker info: " + truncate(derr.Error(), 200)
+	} else {
+		detail += "; Docker " + p.docker.ServerVersion
 	}
-	if p.docker.ServerVersion == "" {
-		p.set("P9", false, "未能读取 docker info")
-		return
-	}
-	v := dockerVersionRe.FindString(p.docker.ServerVersion)
-	if c, ok := CompareVersion(v, "24"); !ok || c < 0 {
-		p.set("P9", false, fmt.Sprintf("Docker 版本 %s 低于要求 24", p.docker.ServerVersion))
-		return
-	}
-	image := p.s.cfg.ProbeImage
-	cmd, err := pullCommand(image)
-	if err != nil {
-		p.set("P9", false, "平台探针镜像配置非法: "+err.Error())
-		return
-	}
-	if _, err := p.runFor(ctx, cmd, pullTimeout); err != nil {
-		p.set("P9", false, "拉取平台探针镜像失败: "+err.Error())
-		return
-	}
-	free := p.freeUUIDs()
-	cmd, err = runtimeCheckCommand(image, free)
-	if err != nil {
-		p.set("P9", false, err.Error())
-		return
-	}
-	out, err := p.run(ctx, cmd)
-	if err != nil {
-		p.set("P9", false, "docker run --gpus 失败(检查 nvidia-container-toolkit): "+err.Error())
-		return
-	}
-	if len(free) > 0 {
-		seen := ParseGPUListL(out)
-		if len(seen) != len(free) {
-			p.set("P9", false, fmt.Sprintf("探针容器内可见 %d 张卡, 期望 %d 张", len(seen), len(free)))
-			return
-		}
-	}
-	p.set("P9", true, fmt.Sprintf("Docker %s, 存储驱动 %s(%s), 探针容器可见 %d 张空闲卡",
-		p.docker.ServerVersion, p.docker.Driver, p.docker.BackingFS(), len(free)))
-
-	cmd, _ = quotaCheckCommand(image)
-	out, err = p.run(ctx, cmd)
-	drv := fmt.Sprintf("存储驱动 %s, 底层 %s; 需 overlay2 + xfs pquota", p.docker.Driver, p.docker.BackingFS())
-	switch {
-	case err != nil:
-		p.set("P10", false, fmt.Sprintf("--storage-opt size= 不可用(%s), 该节点只能整机出租: %v", drv, err))
-	case strings.Contains(out, "@@enforced"):
-		p.inv.QuotaOK = true
-		p.set("P10", true, "支持按容器限制磁盘(64M 配额内写 128M 被拒)")
-	case strings.Contains(out, "@@not-enforced"):
-		p.set("P10", false, fmt.Sprintf("--storage-opt size= 被接受但未生效(64M 配额内写入 128M 成功; %s), 该节点只能整机出租", drv))
-	default:
-		p.set("P10", false, fmt.Sprintf("磁盘配额自检未得出结论(探针容器内写入失败或输出异常: %q), 该节点只能整机出租", truncate(strings.TrimSpace(out), 160)))
-	}
-}
-
-// freeUUIDs 可做侵入项的空闲健康卡 UUID(按 index 升序)。
-func (p *probeRun) freeUUIDs() []string {
-	var out []string
-	for _, g := range p.gpus {
-		if p.freeIdx[g.Index] {
-			out = append(out, g.UUID)
-		}
-	}
-	return out
+	p.set("P8", true, detail)
 }
