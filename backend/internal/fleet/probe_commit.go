@@ -128,7 +128,12 @@ func (s *Service) commitProbe(p *probeRun) (*ProbeOutcome, error) {
 			s.refreshHealth(n)
 			if p.trigger != "periodic" || n.VerifyStatus != VerifyVerified {
 				msg := fmt.Sprintf("节点「%s」探活通过, 已可接单。", n.NodeName)
-				if len(inv.Faulty) > 0 {
+				switch {
+				case len(inv.Faulty) > 0 && !inv.QuotaOK:
+					// 不支持磁盘配额的节点只能整机出租: 有卡不可售时整机租不出去, 不能告诉供给方"已可接单"。
+					msg = fmt.Sprintf("节点「%s」探活通过, 但有 %d 张卡未通过健康检查或被宿主机进程占用。该节点只能整机出租, "+
+						"这些卡恢复前暂不可接单; 处理后重新探活即可上架。", n.NodeName, len(inv.Faulty))
+				case len(inv.Faulty) > 0:
 					msg += fmt.Sprintf("其中 %d 张卡未通过健康检查或被宿主机进程占用, 不计入可售。", len(inv.Faulty))
 				}
 				s.notify(n.SupplierID, "节点探活通过", msg, n.ID)

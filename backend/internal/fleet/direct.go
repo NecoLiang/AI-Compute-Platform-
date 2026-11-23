@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,11 +18,14 @@ import (
 //
 // sync_access 任务(express, 同一租约与其他任务互斥)在执行时读取租约当前状态决定动作, 因此入队方只需"有变化就入队":
 //   - active: 写公钥 + 接入租约网络(端口映射恢复);
-//   - pending/provisioning/parked: 只写公钥(网络由开通流程/包夜开窗负责);
+//   - pending/provisioning: 订单仍在开通中只写公钥(网络由开通流程负责); 订单已冻结/取消/退款 → 断开并结束会话;
+//   - parked: 只写公钥(网络由包夜开窗负责);
 //   - suspended: 从全部网络断开(冻结);
-//   - 其他(到期/清除/失败): 不需要(容器已停或已删), errTaskAborted。
+//   - purging: 断开并结束会话(purge 走普通车道, 可能排在同节点长任务之后, 入口先由快车道切断);
+//   - 其他(到期/已清除/失败): 不需要(容器已停或已删), errTaskAborted。
 //
-// 入队时机: 买家添加/删除公钥(名下 pending/provisioning/active/parked/suspended 租约)、解冻回到 active。
+// 入队时机: 买家添加/删除公钥(名下 pending/provisioning/active/parked/suspended 租约)、解冻回到 active、
+// 开通中冻结(freezeLeaseTx)、进入清除(purgeTx)。
 // 冻结由 kill_sessions 先断网再结束会话; 到期由 stop 停容器。
 
 func (s *Service) directMode() bool { return !s.cfg.GatewayMode() }
@@ -247,14 +251,26 @@ func (s *Service) runSyncAccessTask(ctx context.Context, t *Task) (any, error) {
 	if l.NodeID != t.NodeID {
 		return nil, errTaskAborted{fmt.Sprintf("租约 %s 已改由节点 #%d 承载", l.LeaseNo, l.NodeID)}
 	}
-	mode := ""
+	mode, kill := "", false
 	switch l.State {
 	case LeaseActive:
 		mode = syncConnect
-	case LeasePending, LeaseProvisioning, LeaseParked:
+	case LeasePending, LeaseProvisioning:
+		// 开通中: 订单仍在开通(paid/provisioning)时只写公钥; 订单已冻结/取消/退款而容器可能已建好 → 断开。
+		provisioning, err := s.orderProvisioning(l.OrderID)
+		if err != nil {
+			return nil, err
+		}
+		if mode = syncKeys; !provisioning {
+			mode, kill = syncCut, true
+		}
+	case LeaseParked:
 		mode = syncKeys
 	case LeaseSuspended:
 		mode = syncCut
+	case LeasePurging:
+		// 退款/取消/到期清除: purge 走普通车道, 可能排在同节点长任务之后; 先由快车道断开入口并结束会话。
+		mode, kill = syncCut, true
 	default:
 		return nil, errTaskAborted{fmt.Sprintf("租约 %s 当前状态 %s, 无需同步访问", l.LeaseNo, l.State)}
 	}
@@ -277,13 +293,36 @@ func (s *Service) runSyncAccessTask(ctx context.Context, t *Task) (any, error) {
 			return nil, err
 		}
 		out.Result.Absent, out.Keys = tag == "absent", keys
+		if kill && tag != "absent" {
+			if _, err := s.bareMetalKillSessions(ctx, client, l); err != nil {
+				return nil, err
+			}
+		}
 		return out, nil
 	}
 	if out.Result, err = s.syncContainerAccess(ctx, client, n, l, mode); err != nil {
 		return nil, err
 	}
+	if kill && out.Result.Running {
+		if _, err := s.killContainerSessions(ctx, client, l); err != nil {
+			return nil, err
+		}
+	}
 	slog.Info("租约访问已同步", "lease_no", l.LeaseNo, "mode", mode, "running", out.Result.Running, "port", out.Result.Port)
 	return out, nil
+}
+
+// orderProvisioning 租约的订单是否仍在开通中(paid/provisioning)。订单不存在按"不在开通中"处理。
+func (s *Service) orderProvisioning(orderID int64) (bool, error) {
+	var status string
+	err := s.repo.db.Get(&status, `SELECT status FROM orders WHERE id=?`, orderID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return status == "paid" || status == "provisioning", nil
 }
 
 // syncAccessStates 买家公钥变化时需要同步的租约状态。

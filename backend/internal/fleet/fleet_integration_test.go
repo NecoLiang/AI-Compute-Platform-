@@ -365,13 +365,14 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 	require.Len(t, done, 1)
 	assert.True(t, outcomeOf(t, done[0]).Pass)
 
-	// 掉卡: 轻量探活发现 GPU1 消失 → 空闲卡槽 faulty, 库存 1, 通知供给方。
+	// 掉卡: 轻量探活发现 GPU1 消失 → 空闲卡槽 faulty, 通知供给方。该节点不支持磁盘配额只能整机出租,
+	// 少一张卡整机就租不出去, 库存为 0(库存与 allocCandidates 同口径, 不显示下不了单的卡)。
 	fake.Override(cmdTelemetry, fakeReply{Stdout: fakeTelLine(fakeUUID0, 0)})
 	s.lightProbe(ctx, n)
 	fake.ClearOverrides()
 	assert.Equal(t, SlotFaulty, slotState(t, db, id, 1))
 	stock, _ = productStock(t, db)
-	assert.Equal(t, 1, stock)
+	assert.Equal(t, 0, stock)
 	assert.Equal(t, 1, countRows(t, db, `SELECT COUNT(*) FROM notifications WHERE user_id=10 AND title='节点有卡故障'`))
 
 	// 重装系统(主机密钥变化): 轻量探活即转 key_mismatch, 停止分配, 写系统审计。
@@ -404,7 +405,7 @@ func TestFleetManagedNodeLifecycle(t *testing.T) {
 	// 单卡停用/启用、排空/恢复。
 	require.NoError(t, s.SetSlotState(10, id, 0, SlotWithheld, ""))
 	stock, _ = productStock(t, db)
-	assert.Equal(t, 1, stock)
+	assert.Equal(t, 0, stock, "只能整机出租的节点停用一张卡后整机不可租")
 	assert.Equal(t, errcode.ParamInvalid, codeOf(s.SetSlotState(10, id, 0, SlotLeased, "")))
 	assert.Equal(t, errcode.NotFound, codeOf(s.SetSlotState(11, id, 0, SlotFree, "")))
 	assert.Equal(t, errcode.NotFound, codeOf(s.SetSlotState(10, id, 9, SlotFree, "")))

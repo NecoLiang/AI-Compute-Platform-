@@ -77,3 +77,37 @@ func TestLightProbeMarksHostBusyFreeSlot(t *testing.T) {
 	assert.Equal(t, SlotFree, slotState(t, db, id, 1))
 	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM supplier_nodes WHERE id=? AND probe_fail_count>0`, id))
 }
+
+// 不支持磁盘配额的节点只能整机出租: 有卡不可售时整机租不出去, 库存必须为 0(否则商品显示可售而每笔下单都 409),
+// 且不能通知供给方"已可接单"。
+func TestWholeOnlyNodeWithFaultyCardHasNoStock(t *testing.T) {
+	s, db, fake, id, o := fullProbedNode(t, func(fake *fakeNode, _ *sqlx.DB, _ int64) {
+		fake.Override(cmdGPUApps, fakeReply{Stdout: fakeUUID0 + ", 4242\n"})
+	})
+	require.True(t, o.Pass, "failed=%v", o.Failed)
+	require.Equal(t, 1, countRows(t, db, `SELECT COUNT(*) FROM supplier_nodes WHERE id=? AND COALESCE(disk_quota_supported,0)=0`, id))
+	var p struct {
+		Stock   int  `db:"stock"`
+		MaxNode *int `db:"max_free_per_node"`
+	}
+	stockOf := func() {
+		require.NoError(t, db.Get(&p, `SELECT p.stock, p.max_free_per_node FROM products p JOIN supplier_nodes n ON n.product_id=p.id WHERE n.id=?`, id))
+	}
+	stockOf()
+	assert.Equal(t, 0, p.Stock, "整机租不出去的节点不计入库存")
+	require.NotNil(t, p.MaxNode)
+	assert.Equal(t, 0, *p.MaxNode)
+	assert.Equal(t, 1, countRows(t, db, `SELECT COUNT(*) FROM notifications WHERE title='节点探活通过' AND content LIKE '%暂不可接单%'`))
+	assert.Equal(t, 0, countRows(t, db, `SELECT COUNT(*) FROM notifications WHERE title='节点探活通过' AND content LIKE '%已可接单%'`))
+
+	fake.ClearOverrides()
+	_, err := s.Verify(10, id)
+	require.NoError(t, err)
+	done := runTasks(t, s)
+	require.Len(t, done, 1)
+	require.True(t, outcomeOf(t, done[0]).Pass)
+	stockOf()
+	assert.Equal(t, 2, p.Stock, "卡恢复后整机可租, 库存恢复")
+	require.NotNil(t, p.MaxNode)
+	assert.Equal(t, 2, *p.MaxNode)
+}
