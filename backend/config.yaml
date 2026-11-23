@@ -84,3 +84,8 @@ yeepay:
   return_base_url: ""       # 如 https://www.omnisline.com
   # 向买家开放的支付方式(wechat/alipay/bank, 逗号分隔), 须与易宝已开通的产品一致; 留空为全部。
   pay_channels: ""
+  # 微信/支付宝的报备费率场景(聚合支付必填): 开放 wechat/alipay 时必须配置, 且须与易宝开通该产品时报备的费率一致,
+  # 不带或不一致时易宝下单返回 00012「产品未开通」。微信可选 XIANSHANG(线上)/XIANXIA(线下)/BAOXIAN/GONGYI/
+  # DC_SEPARATION/DIGITAL/REGISTRATION; 支付宝可选 XIANXIA/LARGE。环境变量 YEEPAY_WECHAT_SCENE / YEEPAY_ALIPAY_SCENE。
+  wechat_scene: ""
+  alipay_scene: ""

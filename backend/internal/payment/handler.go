@@ -62,6 +62,9 @@ func (h *Handler) Pay(c *gin.Context) {
 		code := paymentErrorCode(err)
 		if code == errcode.InternalError {
 			slog.Error("发起支付失败", "order_no", req.OrderNo, "channel", req.Channel, "error", err)
+		} else if bizCode(err) != "" {
+			// 易宝受理后业务拒绝(如 00012 产品未开通): 留下原始返回码与文案, 便于和易宝核对。
+			slog.Warn("易宝拒绝下单", "order_no", req.OrderNo, "channel", req.Channel, "error", err)
 		}
 		response.Error(c, code, err.Error())
 		return

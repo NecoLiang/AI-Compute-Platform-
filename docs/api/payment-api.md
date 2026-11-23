@@ -169,3 +169,16 @@ overflow = P − fromPlat                         // 平台费不够扣的部分
 **发票**：可开票金额 = 订单金额 − 已成功部分退款；存在未成功的部分退款时该订单暂不可开票；已开票后再发生部分退款的，按既有红冲流程处理（不自动红冲）。
 
 运营查看：`GET /admin/payment/partial-refunds`（见 admin-api.md）。
+
+## 微信/支付宝的报备费率场景（2026-11-23）
+
+易宝收银台统一下单（`/rest/v1.0/cashier/unified/order`）走微信/支付宝时必须带聚合参数 `aggParam.scene`（报备费率），
+不带时易宝返回 `00012 产品未开通`，即使商户后台显示产品已开通。平台按配置下发：
+
+| 配置 | 环境变量 | 可选值 |
+|---|---|---|
+| `yeepay.wechat_scene` | `YEEPAY_WECHAT_SCENE` | XIANSHANG(线上) / XIANXIA(线下) / BAOXIAN / GONGYI / DC_SEPARATION / DIGITAL / REGISTRATION |
+| `yeepay.alipay_scene` | `YEEPAY_ALIPAY_SCENE` | XIANXIA / LARGE |
+
+取值须与易宝开通该产品时报备的费率一致。`yeepay.pay_channels` 明确列出 wechat/alipay 却未配置对应场景时服务启动失败；
+`pay_channels` 留空时，未配置场景的微信/支付宝不向买家开放。易宝业务拒绝下单时后端写一条 WARN 日志「易宝拒绝下单」，含原始返回码与文案。

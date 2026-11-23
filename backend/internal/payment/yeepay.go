@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,12 +29,15 @@ type YeepayConfig struct {
 	NotifyBaseURL     string // 回调地址前缀, 如 https://www.omnisline.com/api/v1
 	ReturnBaseURL     string // 支付完成后跳回的前端站点, 如 https://www.omnisline.com
 	PayChannels       string // 向买家开放的支付方式, 逗号分隔; 留空为全部(须与易宝已开通产品一致)
+	WechatScene       string // 微信报备费率场景(聚合支付必填), 须与易宝开通微信产品时报备的一致, 如 XIANSHANG / XIANXIA
+	AlipayScene       string // 支付宝报备费率场景, 如 XIANXIA / LARGE
 }
 
 type YeepayClient struct {
 	cfg      YeepayConfig
 	channels []string
-	yop      *yopClient // nil 表示未接入
+	scenes   map[string]string // 支付方式 → 报备费率场景
+	yop      *yopClient        // nil 表示未接入
 }
 
 // NewYeepayClient 全部为空时返回未接入的客户端(所有能力显式报错); 半配置直接报错。
@@ -61,13 +65,66 @@ func NewYeepayClient(cfg YeepayConfig) (*YeepayClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	channels, scenes, err := aggScenes(cfg, channels, strings.TrimSpace(cfg.PayChannels) != "")
+	if err != nil {
+		return nil, err
+	}
 	cfg.NotifyBaseURL = strings.TrimRight(cfg.NotifyBaseURL, "/")
 	cfg.ReturnBaseURL = strings.TrimRight(cfg.ReturnBaseURL, "/")
 	client, err := newYOPClient(cfg.AppKey, cfg.ServerRoot, cfg.PrivateKey, cfg.PlatformPublicKey)
 	if err != nil {
 		return nil, err
 	}
-	return &YeepayClient{cfg: cfg, channels: channels, yop: client}, nil
+	return &YeepayClient{cfg: cfg, channels: channels, scenes: scenes, yop: client}, nil
+}
+
+// aggChannels 走微信/支付宝聚合支付的方式 → 易宝聚合渠道名。
+var aggChannels = map[string]string{"wechat": "WECHAT", "alipay": "ALIPAY"}
+
+// aggSceneValues 易宝「聚合参数 aggParam.scene 报备费率」可选值(收银台统一下单接口文档)。
+var aggSceneValues = map[string][]string{
+	"wechat": {"XIANSHANG", "XIANXIA", "BAOXIAN", "GONGYI", "DC_SEPARATION", "DIGITAL", "REGISTRATION"},
+	"alipay": {"XIANXIA", "LARGE"},
+}
+
+// aggScenes 微信/支付宝下单必须带报备费率场景: 不带时易宝按"产品未开通"拒绝(00012), 即使商户后台显示已开通。
+// 场景取决于商户开通产品时报备的费率, 平台无法推断: pay_channels 明确列出了该支付方式却没配场景时启动即失败;
+// pay_channels 留空(全部)时, 没配场景的微信/支付宝不向买家开放。返回实际开放的支付方式与各自场景。
+func aggScenes(cfg YeepayConfig, channels []string, explicit bool) ([]string, map[string]string, error) {
+	configured := map[string]string{"wechat": cfg.WechatScene, "alipay": cfg.AlipayScene}
+	out := map[string]string{}
+	offered := make([]string, 0, len(channels))
+	for _, ch := range channels {
+		allowed, ok := aggSceneValues[ch]
+		if !ok {
+			offered = append(offered, ch)
+			continue
+		}
+		scene := strings.ToUpper(strings.TrimSpace(configured[ch]))
+		if scene == "" && !explicit {
+			continue
+		}
+		if scene == "" {
+			return nil, nil, fmt.Errorf("yeepay.pay_channels 开放了 %s, 必须配置 yeepay.%s_scene(易宝报备费率场景, 可选 %s; 以易宝开通该产品时报备的为准)",
+				ch, ch, strings.Join(allowed, "/"))
+		}
+		if !slices.Contains(allowed, scene) {
+			return nil, nil, fmt.Errorf("yeepay.%s_scene=%q 无效(可选 %s)", ch, scene, strings.Join(allowed, "/"))
+		}
+		out[ch] = scene
+		offered = append(offered, ch)
+	}
+	return offered, out, nil
+}
+
+// aggParam 微信/支付宝下单的聚合参数; 其他支付方式返回空串。
+func (y *YeepayClient) aggParam(channel string) string {
+	scene, name := y.scenes[channel], aggChannels[channel]
+	if scene == "" || name == "" {
+		return ""
+	}
+	raw, _ := json.Marshal(map[string]any{"scene": map[string]string{name: scene}})
+	return string(raw)
 }
 
 func (y *YeepayClient) Configured() bool { return y != nil && y.yop != nil }
@@ -78,7 +135,7 @@ var payChannelOrder = []string{"wechat", "alipay", "bank"}
 // parsePayChannels 未开通的产品下单会被易宝拒绝(00012), 所以只开放配置里列出的方式。
 func parsePayChannels(raw string) ([]string, error) {
 	if strings.TrimSpace(raw) == "" {
-		return payChannelOrder, nil
+		return slices.Clone(payChannelOrder), nil
 	}
 	want := map[string]bool{}
 	for _, ch := range strings.Split(raw, ",") {
@@ -242,6 +299,9 @@ func (y *YeepayClient) CreatePayment(o PaymentOrder) (*Checkout, error) {
 	}
 	if pt := limitPayTypes[o.Channel]; pt != "" {
 		params["limitPayType"] = pt
+	}
+	if agg := y.aggParam(o.Channel); agg != "" {
+		params["aggParam"] = agg
 	}
 	var out struct {
 		Code          string `json:"code"`

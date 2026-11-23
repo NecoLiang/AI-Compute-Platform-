@@ -85,7 +85,12 @@ func TestPayChannels_OnlyConfiguredChannelsAreOffered(t *testing.T) {
 		NotifyBaseURL: "https://www.omnisline.com/api/v1", ReturnBaseURL: "https://www.omnisline.com"}
 	client, err := NewYeepayClient(cfg)
 	assert.NoError(t, err)
-	assert.Equal(t, []string{"wechat", "alipay", "bank"}, client.PayChannels(), "留空为全部")
+	assert.Equal(t, []string{"bank"}, client.PayChannels(), "留空为全部; 没配报备费率场景的微信/支付宝不开放")
+
+	cfg.WechatScene, cfg.AlipayScene = "xianshang", "XIANXIA"
+	client, err = NewYeepayClient(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"wechat", "alipay", "bank"}, client.PayChannels(), "留空且场景齐全: 全部开放")
 
 	cfg.PayChannels = " Bank , alipay,bank"
 	client, err = NewYeepayClient(cfg)
@@ -97,6 +102,33 @@ func TestPayChannels_OnlyConfiguredChannelsAreOffered(t *testing.T) {
 	assert.Error(t, err, "未知支付方式必须启动失败")
 
 	assert.Empty(t, (&YeepayClient{}).PayChannels(), "未接入时不开放任何支付方式")
+}
+
+// 微信/支付宝下单必须带报备费率场景(aggParam.scene): 不带时易宝返回 00012「产品未开通」, 即使产品已开通。
+func TestAggSceneRequiredForWechatAndAlipay(t *testing.T) {
+	_, key := testRSAKey(t)
+	cfg := YeepayConfig{AppKey: "app_1", ParentMerchantNo: "100", MerchantNo: "100", PrivateKey: key,
+		NotifyBaseURL: "https://www.omnisline.com/api/v1", ReturnBaseURL: "https://www.omnisline.com", PayChannels: "wechat,bank"}
+	_, err := NewYeepayClient(cfg)
+	if assert.Error(t, err, "明确开放微信却没配场景: 启动失败, 不能等买家下单才报 00012") {
+		assert.Contains(t, err.Error(), "wechat_scene")
+	}
+	cfg.WechatScene = "ONLINE"
+	_, err = NewYeepayClient(cfg)
+	assert.Error(t, err, "场景必须是易宝文档列出的值")
+
+	cfg.WechatScene = " xianshang "
+	client, err := NewYeepayClient(cfg)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"wechat", "bank"}, client.PayChannels())
+	assert.JSONEq(t, `{"scene":{"WECHAT":"XIANSHANG"}}`, client.aggParam("wechat"))
+	assert.Empty(t, client.aggParam("bank"), "网银不带聚合参数")
+	assert.Empty(t, client.aggParam("alipay"), "未开放的方式不带")
+
+	cfg.PayChannels, cfg.AlipayScene = "alipay", "LARGE"
+	client, err = NewYeepayClient(cfg)
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"scene":{"ALIPAY":"LARGE"}}`, client.aggParam("alipay"))
 }
 
 func TestGoodsName(t *testing.T) {
