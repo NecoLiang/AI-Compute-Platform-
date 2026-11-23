@@ -87,6 +87,9 @@ func (s *Service) runProvisionTask(ctx context.Context, t *Task) (any, error) {
 	if err := p.activate(); err != nil {
 		return nil, err
 	}
+	if p.out.Abandoned {
+		p.cutAbandoned(ctx)
+	}
 	return p.out, nil
 }
 
@@ -560,6 +563,26 @@ func (p *provisionRun) selftest(ctx context.Context) error {
 		return fmt.Errorf("自检: 节点地址命中目标地址拒绝名单: %w", err)
 	}
 	return nil
+}
+
+// cutAbandoned 直连模式下放弃激活(订单在开通途中被冻结/取消/退款)时, 容器已接入租约网络且写入了买家公钥,
+// 立即断开入口。尽力而为: 冻结与清除各自已入队 sync_access(与本任务互斥, 本任务结束后执行)兜底重试。
+func (p *provisionRun) cutAbandoned(ctx context.Context) {
+	s, l := p.s, p.l
+	if !s.directMode() {
+		return
+	}
+	var err error
+	if l.DeliveryKind == "bare_metal" {
+		_, _, err = s.syncBareMetalKeys(ctx, p.client, p.n, l, true)
+	} else {
+		_, err = s.cutContainerAccess(ctx, p.client, p.n, l)
+	}
+	if err != nil {
+		slog.Warn("放弃激活后断开租约入口失败, 由 sync_access 重试", "lease_no", l.LeaseNo, "error", err)
+		return
+	}
+	slog.Info("放弃激活: 已断开租约入口", "lease_no", l.LeaseNo)
 }
 
 // activate ⑥。

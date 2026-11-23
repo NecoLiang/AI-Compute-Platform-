@@ -358,3 +358,86 @@ func TestDirectReconcileRestartRechecksViaPublicEntry(t *testing.T) {
 	assert.False(t, rec.last().Up)
 	require.NotNil(t, e.leaseNow(t).ResourceAlert)
 }
+
+// 开通途中(容器已建好、买家公钥与端口映射已就位, 自检未过尚未激活)订单被冻结: 直连模式没有网关拦截,
+// 冻结必须入队 sync_access 并断开容器; 解冻后重新开通恢复连接。
+func TestDirectFreezeDuringProvisioningCutsAccess(t *testing.T) {
+	e, sim := newDirectProvEnv(t)
+	e.lease = e.leaseNow(t)
+	buyer := newSigner(t)
+	_, err := e.s.AddBuyerKey(21, "", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(buyer.PublicKey()))), "203.0.113.9")
+	require.NoError(t, err)
+	runKind(t, e, KindSyncAccess)
+	assert.Equal(t, syncKeys, sim.lastMode(), "订单仍在开通中: 只写公钥")
+
+	// 自检失败(容器内看不到分配的卡): 开通任务退避重试, 此时容器已接入网络且买家公钥可登录。
+	sim.ctr.Override("nvidia-smi -L", fakeReply{Stdout: gpuListL(fakeUUID0)})
+	got := runOne(t, e.s)
+	require.NotNil(t, got)
+	require.Equal(t, KindProvision, got.Kind)
+	require.Equal(t, TaskPending, got.State)
+	require.Equal(t, LeaseProvisioning, e.leaseNow(t).State)
+	require.NoError(t, loginAs(sim, "root", buyer), "前置: 激活前容器已可登录")
+
+	require.NoError(t, e.comp.FreezeOrder(e.order.OrderNo))
+	require.Equal(t, LeaseProvisioning, e.leaseNow(t).State, "开通中冻结不迁移租约状态")
+	require.Equal(t, 1, syncTaskCount(t, e, TaskPending), "开通中冻结入队 sync_access")
+	runKind(t, e, KindSyncAccess)
+	assert.Equal(t, syncCut, sim.lastMode(), "订单已不在开通中: 断开容器")
+	assert.Error(t, loginAs(sim, "root", buyer), "冻结后买家连不上")
+
+	// 冻结期间买家改公钥也不会重新接入。
+	_, err = e.s.AddBuyerKey(21, "", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(newSigner(t).PublicKey()))), "203.0.113.9")
+	require.NoError(t, err)
+	runKind(t, e, KindSyncAccess)
+	assert.Equal(t, syncCut, sim.lastMode())
+	assert.Error(t, loginAs(sim, "root", buyer))
+}
+
+// 开通任务执行期间订单被冻结: 流水线走到激活才发现, 放弃激活的同时立即断开已接入的容器。
+func TestDirectProvisionAbandonedCutsAccess(t *testing.T) {
+	e, sim := newDirectProvEnv(t)
+	e.lease = e.leaseNow(t)
+	buyer := newSigner(t)
+	_, err := e.s.AddBuyerKey(21, "", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(buyer.PublicKey()))), "203.0.113.9")
+	require.NoError(t, err)
+	runKind(t, e, KindSyncAccess)
+
+	// 自检阶段(容器已接入)冻结订单: 用自检命令的回调模拟"开通任务执行中途"。
+	var once sync.Once
+	sim.ctr.ClearOverrides()
+	sim.ctr.Handle("nvidia-smi -L", func(string) fakeReply {
+		once.Do(func() { require.NoError(t, e.comp.FreezeOrder(e.order.OrderNo)) })
+		return fakeReply{Stdout: gpuListL(fakeUUID0, fakeUUID1)}
+	})
+	got := runOne(t, e.s)
+	require.NotNil(t, got)
+	require.Equal(t, KindProvision, got.Kind)
+	require.Equal(t, TaskSucceeded, got.State, "last_error=%v", got.LastError)
+	assert.True(t, e.outcome(t, got).Abandoned)
+	assert.Equal(t, syncCut, sim.lastMode(), "放弃激活时立即断开")
+	assert.Error(t, loginAs(sim, "root", buyer), "未激活的租约不能留着可登录的容器")
+	assert.Equal(t, 0, countRows(t, e.db, `SELECT COUNT(*) FROM order_deliveries WHERE order_id=?`, e.order.ID))
+}
+
+// 在租订单被关闭/退款: purge 走普通车道, 之前必须有快车道 sync_access 先断开入口。
+func TestDirectPurgeCutsAccessFirst(t *testing.T) {
+	e, sim := activeDirectEnv(t)
+	buyer := newSigner(t)
+	_, err := e.s.AddBuyerKey(21, "", strings.TrimSpace(string(ssh.MarshalAuthorizedKey(buyer.PublicKey()))), "203.0.113.9")
+	require.NoError(t, err)
+	runKind(t, e, KindSyncAccess)
+	require.NoError(t, loginAs(sim, "root", buyer))
+
+	require.NoError(t, e.comp.AdminUpdateOrderStatus(1, e.order.OrderNo, "cancelled", "127.0.0.1"))
+	require.Equal(t, LeasePurging, e.leaseNow(t).State)
+	require.Equal(t, 1, syncTaskCount(t, e, TaskPending), "进入清除时入队 sync_access")
+	assert.True(t, isExpressKind(KindSyncAccess), "断开入口走快车道, 不排在同节点长任务之后")
+
+	task := runOne(t, e.s)
+	require.NotNil(t, task)
+	require.Equal(t, KindSyncAccess, task.Kind, "断开先于 purge 执行")
+	require.Equal(t, TaskSucceeded, task.State, "last_error=%v", task.LastError)
+	assert.Equal(t, syncCut, sim.lastMode())
+	assert.Error(t, loginAs(sim, "root", buyer), "订单关闭后买家立即连不上, 不必等 purge")
+}

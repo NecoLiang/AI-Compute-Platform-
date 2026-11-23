@@ -5,7 +5,8 @@ package fleet
 // 冻结: 在租(active/parked) → suspended, 记 suspended_at, 入队 kill_sessions(优先级 1, 快速领取)断开现有会话;
 //       网关只放行 lease_state=active, 迁移同时刷新 access_changed_at, 新登录立即被拒。容器不停、卡不释放
 //       (核查现场); 冻结中到期由到期扫描停容器释放卡、保留数据卷(expireSuspended)。
-//       reserved/pending/provisioning: 租约不动, 开通流水线在 ⓪/⑥ 发现订单 frozen 即放弃。
+//       reserved/pending/provisioning: 租约不动, 开通流水线在 ⓪/⑥ 发现订单 frozen 即放弃;
+//       直连模式另入队 sync_access 断开已建好的容器(开通中途冻结时买家公钥与端口映射可能已就位)。
 //       直连模式(fleet.access_mode=direct)没有网关拦截, kill_sessions 先把容器从全部网络断开(端口映射撤销)
 //       再断会话; 整机租约把账户 authorized_keys 改为只留平台公钥。
 // 解冻: 见 unfreezeLeaseTx。
@@ -56,6 +57,13 @@ func (s *Service) freezeLeaseTx(tx *sqlx.Tx, o *compute.Order) error {
 		// 状态不变但订单凭证随冻结吊销(compute 同事务): 刷新撤销游标, 网关丢弃该登录名的缓存放行(防御性, 非 active 本就不放行)。
 		if err := s.repo.touchAccess(tx, l.ID); err != nil {
 			return err
+		}
+		// 直连模式没有网关拦截: 开通中的租约可能已建好容器、写入买家公钥并映射端口(④' 之后、⑥ 激活之前),
+		// 入队 sync_access —— 它与开通任务互斥, 执行时发现订单已不在开通中即断开容器网络(见 runSyncAccessTask)。
+		if l.State == LeasePending || l.State == LeaseProvisioning {
+			if err := s.enqueueSyncAccessTx(tx, l, "订单冻结"); err != nil {
+				return err
+			}
 		}
 		slog.Info("订单冻结: 租约不在租, 只刷新撤销游标", "lease_no", l.LeaseNo, "state", l.State, "order_no", o.OrderNo)
 	}

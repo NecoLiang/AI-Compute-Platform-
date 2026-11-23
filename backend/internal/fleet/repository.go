@@ -437,8 +437,8 @@ func (r *Repository) deleteIdleSlots(tx *sqlx.Tx, nodeID int64) error {
 	return err
 }
 
-// freeSlotStats 托管商品派生库存(docs/26 §26.5.4): verified+可调度+在线的 ssh 节点上的空闲卡合计,
-// 以及单机最多可一次租用的卡数 max_free_per_node。后者与 allocCandidates 的候选规则同口径:
+// freeSlotStats 托管商品派生库存(docs/26 §26.5.4): verified+可调度+在线的 ssh 节点上可租出的空闲卡合计,
+// 以及单机最多可一次租用的卡数 max_free_per_node。两者与 allocCandidates 的候选规则同口径:
 // 分卡容器且节点支持磁盘配额 → 该节点空闲数; 不支持配额的节点或整机交付 → 仅整机全空闲时为总卡数, 否则 0。
 func (r *Repository) freeSlotStats(q sqlx.Queryer, productID int64) (free, maxNode int, err error) {
 	var rows []struct {
@@ -457,8 +457,11 @@ func (r *Repository) freeSlotStats(q sqlx.Queryer, productID int64) (free, maxNo
 		return 0, 0, err
 	}
 	for _, x := range rows {
-		free += x.Free
-		if m := rentableOnNode(x.Free, x.TotalCards, x.Quota, x.DeliveryMode == "bare_metal"); m > maxNode {
+		// 库存只计"下单能分配到"的卡: 只能整机出租的节点(整机交付, 或容器节点不支持磁盘配额)有卡在租/故障/被占用时
+		// 一张也租不出去, 计入库存会让商品显示可售而每笔下单都 409。
+		m := rentableOnNode(x.Free, x.TotalCards, x.Quota, x.DeliveryMode == "bare_metal")
+		free += m
+		if m > maxNode {
 			maxNode = m
 		}
 	}

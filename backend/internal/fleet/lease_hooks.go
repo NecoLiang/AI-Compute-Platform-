@@ -223,7 +223,7 @@ func (s *Service) releaseLeaseTx(tx *sqlx.Tx, o *compute.Order, to string) error
 	return s.recomputeStockTx(tx, l.ProductID)
 }
 
-// purgeTx 租约 → purging, 卡槽 → draining, 入队 purge(宽限 0)。
+// purgeTx 租约 → purging, 卡槽 → draining, 入队 purge(宽限 0); 直连模式先入队 sync_access 切断入口。
 // 整机租约若买家已拿到过 root(active/parked/suspended/grace), 节点同时转 needs_reimage(T-089, docs/25 §25.7.4):
 // 删账户清不掉买家以 root 留下的东西, 必须供给方重装确认后才能再售。调用方已锁节点行。
 func (s *Service) purgeTx(tx *sqlx.Tx, l *Lease, reason string) error {
@@ -243,6 +243,11 @@ func (s *Service) purgeTx(tx *sqlx.Tx, l *Lease, reason string) error {
 		}
 	}
 	if _, err := s.repo.moveLeaseSlots(tx, l.ID, []string{SlotReserved, SlotLeased}, SlotDraining); err != nil {
+		return err
+	}
+	// 直连模式: purge 走普通车道, 会排在同节点长任务(拉镜像/部署模型)之后; 先入队快车道 sync_access 断开入口并结束
+	// 会话, 退款/取消后买家不再能登录用卡。网关模式由网关按租约状态拒绝, 无需此步(enqueueSyncAccessTx 为空操作)。
+	if err := s.enqueueSyncAccessTx(tx, l, reason); err != nil {
 		return err
 	}
 	_, err := s.repo.insertLeaseTaskMax(tx, l.NodeID, l.ID, KindPurge, prioPurge, cleanupMaxAttempts, LeaseTaskPayload{LeaseID: l.ID, Reason: reason})
