@@ -35,6 +35,8 @@ type YeepayConfig struct {
 	NotifyBaseURL     string
 	ReturnBaseURL     string
 	PayChannels       string
+	WechatScene       string
+	AlipayScene       string
 }
 
 type WeChatConfig struct {
@@ -170,6 +172,8 @@ func Load(path string) (*Config, error) {
 			NotifyBaseURL:     strings.TrimSpace(v.GetString("yeepay.notify_base_url")),
 			ReturnBaseURL:     strings.TrimSpace(v.GetString("yeepay.return_base_url")),
 			PayChannels:       strings.TrimSpace(v.GetString("yeepay.pay_channels")),
+			WechatScene:       strings.TrimSpace(v.GetString("yeepay.wechat_scene")),
+			AlipayScene:       strings.TrimSpace(v.GetString("yeepay.alipay_scene")),
 		},
 		Blockchain: BlockchainConfig{
 			GatewayURL:  v.GetString("blockchain.gateway_url"),
