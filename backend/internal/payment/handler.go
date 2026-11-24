@@ -99,6 +99,8 @@ func (h *Handler) Notify(c *gin.Context) {
 func (h *Handler) StartOnboard(c *gin.Context) {
 	status, err := h.svc.StartOnboard(c.GetInt64("user_id"))
 	if err != nil {
+		// 入网链接获取失败(易宝拒绝或网络错误)必须留痕: 否则供给方只看到一句提示, 无从与易宝核对。
+		slog.Warn("易宝入网链接获取失败", "user_id", c.GetInt64("user_id"), "error", err)
 		response.Error(c, paymentErrorCode(err), err.Error())
 		return
 	}
