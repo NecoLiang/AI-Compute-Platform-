@@ -906,14 +906,22 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 	return p, nil
 }
 
-// GetProduct exposes on-shelf products through the market endpoint: active, and sold_out(已售出/已租满 ——
-// 买过的买家仍要能打开详情, 市场也要能展示"已售出"而不是"商品不存在")。下单仍只接受 active(CreateOrder 校验)。
+// GetProduct exposes on-shelf products through the market endpoint: active, 以及交易还在进行中的 sold_out
+// (订单未走完时买卖双方仍要能打开商品详情; 交易全部走完后隐藏)。下单仍只接受 active(CreateOrder 校验)。
 func (s *Service) GetProduct(id int64) (*Product, *CreditScore, error) {
 	p, err := s.repo.GetProductByID(id)
 	if err != nil {
 		return nil, nil, err
 	}
-	if p.Status != "active" && p.Status != "sold_out" {
+	if p.Status == "sold_out" {
+		open, err := s.repo.SoldOutProductOpen(id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !open {
+			return nil, nil, fmt.Errorf("product not found")
+		}
+	} else if p.Status != "active" {
 		return nil, nil, fmt.Errorf("product not found")
 	}
 	p.Prices = EnabledPrices(p.Prices) // 市场只展示已启用价格

@@ -694,7 +694,8 @@ func (r *Repository) SetProductStockTx(tx *sqlx.Tx, id int64, stock int) error {
 }
 
 type ProductFilter struct {
-	// IncludeSoldOut 市场列表同时展示已售出/已租满(sold_out)商品(排在可下单商品之后); 智能匹配等内部调用保持只取 active。
+	// IncludeSoldOut 市场列表同时展示"交易还在进行中"的售罄商品(排在可下单商品之后, 见 soldOutOpenOrderSQL);
+	// 交易已走完的售罄商品不展示。智能匹配等内部调用保持只取 active。
 	IncludeSoldOut bool
 	Query          string
 	ProductType    string
@@ -741,10 +742,23 @@ func (f *ProductFilter) Normalize() {
 	}
 }
 
+// soldOutOpenOrderSQL 售罄商品是否还有未走完的交易: 待支付/已支付待交付/待验收/退款中/冻结, 或租赁订单在租中。
+// 买断订单签收(active)即交易完成; 全部交易走完的售罄商品从市场隐藏。
+const soldOutOpenOrderSQL = `EXISTS (SELECT 1 FROM orders o WHERE o.product_id = products.id AND (
+	o.status IN ('pending_payment','paid','provisioning','refunding','frozen')
+	OR (o.status = 'active' AND COALESCE(o.pricing_mode,'') <> 'perpetual')))`
+
+// SoldOutProductOpen 见 soldOutOpenOrderSQL。
+func (r *Repository) SoldOutProductOpen(productID int64) (bool, error) {
+	var n int
+	err := r.db.Get(&n, "SELECT COUNT(*) FROM products WHERE id=? AND status='sold_out' AND "+soldOutOpenOrderSQL, productID)
+	return n > 0, err
+}
+
 func (f ProductFilter) buildWhere() (string, []interface{}) {
 	where := "WHERE status='active'"
 	if f.IncludeSoldOut {
-		where = "WHERE status IN ('active','sold_out')"
+		where = "WHERE (status='active' OR (status='sold_out' AND " + soldOutOpenOrderSQL + "))"
 	}
 	args := []interface{}{}
 	if f.Query != "" {

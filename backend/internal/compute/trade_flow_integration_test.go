@@ -136,7 +136,7 @@ func TestTradePublicProductVisibilityPreservesPrivateAccess(t *testing.T) {
 			db.MustExec("UPDATE products SET status=? WHERE id=?", status, id)
 			market := tradeRequest(t, public, "GET", "/api/v1/products", nil, 0)
 			if status == "sold_out" {
-				// 已售出/已租满仍在市场展示(标记为不可下单), 买过的买家也能打开详情。
+				// 售罄但还有未走完的订单(此处为待支付): 仍在市场展示(不可下单), 详情可见。
 				shown := tradeRequest(t, public, "GET", path, nil, 0)
 				if shown.Data.(map[string]any)["product"].(map[string]any)["status"] != "sold_out" {
 					t.Fatalf("sold-out product must stay viewable: %v", shown.Data)
@@ -144,6 +144,18 @@ func TestTradePublicProductVisibilityPreservesPrivateAccess(t *testing.T) {
 				if market.Data.(map[string]any)["total"] != float64(1) {
 					t.Fatalf("sold-out product must stay listed: %v", market.Data)
 				}
+				// 交易全部走完后隐藏: 列表不再出现, 详情按不存在处理。
+				var prev string
+				if err := db.Get(&prev, "SELECT status FROM orders WHERE order_no=?", no); err != nil {
+					t.Fatal(err)
+				}
+				db.MustExec("UPDATE orders SET status='completed' WHERE order_no=?", no)
+				assertHidden(t)
+				closed := tradeRequest(t, public, "GET", "/api/v1/products", nil, 0)
+				if closed.Data.(map[string]any)["total"] != float64(0) {
+					t.Fatalf("sold-out product with no open order must be hidden: %v", closed.Data)
+				}
+				db.MustExec("UPDATE orders SET status=? WHERE order_no=?", prev, no)
 			} else {
 				assertHidden(t)
 				if market.Data.(map[string]any)["total"] != float64(0) {
