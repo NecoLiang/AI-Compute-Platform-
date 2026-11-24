@@ -167,6 +167,13 @@ func (y *YeepayClient) NotifyURL(kind string) string {
 	return y.cfg.NotifyBaseURL + "/payment/yeepay/notify/" + kind
 }
 
+// ReturnURL 买家在收银台付完后跳回的地址: 前端的免登录落地页, 再由它同站跳转到订单详情。
+// 不能直接指向需要登录的订单页 —— 收银台跨站回跳(尤其 POST)时浏览器不带 SameSite=Lax 的登录 Cookie,
+// 买家会被当成未登录踢到登录页。
+func (y *YeepayClient) ReturnURL(orderNo string) string {
+	return y.cfg.ReturnBaseURL + "/api/payment/return/" + url.PathEscape(orderNo)
+}
+
 // ===== 领域类型: 金额一律为分(int64), 与易宝交互时才换算成元 =====
 
 type PaymentOrder struct {
@@ -291,7 +298,7 @@ func (y *YeepayClient) CreatePayment(o PaymentOrder) (*Checkout, error) {
 		"fundProcessType":  "DELAY_SETTLE",
 		"notifyUrl":        y.NotifyURL("pay"),
 		"csNotifyUrl":      y.NotifyURL("clear"),
-		"returnUrl":        y.cfg.ReturnBaseURL + "/console/buyer/orders/" + o.OrderNo,
+		"returnUrl":        y.ReturnURL(o.OrderNo),
 		"memo":             o.OrderNo,
 	}
 	if !o.ExpiresAt.IsZero() {
