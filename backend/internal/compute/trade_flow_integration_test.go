@@ -134,10 +134,21 @@ func TestTradePublicProductVisibilityPreservesPrivateAccess(t *testing.T) {
 		t.Run(status, func(t *testing.T) {
 			// Seed each visibility state; all observations use the HTTP interfaces.
 			db.MustExec("UPDATE products SET status=? WHERE id=?", status, id)
-			assertHidden(t)
 			market := tradeRequest(t, public, "GET", "/api/v1/products", nil, 0)
-			if market.Data.(map[string]any)["total"] != float64(0) {
-				t.Fatalf("hidden product leaked into market: %v", market.Data)
+			if status == "sold_out" {
+				// 已售出/已租满仍在市场展示(标记为不可下单), 买过的买家也能打开详情。
+				shown := tradeRequest(t, public, "GET", path, nil, 0)
+				if shown.Data.(map[string]any)["product"].(map[string]any)["status"] != "sold_out" {
+					t.Fatalf("sold-out product must stay viewable: %v", shown.Data)
+				}
+				if market.Data.(map[string]any)["total"] != float64(1) {
+					t.Fatalf("sold-out product must stay listed: %v", market.Data)
+				}
+			} else {
+				assertHidden(t)
+				if market.Data.(map[string]any)["total"] != float64(0) {
+					t.Fatalf("hidden product leaked into market: %v", market.Data)
+				}
 			}
 			own := tradeRequest(t, supplier, "GET", "/api/v1/supplier/products", nil, 0)
 			if own.Data.([]any)[0].(map[string]any)["status"] != status {

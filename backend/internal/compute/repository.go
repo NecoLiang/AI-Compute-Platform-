@@ -694,6 +694,8 @@ func (r *Repository) SetProductStockTx(tx *sqlx.Tx, id int64, stock int) error {
 }
 
 type ProductFilter struct {
+	// IncludeSoldOut 市场列表同时展示已售出/已租满(sold_out)商品(排在可下单商品之后); 智能匹配等内部调用保持只取 active。
+	IncludeSoldOut bool
 	Query          string
 	ProductType    string
 	GpuModel       string
@@ -741,6 +743,9 @@ func (f *ProductFilter) Normalize() {
 
 func (f ProductFilter) buildWhere() (string, []interface{}) {
 	where := "WHERE status='active'"
+	if f.IncludeSoldOut {
+		where = "WHERE status IN ('active','sold_out')"
+	}
 	args := []interface{}{}
 	if f.Query != "" {
 		pattern := "%" + f.Query + "%"
@@ -800,6 +805,15 @@ func (f ProductFilter) buildWhere() (string, []interface{}) {
 }
 
 func (f ProductFilter) orderBy() string {
+	order := f.sortOrder()
+	if f.IncludeSoldOut {
+		// 可下单的排前面, 已售出/已租满沉底。
+		return strings.Replace(order, "ORDER BY ", "ORDER BY (status='active') DESC, ", 1)
+	}
+	return order
+}
+
+func (f ProductFilter) sortOrder() string {
 	switch f.Sort {
 	case "price_asc":
 		return "ORDER BY price_negotiable ASC, unit_price ASC"

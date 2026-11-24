@@ -906,13 +906,14 @@ func (s *Service) prepareProduct(supplierID int64, req CreateProductReq) (*Produ
 	return p, nil
 }
 
-// GetProduct exposes only active products through the public market endpoint.
+// GetProduct exposes on-shelf products through the market endpoint: active, and sold_out(已售出/已租满 ——
+// 买过的买家仍要能打开详情, 市场也要能展示"已售出"而不是"商品不存在")。下单仍只接受 active(CreateOrder 校验)。
 func (s *Service) GetProduct(id int64) (*Product, *CreditScore, error) {
 	p, err := s.repo.GetProductByID(id)
 	if err != nil {
 		return nil, nil, err
 	}
-	if p.Status != "active" {
+	if p.Status != "active" && p.Status != "sold_out" {
 		return nil, nil, fmt.Errorf("product not found")
 	}
 	p.Prices = EnabledPrices(p.Prices) // 市场只展示已启用价格
@@ -1692,6 +1693,21 @@ type DeliverInfo struct {
 	CredentialNote string `json:"credential_note"`
 }
 
+// validateDeliverInfo 交付信息按订单类型校验: 租赁交付的是机器, 必须有实例地址; 买断(永久使用权)交付的是
+// 设备本身, 没有"登录信息"可言, 必须写明交割说明(物流/上门交接方式、设备序列号、联系人等)。
+func validateDeliverInfo(info DeliverInfo, pricingMode string) error {
+	if pricingMode == PricingPerpetual {
+		if strings.TrimSpace(info.CredentialNote) == "" {
+			return fmt.Errorf("买断订单请填写交割说明(交付方式、设备序列号、联系人等)")
+		}
+		return nil
+	}
+	if strings.TrimSpace(info.IpAddress) == "" {
+		return fmt.Errorf("请填写实例 IP 地址")
+	}
+	return nil
+}
+
 // AccessCredential 返回给调用方的访问凭证视图。Value 是否脱敏由调用入口决定。
 type AccessCredential struct {
 	AccessKey   string     `json:"access_key"`
@@ -1700,6 +1716,8 @@ type AccessCredential struct {
 	ExpiresAt   *time.Time `json:"access_expires_at"`
 	RevokedAt   *time.Time `json:"revoked_at"`
 	Masked      bool       `json:"masked"`
+	// Delivery 供给方回填的交付信息(实例地址/账号/密码/说明), 仅在 reveal(留审计)时解密下发。
+	Delivery *DeliverInfo `json:"delivery,omitempty"`
 }
 
 // GenerateAccessKey 生成访问凭证标识: "ak-" + 32 位随机 hex。使用 crypto/rand。
@@ -1787,6 +1805,15 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 	if o.Status != "paid" && o.Status != "provisioning" {
 		return nil, fmt.Errorf("invalid status transition")
 	}
+	if !skipOwnerCheck {
+		mode, err := OrderPricingMode(o)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateDeliverInfo(info, mode); err != nil {
+			return nil, err
+		}
+	}
 
 	infoJSON, err := json.Marshal(info)
 	if err != nil {
@@ -1847,9 +1874,11 @@ func (s *Service) DeliverWithAccess(supplierID int64, orderNo string, info Deliv
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	s.notify(o.BuyerID, "订单已交付",
-		fmt.Sprintf("您的订单 %s 已交付并生成访问凭证, 请前往订单详情确认签收。", orderNo),
-		"/console/buyer/orders/"+orderNo)
+	deliveredMsg := fmt.Sprintf("您的订单 %s 已交付并生成访问凭证, 请前往订单详情确认签收。", orderNo)
+	if pricingMode == PricingPerpetual {
+		deliveredMsg = fmt.Sprintf("您的买断订单 %s 供给方已提交交割信息, 请前往订单详情查看并在收到设备后确认验收。", orderNo)
+	}
+	s.notify(o.BuyerID, "订单已交付", deliveredMsg, "/console/buyer/orders/"+orderNo)
 
 	// 回给供给方的也是脱敏值: 明文只在买家 reveal 时下发并留审计。
 	return &AccessCredential{
@@ -2025,9 +2054,23 @@ func (s *Service) RevealAccessCredential(userID int64, orderNo, ip string) (*Acc
 		return nil, fmt.Errorf("审计日志写入失败，已阻止凭证明文下发: %w", err)
 	}
 
+	// 供给方回填的交付信息此前只加密入库、从未下发, 买家拿不到实例地址与登录信息; 随 reveal 一并解密(同一条审计)。
+	var delivery *DeliverInfo
+	if d.CredentialEncrypted != "" {
+		raw, err := crypto.Decrypt(d.CredentialEncrypted, s.credentialKey)
+		if err != nil {
+			return nil, err
+		}
+		var info DeliverInfo
+		if err := json.Unmarshal([]byte(raw), &info); err != nil {
+			return nil, fmt.Errorf("交付信息解析失败: %w", err)
+		}
+		delivery = &info
+	}
+
 	return &AccessCredential{
 		AccessKey: d.AccessKey, AccessValue: plain, Status: d.AccessStatus,
-		ExpiresAt: d.AccessExpiresAt, RevokedAt: d.RevokedAt, Masked: false,
+		ExpiresAt: d.AccessExpiresAt, RevokedAt: d.RevokedAt, Masked: false, Delivery: delivery,
 	}, nil
 }
 
