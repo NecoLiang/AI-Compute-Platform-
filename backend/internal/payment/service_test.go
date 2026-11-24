@@ -131,6 +131,15 @@ func TestAggSceneRequiredForWechatAndAlipay(t *testing.T) {
 	assert.JSONEq(t, `{"scene":{"ALIPAY":"LARGE"}}`, client.aggParam("alipay"))
 }
 
+// 收银台回跳必须落在前端免登录落地页, 不能直接指向需要登录的订单页(跨站回跳不带登录 Cookie)。
+func TestReturnURLLandsOnLoginFreePage(t *testing.T) {
+	_, key := testRSAKey(t)
+	client, err := NewYeepayClient(YeepayConfig{AppKey: "app_1", ParentMerchantNo: "100", MerchantNo: "100", PrivateKey: key,
+		NotifyBaseURL: "https://www.omnisline.com/api/v1", ReturnBaseURL: "https://omnisline.com/", PayChannels: "bank"})
+	assert.NoError(t, err)
+	assert.Equal(t, "https://omnisline.com/api/payment/return/ORD1", client.ReturnURL("ORD1"))
+}
+
 func TestGoodsName(t *testing.T) {
 	assert.Equal(t, "算力租赁 H100 x8卡", goodsName("H100", 8, 0))
 	assert.Equal(t, "算力租赁 昇腾910B x1台", goodsName("昇腾910B", 0, 1), "买断商品没有卡数")
