@@ -719,3 +719,19 @@ func TestBuyerOrderDetailRules(t *testing.T) {
 	assert.False(t, validOrderNo("42"))
 	assert.False(t, validOrderNo("ORD"+strings.Repeat("a", 30)))
 }
+
+// 租赁交付机器必须有实例地址; 买断交付设备, 必须有交割说明而不是登录信息。
+func TestValidateDeliverInfoByOrderType(t *testing.T) {
+	if err := validateDeliverInfo(DeliverInfo{IpAddress: "192.0.2.10"}, PricingHourly); err != nil {
+		t.Fatalf("rental with instance address must pass: %v", err)
+	}
+	if err := validateDeliverInfo(DeliverInfo{CredentialNote: "顺丰到付"}, PricingHourly); err == nil {
+		t.Fatal("rental without instance address must be rejected")
+	}
+	if err := validateDeliverInfo(DeliverInfo{CredentialNote: "上门交接, SN 123"}, PricingPerpetual); err != nil {
+		t.Fatalf("outright with handover note must pass: %v", err)
+	}
+	if err := validateDeliverInfo(DeliverInfo{IpAddress: "192.0.2.10", Password: "x"}, PricingPerpetual); err == nil {
+		t.Fatal("outright without handover note must be rejected")
+	}
+}
