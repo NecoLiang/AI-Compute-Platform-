@@ -247,8 +247,11 @@ func (g *testPaymentGateway) Refund(o payment.RefundOrder) (*payment.RefundResul
 func (g *testPaymentGateway) QueryRefund(no, requestID string) (*payment.RefundResult, error) {
 	return &payment.RefundResult{OrderNo: no, RequestID: requestID, Status: "PROCESSING"}, nil
 }
-func (g *testPaymentGateway) NetInURL(requestNo string) (string, error) {
-	return "https://netin.example.test/" + requestNo, nil
+func (g *testPaymentGateway) UploadQualification(name string, _ []byte) (string, error) {
+	return "https://yos.example.test/" + name, nil
+}
+func (g *testPaymentGateway) RegisterShareMerchant(a payment.ShareMerchantApplication) (*payment.NetInResult, error) {
+	return &payment.NetInResult{RequestNo: a.RequestNo, ApplicationStatus: "REVIEWING"}, nil
 }
 func (g *testPaymentGateway) QueryNetIn(requestNo string) (*payment.NetInResult, error) {
 	return &payment.NetInResult{RequestNo: requestNo, ApplicationStatus: "REVIEWING"}, nil
@@ -847,4 +850,68 @@ func TestTradeRejectedProductCanBeCorrectedAndReviewedAgain(t *testing.T) {
 	tradeRequest(t, admin, "POST", path+"/approve", nil, 0)
 	tradeRequest(t, supplier, "PUT", editPath, input, 40900)
 	tradeRequest(t, admin, "POST", path+"/reject", map[string]string{"reason": "stale review"}, 40900)
+}
+
+// 供给方进件(分账接收方): 提交 → 审核中不可重复提交 → 易宝驳回后可重提且沿用请求号 → 完成后可分账。
+func TestSupplierOnboardApplyLifecycle(t *testing.T) {
+	db := setupTradeDB(t)
+	seedTradeUsers(db)
+	gateway := &testPaymentGateway{}
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	svc := payment.NewService(payment.NewRepository(db), db, gateway)
+	payment.NewHandler(svc).RegisterSupplierRoutes(r.Group("/api/v1", userID(101)))
+	form := map[string]any{"sign_name": "北京测试科技有限公司", "short_name": "测试科技", "licence_no": "91110000MA00000000",
+		"licence_url": "u-lic", "legal_name": "张三", "legal_licence_no": "11010119900101123X", "legal_front_url": "u-f", "legal_back_url": "u-b",
+		"contact_name": "李四", "contact_mobile": "13800000000", "contact_email": "a@b.cn", "province": "110000", "city": "110100",
+		"district": "110105", "address": "某某路 1 号院", "bank_card_no": "1234567890123", "cnaps_code": "102100099996"}
+
+	before := tradeRequest(t, r, "GET", "/api/v1/payment/supplier/onboard/status", nil, 0).Data.(map[string]any)
+	if before["status"] != "not_started" || before["prefill"].(map[string]any)["sign_name"] != "Test supplier" {
+		t.Fatalf("未开通时应预填平台已登记的企业信息: %v", before)
+	}
+	bad := map[string]any{}
+	for k, v := range form {
+		bad[k] = v
+	}
+	bad["licence_no"] = "123"
+	tradeRequest(t, r, "POST", "/api/v1/payment/supplier/onboard", bad, 40001)
+	var rows int
+	if err := db.Get(&rows, "SELECT COUNT(*) FROM yeepay_merchants"); err != nil || rows != 0 {
+		t.Fatalf("校验失败不应落库: %d %v", rows, err)
+	}
+
+	applied := tradeRequest(t, r, "POST", "/api/v1/payment/supplier/onboard", form, 0).Data.(map[string]any)
+	if applied["status"] != "pending" || applied["application_status"] != "REVIEWING" {
+		t.Fatalf("提交后应为审核中: %v", applied)
+	}
+	var requestNo string
+	if err := db.Get(&requestNo, "SELECT request_no FROM yeepay_merchants WHERE user_id=101"); err != nil {
+		t.Fatal(err)
+	}
+	tradeRequest(t, r, "POST", "/api/v1/payment/supplier/onboard", form, 40900)
+
+	// 易宝驳回(通知): 供给方可修改后重提, 请求号不变。
+	notify := func(status, extra string) {
+		t.Helper()
+		if err := svc.HandleNotify(payment.NotifyNetIn, `signed:{"requestNo":"`+requestNo+`","applicationStatus":"`+status+`"`+extra+`}`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notify("REVIEW_BACK", `,"auditOpinion":"营业执照不清晰"`)
+	db.MustExec("UPDATE yeepay_merchants SET application_status='REVIEW_BACK' WHERE user_id=101") // 测试网关的进度查询恒返回 REVIEWING
+	tradeRequest(t, r, "POST", "/api/v1/payment/supplier/onboard", form, 0)
+	var again string
+	if err := db.Get(&again, "SELECT request_no FROM yeepay_merchants WHERE user_id=101"); err != nil || again != requestNo {
+		t.Fatalf("驳回后重提应沿用请求号: %q → %q (%v)", requestNo, again, err)
+	}
+
+	notify("COMPLETED", `,"merchantNo":"10090001234"`)
+	done := tradeRequest(t, r, "GET", "/api/v1/payment/supplier/onboard/status", nil, 0).Data.(map[string]any)
+	if done["status"] != "completed" || done["merchant_no"] != "10090001234" {
+		t.Fatalf("入网完成后应返回商编: %v", done)
+	}
+	if again := tradeRequest(t, r, "POST", "/api/v1/payment/supplier/onboard", form, 0).Data.(map[string]any); again["status"] != "completed" {
+		t.Fatalf("已开通再提交应直接返回已开通: %v", again)
+	}
 }

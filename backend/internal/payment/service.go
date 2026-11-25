@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,7 +41,8 @@ type Gateway interface {
 	QueryDivide(orderNo, requestID string) (*DivideResult, error)
 	Refund(RefundOrder) (*RefundResult, error)
 	QueryRefund(orderNo, requestID string) (*RefundResult, error)
-	NetInURL(requestNo string) (string, error)
+	UploadQualification(filename string, data []byte) (string, error)
+	RegisterShareMerchant(ShareMerchantApplication) (*NetInResult, error)
 	QueryNetIn(requestNo string) (*NetInResult, error)
 	DecryptNotify(raw string) ([]byte, error)
 }
@@ -958,11 +961,18 @@ func (s *Service) Reconcile(date string) (*ReconcileResult, error) {
 // ===== 供给方易宝商编(入网) =====
 
 type OnboardStatus struct {
-	Status            string  `json:"status"` // not_started / pending / completed
+	Status            string  `json:"status"` // not_started / pending / rejected / completed
 	ApplicationStatus string  `json:"application_status"`
 	MerchantNo        *string `json:"merchant_no"`
 	AuditOpinion      string  `json:"audit_opinion"`
-	NetInURL          string  `json:"netin_url,omitempty"`
+	// Prefill 平台已审核的企业资料, 供进件表单预填(仅未开通时下发)。
+	Prefill *OnboardPrefill `json:"prefill,omitempty"`
+}
+
+type OnboardPrefill struct {
+	SignName  string `db:"sign_name" json:"sign_name"`
+	LicenceNo string `db:"licence_no" json:"licence_no"`
+	LegalName string `db:"legal_name" json:"legal_name"`
 }
 
 func onboardView(m *Merchant) *OnboardStatus {
@@ -970,48 +980,195 @@ func onboardView(m *Merchant) *OnboardStatus {
 		return &OnboardStatus{Status: "not_started"}
 	}
 	view := &OnboardStatus{Status: "pending", ApplicationStatus: m.ApplicationStatus, MerchantNo: m.MerchantNo, AuditOpinion: m.AuditOpinion}
-	if m.ApplicationStatus == "COMPLETED" {
+	switch m.ApplicationStatus {
+	case "COMPLETED":
 		view.Status = "completed"
-	} else if m.NetInURL != nil {
-		view.NetInURL = *m.NetInURL
+	case "REVIEW_BACK":
+		view.Status = "rejected"
+	case "INIT":
+		// 已生成请求号但进件尚未被易宝受理(提交失败或未提交)。
+		view.Status = "not_started"
 	}
 	return view
 }
 
-// T-026: StartOnboard 获取(或复用)供给方 H5 入网链接, 供给方在易宝页面自助完成资料、签约与开户。
-func (s *Service) StartOnboard(userID int64) (*OnboardStatus, error) {
+// OnboardApplication 供给方在平台填写的进件资料(企业 → 易宝分账接收方)。*_url 来自 UploadOnboardFile。
+type OnboardApplication struct {
+	SignName              string `json:"sign_name"`
+	ShortName             string `json:"short_name"`
+	LicenceNo             string `json:"licence_no"`
+	LicenceURL            string `json:"licence_url"`
+	OpenAccountLicenceURL string `json:"open_account_licence_url"`
+	LegalName             string `json:"legal_name"`
+	LegalLicenceNo        string `json:"legal_licence_no"`
+	LegalFrontURL         string `json:"legal_front_url"`
+	LegalBackURL          string `json:"legal_back_url"`
+	ContactName           string `json:"contact_name"`
+	ContactMobile         string `json:"contact_mobile"`
+	ContactEmail          string `json:"contact_email"`
+	Province              string `json:"province"`
+	City                  string `json:"city"`
+	District              string `json:"district"`
+	Address               string `json:"address"`
+	BankCardNo            string `json:"bank_card_no"`
+	CnapsCode             string `json:"cnaps_code"`
+	ShareCertificateURL   string `json:"share_certificate_url"`
+}
+
+var (
+	onboardUSCC    = regexp.MustCompile(`^[0-9A-Z]{18}$`)
+	onboardIDCard  = regexp.MustCompile(`^[0-9]{17}[0-9X]$`)
+	onboardMobile  = regexp.MustCompile(`^1[0-9]{10}$`)
+	onboardEmail   = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+	onboardRegion  = regexp.MustCompile(`^[0-9]{2,12}$`)
+	onboardAccount = regexp.MustCompile(`^[0-9]{8,32}$`)
+	onboardCnaps   = regexp.MustCompile(`^[0-9]{12}$`)
+)
+
+// normalize 去首尾空白并校验; 返回第一条面向供给方的错误。
+func (a *OnboardApplication) normalize() error {
+	fields := []*string{&a.SignName, &a.ShortName, &a.LicenceNo, &a.LicenceURL, &a.OpenAccountLicenceURL, &a.LegalName,
+		&a.LegalLicenceNo, &a.LegalFrontURL, &a.LegalBackURL, &a.ContactName, &a.ContactMobile, &a.ContactEmail,
+		&a.Province, &a.City, &a.District, &a.Address, &a.BankCardNo, &a.CnapsCode, &a.ShareCertificateURL}
+	for _, f := range fields {
+		*f = strings.TrimSpace(*f)
+	}
+	a.LicenceNo, a.LegalLicenceNo = strings.ToUpper(a.LicenceNo), strings.ToUpper(a.LegalLicenceNo)
+	runes := func(s string) int { return len([]rune(s)) }
+	fileOK := func(u string) bool { return u != "" && len(u) <= 256 && !strings.ContainsAny(u, " \t\r\n") }
+	switch {
+	case runes(a.SignName) < 2 || runes(a.SignName) > 128:
+		return fmt.Errorf("请填写与营业执照一致的企业全称")
+	case runes(a.ShortName) < 2 || runes(a.ShortName) > 20 || strings.Trim(a.ShortName, "0123456789") == "":
+		return fmt.Errorf("企业简称为 2-20 个字, 不能是纯数字")
+	case !onboardUSCC.MatchString(a.LicenceNo):
+		return fmt.Errorf("统一社会信用代码应为 18 位")
+	case runes(a.LegalName) < 2 || runes(a.LegalName) > 64:
+		return fmt.Errorf("请填写法定代表人姓名")
+	case !onboardIDCard.MatchString(a.LegalLicenceNo):
+		return fmt.Errorf("法定代表人身份证号应为 18 位")
+	case runes(a.ContactName) < 2 || strings.Trim(a.ContactName, "0123456789") == "":
+		return fmt.Errorf("请填写联系人真实姓名")
+	case !onboardMobile.MatchString(a.ContactMobile):
+		return fmt.Errorf("联系人手机号格式不正确")
+	case len(a.ContactEmail) > 128 || !onboardEmail.MatchString(a.ContactEmail):
+		return fmt.Errorf("联系人邮箱格式不正确")
+	case !onboardRegion.MatchString(a.Province) || !onboardRegion.MatchString(a.City) || !onboardRegion.MatchString(a.District):
+		return fmt.Errorf("请选择经营地址所在省市区")
+	case runes(a.Address) < 5 || runes(a.Address) > 200:
+		return fmt.Errorf("经营详细地址为 5-200 个字(不含省市区)")
+	case !onboardAccount.MatchString(a.BankCardNo):
+		return fmt.Errorf("对公结算账号格式不正确")
+	case !onboardCnaps.MatchString(a.CnapsCode):
+		return fmt.Errorf("开户行联行号应为 12 位数字")
+	case !fileOK(a.LicenceURL):
+		return fmt.Errorf("请上传营业执照")
+	case !fileOK(a.LegalFrontURL) || !fileOK(a.LegalBackURL):
+		return fmt.Errorf("请上传法定代表人身份证正反面")
+	case a.OpenAccountLicenceURL != "" && !fileOK(a.OpenAccountLicenceURL), a.ShareCertificateURL != "" && !fileOK(a.ShareCertificateURL):
+		return fmt.Errorf("上传文件地址无效, 请重新上传")
+	}
+	return nil
+}
+
+const onboardMaxFileBytes = 6 << 20
+
+// ErrOnboardInProgress 进件已受理, 审核中不能重复提交。
+var ErrOnboardInProgress = errors.New("收款账户开通申请正在审核中, 请等待结果")
+
+// UploadOnboardFile 把供给方上传的资质文件转存到易宝, 返回易宝存储地址。只接受图片与 PDF, 不落平台磁盘。
+func (s *Service) UploadOnboardFile(filename string, data []byte) (string, error) {
+	if len(data) == 0 || len(data) > onboardMaxFileBytes {
+		return "", fmt.Errorf("文件大小须在 6MB 以内")
+	}
+	ext := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "application/pdf": ".pdf"}[http.DetectContentType(data)]
+	if ext == "" {
+		return "", fmt.Errorf("仅支持 JPG、PNG 图片或 PDF 文件")
+	}
+	_ = filename // 不信任客户端文件名: 易宝侧只需要扩展名
+	return s.yeepay.UploadQualification("qualification"+ext, data)
+}
+
+// T-026: ApplyOnboard 供给方提交企业资料, 平台代为向易宝进件为分账接收方。
+// 请求号先落库再请求易宝: 结果不明时重试沿用同一请求号(易宝幂等); 驳回后重提也沿用, 商编不变。
+func (s *Service) ApplyOnboard(userID int64, app OnboardApplication) (*OnboardStatus, error) {
+	if !s.yeepay.Configured() {
+		return nil, ErrYeepayNotConfigured
+	}
+	if err := app.normalize(); err != nil {
+		return nil, err
+	}
 	m, err := s.repo.GetMerchant(userID)
 	if err != nil {
 		return nil, err
 	}
-	if m != nil && m.ApplicationStatus == "COMPLETED" {
-		return onboardView(m), nil
-	}
-	requestNo := "NI" + strconv.FormatInt(userID, 10) + "-" + strconv.FormatInt(time.Now().Unix(), 36)
+	requestNo := "NI" + strconv.FormatInt(userID, 10) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	if m != nil {
-		requestNo = m.RequestNo
+		switch {
+		case m.ApplicationStatus == "COMPLETED":
+			return onboardView(m), nil
+		case m.ApplicationStatus != "INIT" && m.ApplicationStatus != "REVIEW_BACK":
+			return nil, ErrOnboardInProgress
+		case strings.HasPrefix(m.RequestNo, "NI"):
+			requestNo = m.RequestNo
+		}
 	}
-	link, err := s.yeepay.NetInURL(requestNo)
+	if _, err := s.db.Exec(`INSERT INTO yeepay_merchants (user_id,request_no,application_status) VALUES (?,?,'INIT')
+		ON DUPLICATE KEY UPDATE request_no=VALUES(request_no)`, userID, requestNo); err != nil {
+		return nil, err
+	}
+	result, err := s.yeepay.RegisterShareMerchant(ShareMerchantApplication{
+		RequestNo: requestNo, SignName: app.SignName, ShortName: app.ShortName, LicenceNo: app.LicenceNo, LicenceURL: app.LicenceURL,
+		OpenAccountLicenceURL: app.OpenAccountLicenceURL, LegalName: app.LegalName, LegalLicenceNo: app.LegalLicenceNo,
+		LegalFrontURL: app.LegalFrontURL, LegalBackURL: app.LegalBackURL, ContactName: app.ContactName,
+		ContactMobile: app.ContactMobile, ContactEmail: app.ContactEmail, Province: app.Province, City: app.City,
+		District: app.District, Address: app.Address, BankCardNo: app.BankCardNo, CnapsCode: app.CnapsCode,
+		ShareCertificate: app.ShareCertificateURL,
+	})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.db.Exec(`INSERT INTO yeepay_merchants (user_id,request_no,netin_url) VALUES (?,?,?)
-		ON DUPLICATE KEY UPDATE netin_url=VALUES(netin_url)`, userID, requestNo, link); err != nil {
+	status := result.ApplicationStatus
+	if status == "" {
+		status = "REVIEWING"
+	}
+	if _, err := s.db.Exec(`UPDATE yeepay_merchants SET application_status=?,audit_opinion='' WHERE user_id=? AND request_no=? AND application_status<>'COMPLETED'`,
+		status, userID, requestNo); err != nil {
 		return nil, err
 	}
-	m, err = s.repo.GetMerchant(userID)
-	if err != nil {
+	if status == "COMPLETED" {
+		result.RequestNo = requestNo
+		if err := s.applyNetIn(result); err != nil {
+			return nil, err
+		}
+	}
+	if m, err = s.repo.GetMerchant(userID); err != nil {
 		return nil, err
 	}
 	return onboardView(m), nil
 }
 
+// onboardPrefill 平台入驻审核时登记的企业名称/信用代码/法人, 用于进件表单预填。
+func (s *Service) onboardPrefill(userID int64) *OnboardPrefill {
+	var p OnboardPrefill
+	if err := s.db.Get(&p, `SELECT name AS sign_name, uscc AS licence_no, COALESCE(legal_person,'') AS legal_name
+		FROM enterprises WHERE user_id=?`, userID); err != nil {
+		return nil
+	}
+	return &p
+}
+
 func (s *Service) GetOnboardStatus(userID int64) (*OnboardStatus, error) {
 	m, err := s.repo.GetMerchant(userID)
-	if err != nil || m == nil {
-		return onboardView(m), err
+	if err != nil {
+		return nil, err
 	}
-	if m.ApplicationStatus != "COMPLETED" && m.BoundBy == nil && s.yeepay.Configured() {
+	if m == nil {
+		view := onboardView(nil)
+		view.Prefill = s.onboardPrefill(userID)
+		return view, nil
+	}
+	if m.ApplicationStatus != "COMPLETED" && m.ApplicationStatus != "INIT" && m.BoundBy == nil && s.yeepay.Configured() {
 		if result, err := s.yeepay.QueryNetIn(m.RequestNo); err == nil {
 			result.RequestNo = m.RequestNo
 			if err := s.applyNetIn(result); err != nil {
@@ -1024,7 +1181,11 @@ func (s *Service) GetOnboardStatus(userID int64) (*OnboardStatus, error) {
 			slog.Warn("易宝入网进度查询失败", "user_id", userID, "error", err)
 		}
 	}
-	return onboardView(m), nil
+	view := onboardView(m)
+	if view.Status == "not_started" || view.Status == "rejected" {
+		view.Prefill = s.onboardPrefill(userID)
+	}
+	return view, nil
 }
 
 func (s *Service) applyNetIn(r *NetInResult) error {

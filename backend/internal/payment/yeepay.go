@@ -31,6 +31,11 @@ type YeepayConfig struct {
 	PayChannels       string // 向买家开放的支付方式, 逗号分隔; 留空为全部(须与易宝已开通产品一致)
 	WechatScene       string // 微信报备费率场景(聚合支付必填), 须与易宝开通微信产品时报备的一致, 如 XIANSHANG / XIANXIA
 	AlipayScene       string // 支付宝报备费率场景, 如 XIANXIA / LARGE
+	// 供给方进件(分账接收方)开通的结算产品与手续费: 留空为 D1(自然日次日自动结算到卡)、单笔 0 元。
+	NetInSettleProduct string
+	NetInSettleFee     string // 单笔固定手续费(元), 如 "0"
+	// NetInShareScene 分账场景编码(如 FZ_FJ001 供应商货款); 留空则进件不带分账场景信息。
+	NetInShareScene string
 }
 
 type YeepayClient struct {
@@ -251,7 +256,7 @@ type RefundResult struct {
 
 type NetInResult struct {
 	RequestNo         string
-	ApplicationStatus string // WAIT_SIGN/REVIEWING/REVIEW_BACK/AUTHENTICITY_VERIFYING/AGREEMENT_SIGNING/BUSINESS_OPENING/COMPLETED
+	ApplicationStatus string // REVIEWING/REVIEW_BACK/AUTHENTICITY_VERIFYING/AGREEMENT_SIGNING/BUSINESS_OPENING/COMPLETED
 	MerchantNo        string
 	AuditOpinion      string
 	NetInURL          string
@@ -492,40 +497,148 @@ func (r refundResponse) result(op string) (*RefundResult, error) {
 	return &RefundResult{OrderNo: r.OrderID, RequestID: r.RefundRequest, UniqueRefundNo: r.UniqueRefundNo, Status: r.Status, Amount: int64(r.RefundAmount), FailReason: r.FailReason}, nil
 }
 
-// NetInURL 获取供给方 H5 入网(开通易宝商编)链接; requestNo 幂等。
-func (y *YeepayClient) NetInURL(requestNo string) (string, error) {
+// ShareMerchantApplication 供给方(企业)进件为分账接收方所需资料。各 *URL 为先经 UploadQualification 取得的易宝存储地址。
+type ShareMerchantApplication struct {
+	RequestNo string
+
+	SignName              string // 企业全称(与营业执照一致)
+	ShortName             string // 简称
+	LicenceNo             string // 统一社会信用代码
+	LicenceURL            string // 营业执照照片
+	OpenAccountLicenceURL string // 开户许可证/基本存款账户信息(建议)
+
+	LegalName        string
+	LegalLicenceNo   string // 法人身份证号
+	LegalFrontURL    string // 身份证人像面
+	LegalBackURL     string // 身份证国徽面
+	ContactName      string
+	ContactMobile    string
+	ContactEmail     string
+	Province         string // 易宝省市区编码
+	City             string
+	District         string
+	Address          string
+	BankCardNo       string // 对公账户
+	CnapsCode        string // 开户行联行号
+	ShareCertificate string // 分账证明(如供应商合作协议), 配了分账场景时随附
+}
+
+// UploadQualification 上传一份进件资质文件, 返回易宝存储地址(仅可作为其他易宝接口的入参)。
+func (y *YeepayClient) UploadQualification(filename string, data []byte) (string, error) {
 	if !y.Configured() {
 		return "", ErrYeepayNotConfigured
 	}
 	var out struct {
-		Code     string `json:"code"`
-		Msg      string `json:"msg"`
-		NetInURL string `json:"netInUrl"`
+		ReturnCode string `json:"returnCode"`
+		ReturnMsg  string `json:"returnMsg"`
+		MerQualURL string `json:"merQualUrl"`
 	}
-	err := y.yop.postJSON("/rest/v1.0/mer/netin/h5/index", map[string]string{
-		"requestNo": requestNo, "notifyUrl": y.NotifyURL("netin"), "parentMerchantNo": y.cfg.ParentMerchantNo,
-	}, &out)
-	if err != nil {
+	if err := y.yop.upload("/yos/v1.0/sys/merchant/qual/upload", "merQual", filename, data, &out); err != nil {
 		return "", err
 	}
-	if out.Code != "MAS000000" {
-		return "", &YeepayBizError{Op: "获取入网链接", Code: out.Code, Message: out.Msg}
+	if out.ReturnCode != "REG00000" || out.MerQualURL == "" {
+		return "", &YeepayBizError{Op: "上传资质文件", Code: out.ReturnCode, Message: out.ReturnMsg}
 	}
-	return out.NetInURL, nil
+	return out.MerQualURL, nil
 }
 
+// RegisterShareMerchant 平台商为企业供给方进件为分账接收方(SHARE_MERCHANT): 只开结算产品, 接收分账后自动结算到对公账户。
+// requestNo 幂等; 申请被驳回(REVIEW_BACK)后用同一 requestNo 重提, 商编不变。
+func (y *YeepayClient) RegisterShareMerchant(a ShareMerchantApplication) (*NetInResult, error) {
+	if !y.Configured() {
+		return nil, ErrYeepayNotConfigured
+	}
+	marshal := func(v any) string {
+		raw, _ := json.Marshal(v)
+		return string(raw)
+	}
+	subject := map[string]string{
+		"signType": "ENTERPRISE", "licenceNo": a.LicenceNo, "licenceUrl": a.LicenceURL,
+		"signName": a.SignName, "shortName": a.ShortName,
+	}
+	if a.OpenAccountLicenceURL != "" {
+		subject["openAccountLicenceUrl"] = a.OpenAccountLicenceURL
+	}
+	product, fee := y.cfg.NetInSettleProduct, y.cfg.NetInSettleFee
+	if product == "" {
+		product = "D1"
+	}
+	if fee == "" {
+		fee = "0"
+	}
+	params := map[string]string{
+		"requestNo":           a.RequestNo,
+		"businessRole":        "SHARE_MERCHANT",
+		"parentMerchantNo":    y.cfg.ParentMerchantNo,
+		"merchantSubjectInfo": marshal(subject),
+		"merchantCorporationInfo": marshal(map[string]string{
+			"legalName": a.LegalName, "legalLicenceType": "ID_CARD", "legalLicenceNo": a.LegalLicenceNo,
+			"legalLicenceFrontUrl": a.LegalFrontURL, "legalLicenceBackUrl": a.LegalBackURL,
+		}),
+		"merchantContactInfo": marshal(map[string]string{
+			"contactName": a.ContactName, "contactMobile": a.ContactMobile, "contactEmail": a.ContactEmail,
+		}),
+		"businessAddressInfo": marshal(map[string]string{
+			"province": a.Province, "city": a.City, "district": a.District, "address": a.Address,
+		}),
+		"settlementAccountInfo": marshal(map[string]string{
+			"settlementDirection": "BANKCARD", "bankAccountType": "ENTERPRISE_ACCOUNT",
+			"bankCardNo": a.BankCardNo, "cnapsCode": a.CnapsCode,
+		}),
+		"productInfo": marshal([]map[string]string{{"productCode": product, "rateType": "SINGLE_FIXED", "fixedRate": fee}}),
+		"notifyUrl":   y.NotifyURL("netin"),
+	}
+	if scene := strings.TrimSpace(y.cfg.NetInShareScene); scene != "" {
+		qual := map[string]string{"shareScene": scene}
+		if a.ShareCertificate != "" {
+			qual["shareCertificate"] = a.ShareCertificate
+		}
+		params["functionServiceQualificationInfo"] = marshal(qual)
+	}
+	var out registerPayload
+	if err := y.yop.postForm("/rest/v2.0/mer/register/saas/merchant", params, &out); err != nil {
+		return nil, err
+	}
+	return out.result("进件")
+}
+
+// QueryNetIn 进件进度查询。
 func (y *YeepayClient) QueryNetIn(requestNo string) (*NetInResult, error) {
 	if !y.Configured() {
 		return nil, ErrYeepayNotConfigured
 	}
-	var out netInPayload
-	if err := y.yop.postJSON("/rest/v1.0/mer/netin/h5/query", map[string]string{"requestNo": requestNo}, &out); err != nil {
+	var out registerPayload
+	if err := y.yop.get("/rest/v2.0/mer/register/query", map[string]string{"requestNo": requestNo}, &out); err != nil {
 		return nil, err
 	}
-	if out.Code != "MAS000000" {
-		return nil, &YeepayBizError{Op: "入网进度查询", Code: out.Code, Message: out.Msg}
+	return out.result("入网进度查询")
+}
+
+type registerPayload struct {
+	ReturnCode        string `json:"returnCode"`
+	ReturnMsg         string `json:"returnMsg"`
+	RequestNo         string `json:"requestNo"`
+	ApplicationNo     string `json:"applicationNo"`
+	ApplicationStatus string `json:"applicationStatus"`
+	MerchantNo        string `json:"merchantNo"`
+	AuditOpinion      string `json:"auditOpinion"`
+	ElecSignURL       string `json:"elecSignUrl"`
+}
+
+func (p registerPayload) result(op string) (*NetInResult, error) {
+	if p.ReturnCode != "NIG00000" {
+		return nil, &YeepayBizError{Op: op, Code: p.ReturnCode, Message: p.ReturnMsg}
 	}
-	return out.result(), nil
+	return &NetInResult{RequestNo: p.RequestNo, ApplicationStatus: p.ApplicationStatus, MerchantNo: p.MerchantNo,
+		AuditOpinion: nullText(p.AuditOpinion), NetInURL: p.ElecSignURL}, nil
+}
+
+// nullText 易宝部分字段以字符串 "null" 表示空。
+func nullText(s string) string {
+	if strings.TrimSpace(s) == "null" {
+		return ""
+	}
+	return s
 }
 
 type netInPayload struct {
@@ -539,7 +652,7 @@ type netInPayload struct {
 }
 
 func (p netInPayload) result() *NetInResult {
-	return &NetInResult{RequestNo: p.RequestNo, ApplicationStatus: p.ApplicationStatus, MerchantNo: p.MerchantNo, AuditOpinion: p.AuditOpinion, NetInURL: p.NetInURL}
+	return &NetInResult{RequestNo: p.RequestNo, ApplicationStatus: p.ApplicationStatus, MerchantNo: p.MerchantNo, AuditOpinion: nullText(p.AuditOpinion), NetInURL: p.NetInURL}
 }
 
 // DecryptNotify 解密并验签异步通知; 未接入时一律拒绝。
