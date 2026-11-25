@@ -2,6 +2,7 @@ package payment
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -25,7 +26,8 @@ func (h *Handler) RegisterBuyerRoutes(r *gin.RouterGroup) {
 }
 
 func (h *Handler) RegisterSupplierRoutes(r *gin.RouterGroup) {
-	r.POST("/payment/supplier/onboard", h.StartOnboard)
+	r.POST("/payment/supplier/onboard", h.ApplyOnboard)
+	r.POST("/payment/supplier/onboard/upload", h.UploadOnboardFile)
 	r.GET("/payment/supplier/onboard/status", h.OnboardStatus)
 	r.GET("/payment/settlements", h.Settlements)
 	r.GET("/supplier/settlements", h.SupplierSettlements)
@@ -96,15 +98,58 @@ func (h *Handler) Notify(c *gin.Context) {
 	c.String(http.StatusOK, "SUCCESS")
 }
 
-func (h *Handler) StartOnboard(c *gin.Context) {
-	status, err := h.svc.StartOnboard(c.GetInt64("user_id"))
+// ApplyOnboard 供给方提交企业资料, 平台代向易宝进件为分账接收方。
+func (h *Handler) ApplyOnboard(c *gin.Context) {
+	var req OnboardApplication
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, errcode.ParamInvalid, "请完整填写开通资料")
+		return
+	}
+	userID := c.GetInt64("user_id")
+	status, err := h.svc.ApplyOnboard(userID, req)
 	if err != nil {
-		// 入网链接获取失败(易宝拒绝或网络错误)必须留痕: 否则供给方只看到一句提示, 无从与易宝核对。
-		slog.Warn("易宝入网链接获取失败", "user_id", c.GetInt64("user_id"), "error", err)
-		response.Error(c, paymentErrorCode(err), err.Error())
+		code := errcode.ParamInvalid
+		switch {
+		case errors.Is(err, ErrOnboardInProgress):
+			code = errcode.Conflict
+		case errors.Is(err, ErrYeepayNotConfigured):
+			code = errcode.InternalError
+		}
+		// 易宝拒绝或网络错误必须留痕(不记录申请资料本身): 否则无从与易宝核对。
+		if bizCode(err) != "" || code == errcode.InternalError {
+			slog.Warn("易宝进件失败", "user_id", userID, "error", err)
+		}
+		response.Error(c, code, err.Error())
 		return
 	}
 	response.Success(c, status)
+}
+
+// UploadOnboardFile 进件资质文件上传(multipart 字段 file), 转存易宝后返回其存储地址。
+func (h *Handler) UploadOnboardFile(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, onboardMaxFileBytes+(1<<20))
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, "请选择 6MB 以内的文件")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, onboardMaxFileBytes+1))
+	if err != nil {
+		response.Error(c, errcode.ParamInvalid, "文件读取失败")
+		return
+	}
+	url, err := h.svc.UploadOnboardFile(header.Filename, data)
+	if err != nil {
+		code := errcode.ParamInvalid
+		if bizCode(err) != "" || errors.Is(err, ErrYeepayNotConfigured) {
+			code = errcode.InternalError
+			slog.Warn("易宝资质文件上传失败", "user_id", c.GetInt64("user_id"), "error", err)
+		}
+		response.Error(c, code, err.Error())
+		return
+	}
+	response.Success(c, gin.H{"url": url})
 }
 
 func (h *Handler) OnboardStatus(c *gin.Context) {

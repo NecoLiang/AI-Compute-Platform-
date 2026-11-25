@@ -182,3 +182,18 @@ overflow = P − fromPlat                         // 平台费不够扣的部分
 
 取值须与易宝开通该产品时报备的费率一致。`yeepay.pay_channels` 明确列出 wechat/alipay 却未配置对应场景时服务启动失败；
 `pay_channels` 留空时，未配置场景的微信/支付宝不向买家开放。易宝业务拒绝下单时后端写一条 WARN 日志「易宝拒绝下单」，含原始返回码与文案。
+
+## 供给方收款账户开通：平台代进件为分账接收方（2026-11-25）
+
+原 H5 自助入网接口（`/rest/v1.0/mer/netin/h5/index`）平台商角色无权调用（MAS100001），改为平台代进件：
+
+| 接口 | 说明 |
+|---|---|
+| `POST /payment/supplier/onboard/upload` | multipart 字段 `file`（JPG/PNG/PDF，≤6MB），转存易宝 YOS，返回 `{url}`；平台不落盘 |
+| `POST /payment/supplier/onboard` | 提交企业资料（JSON，字段见 `payment.OnboardApplication`），平台调易宝 `/rest/v2.0/mer/register/saas/merchant`，`businessRole=SHARE_MERCHANT`、`signType=ENTERPRISE` |
+| `GET /payment/supplier/onboard/status` | `status`: not_started / pending / rejected / completed；未开通或被驳回时带 `prefill`（平台已登记的企业名称、信用代码、法人） |
+
+- 进度：易宝 `mer.register-result` 通知（`/payment/yeepay/notify/netin`）+ 查询 `/rest/v2.0/mer/register/query` 双通道；`COMPLETED` 后写入商编，才参与分账。
+- 请求号先落库再请求易宝；提交失败或被驳回（REVIEW_BACK）后重提沿用同一请求号。审核中重复提交返回 40900。
+- 配置：`yeepay.netin_settle_product`（默认 D1）、`yeepay.netin_settle_fee`（默认 0，单笔固定）、`yeepay.netin_share_scene`（如 FZ_FJ001；留空不带分账场景）。
+- 未经真实进件验证的假设：省市区编码按国标 6 位行政区划码上送；法人证件类型 `ID_CARD`；结算账户用联行号 `cnapsCode`；分账接收方进件带 `functionServiceQualificationInfo.shareScene`。易宝校验不过会返回 NIG00002 及具体原因，后端记 WARN「易宝进件失败」。

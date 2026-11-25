@@ -89,3 +89,8 @@ yeepay:
   # DC_SEPARATION/DIGITAL/REGISTRATION; 支付宝可选 XIANXIA/LARGE。环境变量 YEEPAY_WECHAT_SCENE / YEEPAY_ALIPAY_SCENE。
   wechat_scene: ""
   alipay_scene: ""
+  # 供给方进件(分账接收方 SHARE_MERCHANT): 开通的结算产品(D1 自然日次日 / T1 工作日次日, 留空 D1)、单笔结算手续费(元, 留空 0)、
+  # 分账场景编码(易宝分账场景清单, 如 FZ_FJ001 供应商货款; 留空则进件不带分账场景)。环境变量 YEEPAY_NETIN_*。
+  netin_settle_product: ""
+  netin_settle_fee: ""
+  netin_share_scene: ""

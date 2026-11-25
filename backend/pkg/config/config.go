@@ -26,17 +26,20 @@ type Config struct {
 // YeepayConfig 易宝支付(平台商收付款)接入。app_key/商编/私钥/回调地址要么全空(未接入:
 // 下单与通知一律显式拒绝), 要么全配; 私钥从环境变量 YEEPAY_PRIVATE_KEY 注入, 不进仓库。
 type YeepayConfig struct {
-	AppKey            string
-	ParentMerchantNo  string
-	MerchantNo        string
-	PrivateKey        string
-	PlatformPublicKey string
-	ServerRoot        string
-	NotifyBaseURL     string
-	ReturnBaseURL     string
-	PayChannels       string
-	WechatScene       string
-	AlipayScene       string
+	AppKey             string
+	ParentMerchantNo   string
+	MerchantNo         string
+	PrivateKey         string
+	PlatformPublicKey  string
+	ServerRoot         string
+	NotifyBaseURL      string
+	ReturnBaseURL      string
+	PayChannels        string
+	WechatScene        string
+	AlipayScene        string
+	NetInSettleProduct string
+	NetInSettleFee     string
+	NetInShareScene    string
 }
 
 type WeChatConfig struct {
@@ -163,17 +166,20 @@ func Load(path string) (*Config, error) {
 			TimeoutSeconds: v.GetInt("ai.timeout_seconds"),
 		},
 		Yeepay: YeepayConfig{
-			AppKey:            strings.TrimSpace(v.GetString("yeepay.app_key")),
-			ParentMerchantNo:  strings.TrimSpace(v.GetString("yeepay.parent_merchant_no")),
-			MerchantNo:        strings.TrimSpace(v.GetString("yeepay.merchant_no")),
-			PrivateKey:        strings.TrimSpace(v.GetString("yeepay.private_key")),
-			PlatformPublicKey: strings.TrimSpace(v.GetString("yeepay.platform_public_key")),
-			ServerRoot:        strings.TrimSpace(v.GetString("yeepay.server_root")),
-			NotifyBaseURL:     strings.TrimSpace(v.GetString("yeepay.notify_base_url")),
-			ReturnBaseURL:     strings.TrimSpace(v.GetString("yeepay.return_base_url")),
-			PayChannels:       strings.TrimSpace(v.GetString("yeepay.pay_channels")),
-			WechatScene:       strings.TrimSpace(v.GetString("yeepay.wechat_scene")),
-			AlipayScene:       strings.TrimSpace(v.GetString("yeepay.alipay_scene")),
+			AppKey:             strings.TrimSpace(v.GetString("yeepay.app_key")),
+			ParentMerchantNo:   strings.TrimSpace(v.GetString("yeepay.parent_merchant_no")),
+			MerchantNo:         strings.TrimSpace(v.GetString("yeepay.merchant_no")),
+			PrivateKey:         strings.TrimSpace(v.GetString("yeepay.private_key")),
+			PlatformPublicKey:  strings.TrimSpace(v.GetString("yeepay.platform_public_key")),
+			ServerRoot:         strings.TrimSpace(v.GetString("yeepay.server_root")),
+			NotifyBaseURL:      strings.TrimSpace(v.GetString("yeepay.notify_base_url")),
+			ReturnBaseURL:      strings.TrimSpace(v.GetString("yeepay.return_base_url")),
+			PayChannels:        strings.TrimSpace(v.GetString("yeepay.pay_channels")),
+			WechatScene:        strings.TrimSpace(v.GetString("yeepay.wechat_scene")),
+			AlipayScene:        strings.TrimSpace(v.GetString("yeepay.alipay_scene")),
+			NetInSettleProduct: strings.TrimSpace(v.GetString("yeepay.netin_settle_product")),
+			NetInSettleFee:     strings.TrimSpace(v.GetString("yeepay.netin_settle_fee")),
+			NetInShareScene:    strings.TrimSpace(v.GetString("yeepay.netin_share_scene")),
 		},
 		Blockchain: BlockchainConfig{
 			GatewayURL:  v.GetString("blockchain.gateway_url"),

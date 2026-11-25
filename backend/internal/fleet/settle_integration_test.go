@@ -74,8 +74,11 @@ func (f *fakeYeepay) QueryRefund(_, requestID string) (*payment.RefundResult, er
 	}
 	return &payment.RefundResult{UniqueRefundNo: "YR-" + requestID, Status: f.queryState, Amount: amount}, nil
 }
-func (f *fakeYeepay) NetInURL(string) (string, error) {
-	return "", errors.New("fakeYeepay: NetInURL not used")
+func (f *fakeYeepay) UploadQualification(string, []byte) (string, error) {
+	return "", errors.New("fakeYeepay: UploadQualification not used")
+}
+func (f *fakeYeepay) RegisterShareMerchant(payment.ShareMerchantApplication) (*payment.NetInResult, error) {
+	return nil, errors.New("fakeYeepay: RegisterShareMerchant not used")
 }
 func (f *fakeYeepay) QueryNetIn(string) (*payment.NetInResult, error) {
 	return nil, errors.New("fakeYeepay: QueryNetIn not used")

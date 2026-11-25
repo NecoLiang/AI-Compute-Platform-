@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -30,6 +31,8 @@ import (
 
 const (
 	yopDefaultServerRoot = "https://openapi.yeepay.com/yop-center"
+	// yopDefaultYOSRoot 文件上传(/yos/...)走独立域名(官方 SDK 的 YOS_SERVER_ROOT)。
+	yopDefaultYOSRoot = "https://yos.yeepay.com/yop-center"
 	// yopDefaultPlatformPublicKey 易宝平台 RSA2048 公钥(官方 SDK 内置值), 用于
 	// 响应验签与回调验签。易宝轮换公钥时通过 yeepay.platform_public_key 覆盖。
 	yopDefaultPlatformPublicKey = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6p0XWjscY+gsyqKRhw9MeLsEmhFdBRhT2emOck/F1Omw38ZWhJxh9kDfs5HzFJMrVozgU+SJFDONxs8UB0wMILKRmqfLcfClG9MyCNuJkkfm0HFQv1hRGdOvZPXj3Bckuwa7FrEXBRYUhK7vJ40afumspthmse6bs6mZxNn/mALZ2X07uznOrrc2rk41Y2HftduxZw6T4EmtWuN2x4CZ8gwSyPAW5ZzZJLQ6tZDojBK4GZTAGhnn3bg5bBsBlw2+FLkCQBuDsJVsFPiGh/b6K/+zGTvWyUcu+LUj2MejYQELDO3i2vQXVDk7lVi2/TcUYefvIcssnzsfCfjaorxsuwIDAQAB"
@@ -43,6 +46,7 @@ const (
 type yopClient struct {
 	appKey     string
 	serverRoot string
+	yosRoot    string
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
 	http       *http.Client
@@ -61,12 +65,15 @@ func newYOPClient(appKey, serverRoot, privateKey, platformPublicKey string) (*yo
 	if err != nil {
 		return nil, fmt.Errorf("yeepay.platform_public_key: %w", err)
 	}
+	// 自定义 server_root(测试/专线)时上传也走它; 默认走易宝文件域名。
+	yosRoot := strings.TrimRight(serverRoot, "/")
 	if serverRoot == "" {
-		serverRoot = yopDefaultServerRoot
+		serverRoot, yosRoot = yopDefaultServerRoot, yopDefaultYOSRoot
 	}
 	return &yopClient{
 		appKey:     appKey,
 		serverRoot: strings.TrimRight(serverRoot, "/"),
+		yosRoot:    yosRoot,
 		privateKey: priv,
 		publicKey:  pub,
 		http:       &http.Client{Timeout: 15 * time.Second},
@@ -104,11 +111,43 @@ func (c *yopClient) postJSON(path string, payload any, out any) error {
 	return c.do(http.MethodPost, path, nil, body, out)
 }
 
+// upload 以 multipart/form-data 上传单个文件到 YOS。签名与官方 SDK 一致: 文件不参与签名,
+// x-yop-content-sha256 取(空)表单参数规范串的摘要, 规范查询串为空。
+func (c *yopClient) upload(path, field, filename string, data []byte, out any) error {
+	signed, err := c.buildRequest(http.MethodPost, path, nil, nil)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile(field, filename)
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(data); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.yosRoot+path, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header = signed.Header.Clone()
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return c.send(req, out)
+}
+
 func (c *yopClient) do(method, path string, params map[string]string, jsonBody []byte, out any) error {
 	req, err := c.buildRequest(method, path, params, jsonBody)
 	if err != nil {
 		return err
 	}
+	return c.send(req, out)
+}
+
+func (c *yopClient) send(req *http.Request, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("易宝请求失败: %w", err)

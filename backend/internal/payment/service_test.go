@@ -47,7 +47,9 @@ func TestYeepayClient_UnconfiguredCapabilitiesReturnErrors(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrYeepayNotConfigured))
 	_, err = y.Refund(RefundOrder{OrderNo: "ORD1", RequestID: "R1", Amount: 1})
 	assert.True(t, errors.Is(err, ErrYeepayNotConfigured))
-	_, err = y.NetInURL("NI1")
+	_, err = y.RegisterShareMerchant(ShareMerchantApplication{RequestNo: "NI1"})
+	assert.True(t, errors.Is(err, ErrYeepayNotConfigured))
+	_, err = y.UploadQualification("a.png", []byte("x"))
 	assert.True(t, errors.Is(err, ErrYeepayNotConfigured))
 
 	svc := &Service{yeepay: y}
